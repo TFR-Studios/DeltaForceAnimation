@@ -292,42 +292,59 @@ function seqCurrentFrame(globalData: any): number {
   return v;
 }
 
-/* canvas 元素:绘制前切换图片;当前槽绘制,另一槽预载下一帧。
- * 导出模式(__seqUseExport)下只挂载导出专用图片,src 由 ensureSeqDecoded 驱动。 */
+/* canvas 元素:在 prepareFrame(每帧无条件调用)中切换图片,不依赖渲染器 _mdf;
+ * 当前槽绘制,另一槽预载下一帧。导出模式(__seqUseExport)只挂导出专用图片。 */
 function patchSeqCanvasElement(el: any) {
+  const origPrepare = el.prepareFrame ? el.prepareFrame.bind(el) : null;
+  if (origPrepare) {
+    el.prepareFrame = function (this: any, num: number) {
+      if (this.__seqUseExport) {
+        if (seqExportImg && this.img !== seqExportImg) this.img = seqExportImg;
+      } else {
+        const f = typeof num === 'number' && isFinite(num) ? num : seqCurrentFrame(this.globalData);
+        const url = seqFrameUrl(f);
+        if (url && seqImgA && seqImgB) {
+          const mySlot = el.__seqSlot === 1 ? seqImgB : seqImgA;
+          const other = mySlot === seqImgA ? seqImgB : seqImgA;
+          if (mySlot.src !== url) mySlot.src = url;
+          if (this.img !== mySlot) this.img = mySlot;
+          const nextUrl = seqFrameUrl(f + 1);
+          if (nextUrl && other.src !== nextUrl) other.src = nextUrl;
+          el.__seqSlot = el.__seqSlot === 1 ? 0 : 1;
+          mySlot.onload = () => {
+            const anim = (window as any).__anim;
+            if (anim && anim.isLoaded && anim.renderer) {
+              try { (anim.renderer as any).renderFrame(anim.currentFrame, true); } catch { /* ignore */ }
+            }
+          };
+        }
+      }
+      return origPrepare(num);
+    };
+  }
+  // 兜底:绘制前再次确保图片正确(覆盖 prepareFrame 不可用的路径)
   const orig = el.renderInnerContent.bind(el);
   el.renderInnerContent = function (this: any) {
-    const f = seqCurrentFrame(this.globalData);
-    const url = seqFrameUrl(f);
     if (this.__seqUseExport) {
       if (seqExportImg && this.img !== seqExportImg) this.img = seqExportImg;
       return orig();
     }
+    const f = seqCurrentFrame(this.globalData);
+    const url = seqFrameUrl(f);
     if (url && seqImgA && seqImgB) {
       const mySlot = el.__seqSlot === 1 ? seqImgB : seqImgA;
-      const other = mySlot === seqImgA ? seqImgB : seqImgA;
       if (mySlot.src !== url) mySlot.src = url;
       if (this.img !== mySlot) this.img = mySlot;
-      const nextUrl = seqFrameUrl(f + 1);
-      if (nextUrl && other.src !== nextUrl) other.src = nextUrl;
-      el.__seqSlot = el.__seqSlot === 1 ? 0 : 1;
-      // 解码完成且当前仍需要该帧时,强制重绘当前帧(跳帧/拖动时间轴时)
-      mySlot.onload = () => {
-        const anim = (window as any).__anim;
-        if (anim && anim.isLoaded && anim.renderer) {
-          try { (anim.renderer as any).renderFrame(anim.currentFrame, true); } catch { /* ignore */ }
-        }
-      };
     }
     return orig();
   };
 }
 
-/* SVG 元素:逐帧切换 <image> 的 href */
+/* SVG 元素:在 prepareFrame(每帧无条件调用,不依赖渲染器 _mdf)中切换 <image> 的 href */
 function patchSeqSvgElement(el: any) {
-  const origRender = el.renderFrame ? el.renderFrame.bind(el) : null;
-  if (!origRender) return;
-  el.renderFrame = function (this: any, num: number) {
+  const origPrepare = el.prepareFrame ? el.prepareFrame.bind(el) : null;
+  if (!origPrepare) return;
+  el.prepareFrame = function (this: any, num: number) {
     if (seqLayerInd >= 0 && this.data && this.data.ind === seqLayerInd) {
       const imgEl = this.innerElem || this.imageElem;
       if (imgEl) {
@@ -345,7 +362,7 @@ function patchSeqSvgElement(el: any) {
         }
       }
     }
-    return origRender(num);
+    return origPrepare(num);
   };
 }
 
