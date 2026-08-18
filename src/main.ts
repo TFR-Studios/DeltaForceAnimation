@@ -520,7 +520,7 @@ function syncExportFormatUI() {
     exportHint.textContent = 'MP4 将使用当前背景色导出(播放流畅,推荐)';
     exportHint.classList.remove('warn');
   } else {
-    exportHint.textContent = 'AVI 为 MJPEG 编码,系统播放器可能卡顿,建议用 VLC 播放或改用 MP4';
+    exportHint.textContent = 'AVI 将使用当前背景色导出(H.264 编码,PotPlayer/VLC/剪映可流畅播放)';
     exportHint.classList.remove('warn');
   }
 }
@@ -1111,7 +1111,7 @@ async function exportVideoMp4(data: any, canvas: HTMLCanvasElement, renderFrame:
     output: (chunk: any, meta: any) => muxer.addVideoChunk(chunk, meta),
     error: (e: any) => { throw e; },
   });
-  videoEncoder.configure({ codec: 'avc1.64002a', width: w, height: h, bitrate: 24_000_000, framerate: fr });
+  videoEncoder.configure({ codec: 'avc1.64002a', width: w, height: h, bitrate: 30_000_000, framerate: fr });
 
   let audioEncoder: any = null;
   if (numCh > 0 && WebAudioEncoder && WebAudioData) {
@@ -1159,7 +1159,7 @@ function u16(v: number) { const b = new Uint8Array(2); new DataView(b.buffer).se
 
 /* AVI 容器通用组装(videoFcc: 编码器标识 MJPG / DIB ;strf: 视频流 BITMAPINFOHEADER;
  * frameFcc: movi 帧块标识 00dc / 00db)。直接以 parts 数组构造 Blob,避免大文件二次拷贝。 */
-function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint8Array<ArrayBuffer>, frameFcc: string, frameChunks: Uint8Array<ArrayBuffer>[], pcm16: Uint8Array<ArrayBuffer>, numCh: number, audioRate: number): Blob {
+function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint8Array<ArrayBuffer>, frameFcc: string, frameChunks: Uint8Array<ArrayBuffer>[], pcm16: Uint8Array<ArrayBuffer>, numCh: number, audioRate: number, frameKeyFlags?: boolean[]): Blob {
   const totalFrames = frameChunks.length;
   const isDib = videoFcc === 'DIB ';
   const frameBytes = w * h * 4;
@@ -1177,7 +1177,7 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
   // 尺寸计算:LIST 块的大小字段 = 内容(四cc + 子块),不含 LIST 自身 8 字节头
   const avihChunkSize = 8 + 56;                    // 'avih' chunk
   const strhChunkSize = 8 + 56;                    // 'strh' chunk
-  const strfVideoChunkSize = 8 + 40;               // 'strf' chunk
+  const strfVideoChunkSize = 8 + strf.length;      // 'strf' chunk(长度可变:40 或 40+avcC)
   const strfAudioChunkSize = 8 + 18;
   const videoStrlContent = 4 + strhChunkSize + strfVideoChunkSize;  // 'strl' + strh + strf
   const audioStrlContent = 4 + strhChunkSize + strfAudioChunkSize;  // 'auds' + strh + strf
@@ -1227,8 +1227,8 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
     d.setUint32(40, 0xffffffff, true); // dwQuality: -1 使用默认质量
     d.setUint32(44, isDib ? frameBytes : 0, true); // dwSampleSize: 无压缩视频为固定帧大小
     parts.push(ascii('strh'), u32(56), strh);
-    // strf (BITMAPINFOHEADER)
-    parts.push(ascii('strf'), u32(40), strf);
+    // strf (BITMAPINFOHEADER,长度可变:40 或 40+avcC)
+    parts.push(ascii('strf'), u32(strf.length), strf);
   }
   // audio strl
   if (hasAudio) {
@@ -1263,9 +1263,10 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
   parts.push(ascii('LIST'), u32(moviContent), ascii('movi'));
   let moviOffset = 4; // 相对 movi list 内容的偏移
   const idx: { fourcc: string; flags: number; offset: number; size: number }[] = [];
-  for (const c of frameChunks) {
+  for (let i = 0; i < frameChunks.length; i++) {
+    const c = frameChunks[i];
     parts.push(ascii(frameFcc), u32(c.length), c);
-    idx.push({ fourcc: frameFcc, flags: 0x10, offset: moviOffset, size: c.length });
+    idx.push({ fourcc: frameFcc, flags: frameKeyFlags && frameKeyFlags[i] ? 0x10 : 0x00, offset: moviOffset, size: c.length });
     moviOffset += 8 + c.length;
   }
   for (const c of audioChunks) {
@@ -1316,6 +1317,22 @@ function dibStrf(w: number, h: number): Uint8Array<ArrayBuffer> {
   return strf;
 }
 
+/* BITMAPINFOHEADER + avcC:H.264(24bpp,biCompression='H264',
+ * 附加 AVCDecoderConfigurationRecord,PotPlayer/VLC/剪映 可硬解播放) */
+function h264Strf(w: number, h: number, avcC: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
+  const strf = new Uint8Array(40 + avcC.length);
+  const df = new DataView(strf.buffer);
+  df.setUint32(0, 40 + avcC.length, true); // biSize 含附加数据
+  df.setInt32(4, w, true);
+  df.setInt32(8, h, true);
+  df.setUint16(12, 1, true);
+  df.setUint16(14, 24, true);
+  strf.set(ascii('H264'), 16);
+  df.setUint32(20, 0, true); // biSizeImage
+  strf.set(avcC, 40);
+  return strf;
+}
+
 /* ImageData(RGBA,自上而下) → DIB 帧(BGRA,自下而上,保留 alpha) */
 function rgbaToBgraBottomUp(img: ImageData, w: number, h: number): Uint8Array<ArrayBuffer> {
   const src = img.data;
@@ -1345,7 +1362,8 @@ function buildAviDib(w: number, h: number, fr: number, bgraFrames: Uint8Array<Ar
   return buildAvi(w, h, fr, 'DIB ', dibStrf(w, h), '00db', bgraFrames, pcm16, numCh, audioRate);
 }
 
-async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, transparent: boolean) {
+/* 提取动画音频并转为 16bit PCM(所有 AVI 导出共用) */
+async function buildPcm16(data: any, totalFrames: number, fr: number): Promise<{ pcm16: Uint8Array<ArrayBuffer>; numCh: number; audioRate: number }> {
   const audioUrl = findAudioAsset();
   const audioInfo = audioUrl ? await decodeAudio(audioUrl) : null;
   const audioChannels = audioInfo ? audioInfo.channels : null;
@@ -1366,9 +1384,14 @@ async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame:
       }
     }
   }
+  return { pcm16, numCh, audioRate };
+}
+
+async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, mode: 'dib' | 'mjpeg') {
+  const { pcm16, numCh, audioRate } = await buildPcm16(data, totalFrames, fr);
 
   let blob: Blob;
-  if (transparent) {
+  if (mode === 'dib') {
     // 无压缩 32 位 BGRA:直接读取画布像素,真正保留 alpha 透明通道
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('无法读取渲染画布');
@@ -1382,11 +1405,12 @@ async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame:
     onProgress(99, '帧处理完成,正在组装 AVI(无压缩透明)…');
     blob = buildAviDib(data.w, data.h, fr, bgraFrames, pcm16, numCh, audioRate);
   } else {
+    // MJPEG 回退方案(浏览器不支持 WebCodecs 时),播放器可能卡顿
     const jpegFrames: Uint8Array<ArrayBuffer>[] = [];
     for (let i = 0; i < totalFrames; i++) {
       if (exportCancelRequested) throw new ExportCancelledError('导出已取消');
       renderFrame(data.ip + i);
-      const b = await new Promise<Blob>((res, rej) => canvas.toBlob((x) => (x ? res(x) : rej(new Error('toBlob 失败'))), 'image/jpeg', 0.9));
+      const b = await new Promise<Blob>((res, rej) => canvas.toBlob((x) => (x ? res(x) : rej(new Error('toBlob 失败'))), 'image/jpeg', 0.92));
       jpegFrames.push(new Uint8Array(await b.arrayBuffer()));
       if (i % 12 === 0) { onProgress(Math.round((i / totalFrames) * 100), '正在处理帧 ' + (i + 1) + ' / ' + totalFrames); await new Promise((r) => setTimeout(r, 0)); }
     }
@@ -1395,7 +1419,46 @@ async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame:
   }
 
   onProgress(100, 'AVI 组装完成,正在下载…');
-  downloadBlob(blob, transparent ? 'animation_transparent.avi' : 'animation.avi');
+  downloadBlob(blob, mode === 'dib' ? 'animation_transparent.avi' : 'animation.avi');
+}
+
+/* H.264 编码 AVI(非透明):与 MP4 同款 WebCodecs 编码,PotPlayer/VLC 可硬解,
+ * 无 MJPEG 的色度毛边问题。strf 附加 avcC,帧数据为 AVCC 长度前缀格式。 */
+async function exportVideoAviH264(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void) {
+  if (!WebVideoEncoder || !WebVideoFrame) throw new Error('当前浏览器不支持 H.264 编码(请用 Chrome/Edge)');
+  const { pcm16, numCh, audioRate } = await buildPcm16(data, totalFrames, fr);
+  const w = data.w, h = data.h;
+
+  const frames: { data: Uint8Array<ArrayBuffer>; key: boolean }[] = [];
+  let avcC: Uint8Array<ArrayBuffer> | null = null;
+  const encoder = new WebVideoEncoder({
+    output: (chunk: any, meta: any) => {
+      const desc = meta?.decoderConfig?.description;
+      if (desc && !avcC) avcC = new Uint8Array(desc instanceof ArrayBuffer ? desc : desc.buffer);
+      const buf = new Uint8Array(chunk.byteLength);
+      chunk.copyTo(buf);
+      frames.push({ data: buf, key: chunk.type === 'key' });
+    },
+    error: (e: any) => { throw e; },
+  });
+  encoder.configure({ codec: 'avc1.64002a', width: w, height: h, bitrate: 30_000_000, framerate: fr });
+
+  for (let i = 0; i < totalFrames; i++) {
+    if (exportCancelRequested) throw new ExportCancelledError('导出已取消');
+    renderFrame(data.ip + i);
+    const frame = new WebVideoFrame(canvas, { timestamp: Math.round((i * 1e6) / fr), duration: Math.round(1e6 / fr) });
+    encoder.encode(frame, { keyFrame: i % 60 === 0 });
+    frame.close();
+    if (i % 12 === 0) { onProgress(Math.round((i / totalFrames) * 100), '正在编码帧 ' + (i + 1) + ' / ' + totalFrames); await new Promise((r) => setTimeout(r, 0)); }
+  }
+  await encoder.flush();
+  encoder.close();
+  if (!avcC) throw new Error('未能获取 H.264 解码配置(avcC)');
+
+  onProgress(99, '帧编码完成,正在组装 AVI(H.264)…');
+  const blob = buildAvi(w, h, fr, 'H264', h264Strf(w, h, avcC), '00dc', frames.map((f) => f.data), pcm16, numCh, audioRate, frames.map((f) => f.key));
+  onProgress(100, 'AVI 组装完成,正在下载…');
+  downloadBlob(blob, 'animation.avi');
 }
 
 async function exportVideo() {
@@ -1410,7 +1473,7 @@ async function exportVideo() {
   const fr = data.fr || 60;
   const totalFrames = Math.round((data.op ?? 0) - (data.ip ?? 0));
   const formatLabel = format === 'avi'
-    ? (wantTransparent ? 'AVI · 无压缩透明' : 'AVI · MJPEG')
+    ? (wantTransparent ? 'AVI · 无压缩透明' : 'AVI · H.264')
     : 'MP4 · H.264';
   const warn = wantTransparent
     ? '透明 AVI 为无压缩编码,预计文件约 ' + fmtSize(w * h * 4 * totalFrames) + ';仅供剪辑软件(剪映/AE/Premiere)导入,系统播放器无法正常预览(黑底+卡顿)。导出期间请勿关闭页面。'
@@ -1470,11 +1533,22 @@ async function exportVideo() {
     const srcCanvas = outCanvas ?? canvas;
 
     if (format === 'avi') {
-      const label = wantTransparent ? '正在导出透明 AVI(无压缩)' : '正在导出 AVI';
-      await exportVideoAvi(data, srcCanvas, renderFrame, totalFrames, fr, (p, detail) => {
-        updateExportProgress(p, label, detail ?? '');
-        setStatus(label + ': ' + p + '%');
-      }, wantTransparent);
+      if (wantTransparent) {
+        await exportVideoAvi(data, srcCanvas, renderFrame, totalFrames, fr, (p, detail) => {
+          updateExportProgress(p, '正在导出透明 AVI(无压缩)', detail ?? '');
+          setStatus('导出透明 AVI(无压缩): ' + p + '%');
+        }, 'dib');
+      } else if (WebVideoEncoder && WebVideoFrame) {
+        await exportVideoAviH264(data, srcCanvas, renderFrame, totalFrames, fr, (p, detail) => {
+          updateExportProgress(p, '正在导出 AVI(H.264)', detail ?? '');
+          setStatus('导出 AVI(H.264): ' + p + '%');
+        });
+      } else {
+        await exportVideoAvi(data, srcCanvas, renderFrame, totalFrames, fr, (p, detail) => {
+          updateExportProgress(p, '正在导出 AVI(MJPEG 回退)', detail ?? '');
+          setStatus('导出 AVI(MJPEG): ' + p + '%');
+        }, 'mjpeg');
+      }
     } else {
       await exportVideoMp4(data, srcCanvas, renderFrame, totalFrames, fr, (p, detail) => {
         updateExportProgress(p, '正在导出 MP4(H.264)', detail ?? '');

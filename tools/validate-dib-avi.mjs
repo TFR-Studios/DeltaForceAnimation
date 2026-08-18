@@ -54,7 +54,7 @@ function buildAvi(w, h, fr, videoFcc, strf, frameFcc, frameChunks, pcm16, numCh,
 
   const avihChunkSize = 8 + 56;
   const strhChunkSize = 8 + 56;
-  const strfVideoChunkSize = 8 + 40;
+  const strfVideoChunkSize = 8 + strf.length;
   const strfAudioChunkSize = 8 + 18;
   const videoStrlContent = 4 + strhChunkSize + strfVideoChunkSize;
   const audioStrlContent = 4 + strhChunkSize + strfAudioChunkSize;
@@ -100,7 +100,7 @@ function buildAvi(w, h, fr, videoFcc, strf, frameFcc, frameChunks, pcm16, numCh,
     d.setUint32(40, 0xffffffff, true);
     d.setUint32(44, isDib ? frameBytes : 0, true);
     parts.push(ascii('strh'), u32(56), strh);
-    parts.push(ascii('strf'), u32(40), strf);
+    parts.push(ascii('strf'), u32(strf.length), strf);
   }
   if (hasAudio) {
     parts.push(ascii('LIST'), u32(audioStrlContent), ascii('strl'));
