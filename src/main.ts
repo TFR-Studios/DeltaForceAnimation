@@ -1161,6 +1161,8 @@ function u16(v: number) { const b = new Uint8Array(2); new DataView(b.buffer).se
  * frameFcc: movi 帧块标识 00dc / 00db)。直接以 parts 数组构造 Blob,避免大文件二次拷贝。 */
 function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint8Array<ArrayBuffer>, frameFcc: string, frameChunks: Uint8Array<ArrayBuffer>[], pcm16: Uint8Array<ArrayBuffer>, numCh: number, audioRate: number): Blob {
   const totalFrames = frameChunks.length;
+  const isDib = videoFcc === 'DIB ';
+  const frameBytes = w * h * 4;
   const audioChunks: Uint8Array<ArrayBuffer>[] = [];
   const CHUNK = 8192 * numCh * 2;
   for (let off = 0; off < pcm16.length; off += CHUNK) {
@@ -1170,33 +1172,37 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
     audioChunks.push(c);
   }
   const bytesPerSample = numCh * 2;
+  const hasAudio = numCh > 0;
 
-  // 头部尺寸计算
-  const avih = 8 + 56;                    // 'avih' chunk
-  const strlVideo = 8 + (8 + 56) + (8 + 40);   // 'strl' + 'strh' + 'strf'
-  const strlAudio = 8 + (8 + 56) + (8 + 18);
-  const hdrlSize = 4 + avih + strlVideo + strlAudio;  // 'hdrl'
-  const moviSize = 4 + frameChunks.reduce((s, c) => s + 8 + c.length, 0) + audioChunks.reduce((s, c) => s + 8 + c.length, 0);
+  // 尺寸计算:LIST 块的大小字段 = 内容(四cc + 子块),不含 LIST 自身 8 字节头
+  const avihChunkSize = 8 + 56;                    // 'avih' chunk
+  const strhChunkSize = 8 + 56;                    // 'strh' chunk
+  const strfVideoChunkSize = 8 + 40;               // 'strf' chunk
+  const strfAudioChunkSize = 8 + 18;
+  const videoStrlContent = 4 + strhChunkSize + strfVideoChunkSize;  // 'strl' + strh + strf
+  const audioStrlContent = 4 + strhChunkSize + strfAudioChunkSize;  // 'auds' + strh + strf
+  const hdrlContent = 4 + avihChunkSize + (8 + videoStrlContent) + (hasAudio ? 8 + audioStrlContent : 0);  // 'hdrl'
+  const moviContent = 4 + frameChunks.reduce((s, c) => s + 8 + c.length, 0) + audioChunks.reduce((s, c) => s + 8 + c.length, 0);  // 'movi'
   const idxEntries = totalFrames + audioChunks.length;
-  const idxSize = 4 + idxEntries * 16;
-
-  const riffSize = 4 + hdrlSize + moviSize + idxSize;
+  const idxDataBytes = idxEntries * 16;
+  // RIFF 大小字段 = 文件总大小 - 8('RIFF' + size 本身)
+  const riffSize = 28 + hdrlContent + moviContent + idxDataBytes;
   const parts: BlobPart[] = [];
   parts.push(ascii('RIFF'), u32(riffSize), ascii('AVI '));
   // hdrl
-  parts.push(ascii('LIST'), u32(hdrlSize), ascii('hdrl'));
+  parts.push(ascii('LIST'), u32(hdrlContent), ascii('hdrl'));
   // avih
   {
     const microSecPerFrame = Math.round(1e6 / fr);
     const avihChunk = new Uint8Array(56);
     const d = new DataView(avihChunk.buffer);
     d.setUint32(0, microSecPerFrame, true);
-    d.setUint32(4, 0, true); // maxBytesPerSec (占位)
+    d.setUint32(4, isDib ? frameBytes * fr : 0, true); // maxBytesPerSec
     d.setUint32(8, 0, true);
     d.setUint32(12, 0x10, true); // flags: HASINDEX
     d.setUint32(16, totalFrames, true);
     d.setUint32(20, 0, true);
-    d.setUint32(24, 2, true); // streams
+    d.setUint32(24, hasAudio ? 2 : 1, true); // streams
     d.setUint32(28, 0, true);
     d.setUint32(32, w, true);
     d.setUint32(36, h, true);
@@ -1204,7 +1210,7 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
   }
   // video strl
   {
-    parts.push(ascii('LIST'), u32(strlVideo), ascii('strl'));
+    parts.push(ascii('LIST'), u32(videoStrlContent), ascii('strl'));
     // strh
     const strh = new Uint8Array(56);
     const d = new DataView(strh.buffer);
@@ -1217,16 +1223,16 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
     d.setUint32(24, fr, true); // rate
     d.setUint32(28, 0, true);
     d.setUint32(32, totalFrames, true); // length
-    d.setUint32(36, 0, true);
-    d.setUint32(40, 0, true); // quality
-    d.setUint32(44, 0, true); // sample size
+    d.setUint32(36, isDib ? frameBytes : 0, true); // dwSuggestedBufferSize
+    d.setUint32(40, 0xffffffff, true); // dwQuality: -1 使用默认质量
+    d.setUint32(44, isDib ? frameBytes : 0, true); // dwSampleSize: 无压缩视频为固定帧大小
     parts.push(ascii('strh'), u32(56), strh);
     // strf (BITMAPINFOHEADER)
     parts.push(ascii('strf'), u32(40), strf);
   }
   // audio strl
-  if (numCh > 0) {
-    parts.push(ascii('LIST'), u32(strlAudio), ascii('strl'));
+  if (hasAudio) {
+    parts.push(ascii('LIST'), u32(audioStrlContent), ascii('strl'));
     const strh = new Uint8Array(56);
     const d = new DataView(strh.buffer);
     strh.set(ascii('auds'), 0);
@@ -1254,7 +1260,7 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
     parts.push(ascii('strf'), u32(18), strf);
   }
   // movi
-  parts.push(ascii('LIST'), u32(moviSize), ascii('movi'));
+  parts.push(ascii('LIST'), u32(moviContent), ascii('movi'));
   let moviOffset = 4; // 相对 movi list 内容的偏移
   const idx: { fourcc: string; flags: number; offset: number; size: number }[] = [];
   for (const c of frameChunks) {
@@ -1268,7 +1274,7 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
     moviOffset += 8 + c.length;
   }
   // idx1
-  parts.push(ascii('idx1'), u32(idxEntries * 16));
+  parts.push(ascii('idx1'), u32(idxDataBytes));
   for (const e of idx) {
     const entry = new Uint8Array(16);
     const d = new DataView(entry.buffer);

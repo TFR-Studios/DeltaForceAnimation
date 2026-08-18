@@ -9,3 +9,6 @@ Thumbs.db
 
 # 动画备份文件(仅保留主文件 animation_data.json)
 animation/animation_data.*.json
+
+# 验证脚本生成的测试视频
+tools/*.avi
