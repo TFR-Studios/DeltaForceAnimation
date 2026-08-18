@@ -207,7 +207,20 @@ function patchCanvasTextElement(el: any) {
   };
 }
 
-function patchCanvasRendererTree(renderer: any) {
+function patchCanvasRendererTree(renderer: any, exportMode = false) {
+  // loadAnimation 可能已同步构建元素,patch 需要对已构建元素立即生效
+  for (const el of renderer.elements ?? []) {
+    if (el && el.data && !el.__lottieFallbackPatched) {
+      el.__lottieFallbackPatched = true;
+      if (el.data.ty === 5) patchCanvasTextElement(el);
+      else if (el.data.ty === 2 && seqLayerInd >= 0 && el.data.ind === seqLayerInd) {
+        el.__seqUseExport = exportMode;
+        patchSeqCanvasElement(el);
+      } else if (el.data.ty === 0 && typeof el.buildItem === 'function') {
+        patchCanvasRendererTree(el, exportMode); // 预合成内
+      }
+    }
+  }
   const origBuild = renderer.buildItem.bind(renderer);
   renderer.buildItem = function (this: any, pos: number) {
     origBuild(pos);
@@ -216,10 +229,161 @@ function patchCanvasRendererTree(renderer: any) {
     el.__lottieFallbackPatched = true;
     if (el.data && el.data.ty === 5) {
       patchCanvasTextElement(el);
+    } else if (el.data && el.data.ty === 2 && seqLayerInd >= 0 && el.data.ind === seqLayerInd) {
+      el.__seqUseExport = exportMode;
+      patchSeqCanvasElement(el);
     } else if (el.data && el.data.ty === 0 && typeof el.buildItem === 'function') {
       patchCanvasRendererTree(el); // 预合成内的文字层
     }
   };
+}
+
+/* ---------- 图片序列支持 ----------
+ * 动画 JSON 中带 ks.src 关键帧的图片图层为"图像序列"层(如 ccreptile):
+ * lottie-web 不原生支持逐帧切换 asset,这里在渲染管线中驱动:
+ * - canvas 渲染器:绘制前把元素的 img 切换为当前帧图片(双缓冲预加载);
+ * - SVG 渲染器:逐帧切换 <image> 的 href(浏览器图片缓存保证即时显示);
+ * - 导出:在渲染帧前 await 解码,保证帧内容完整。 */
+let seqLayerInd = -1;
+let seqFrameUrls: string[] = [];
+let seqImgA: HTMLImageElement | null = null;
+let seqImgB: HTMLImageElement | null = null;
+let seqExportImg: HTMLImageElement | null = null;
+
+function setupImageSequence(data: any) {
+  seqLayerInd = -1;
+  seqFrameUrls = [];
+  seqImgA = seqImgB = null;
+  seqExportImg = null;
+  if (!data) return;
+  for (const l of data.layers ?? []) {
+    const src = l.ty === 2 && l.ks && l.ks.src;
+    if (!src || !Array.isArray(src.k) || src.k.length < 2) continue;
+    const byFrame = new Map<number, string>();
+    for (const kf of src.k as any[]) {
+      const id = Array.isArray(kf.s) ? kf.s[0] : kf.s;
+      const a = (data.assets ?? []).find((x: any) => x.id === id);
+      if (a && typeof a.p === 'string') byFrame.set(Math.round(kf.t), a.p);
+    }
+    if (byFrame.size < 2) continue;
+    seqLayerInd = l.ind;
+    const maxF = Math.max(...byFrame.keys());
+    seqFrameUrls = new Array(maxF + 1).fill('');
+    for (const [f, u] of byFrame) seqFrameUrls[f] = u;
+    seqImgA = new Image();
+    seqImgB = new Image();
+    seqExportImg = new Image();
+    break;
+  }
+}
+
+function seqFrameUrl(frame: number): string {
+  if (seqFrameUrls.length === 0) return '';
+  const f = Math.max(0, Math.min(seqFrameUrls.length - 1, Math.round(frame)));
+  return seqFrameUrls[f] || seqFrameUrls[0] || '';
+}
+
+/* 可靠的当前全局帧号:canvas 渲染器的 globalData.frameNum 可能因
+ * animationItem._isFirstFrame 缺失而为 NaN,改用渲染器的 renderedFrame */
+function seqCurrentFrame(globalData: any): number {
+  const r = globalData && globalData.renderer;
+  let v = r && typeof r.renderedFrame === 'number' ? r.renderedFrame : 0;
+  if (typeof v !== 'number' || !isFinite(v)) v = globalData && typeof globalData.frameNum === 'number' && isFinite(globalData.frameNum) ? globalData.frameNum : 0;
+  return v;
+}
+
+/* canvas 元素:绘制前切换图片;当前槽绘制,另一槽预载下一帧。
+ * 导出模式(__seqUseExport)下只挂载导出专用图片,src 由 ensureSeqDecoded 驱动。 */
+function patchSeqCanvasElement(el: any) {
+  const orig = el.renderInnerContent.bind(el);
+  el.renderInnerContent = function (this: any) {
+    const f = seqCurrentFrame(this.globalData);
+    const url = seqFrameUrl(f);
+    if (this.__seqUseExport) {
+      if (seqExportImg && this.img !== seqExportImg) this.img = seqExportImg;
+      return orig();
+    }
+    if (url && seqImgA && seqImgB) {
+      const mySlot = el.__seqSlot === 1 ? seqImgB : seqImgA;
+      const other = mySlot === seqImgA ? seqImgB : seqImgA;
+      if (mySlot.src !== url) mySlot.src = url;
+      if (this.img !== mySlot) this.img = mySlot;
+      const nextUrl = seqFrameUrl(f + 1);
+      if (nextUrl && other.src !== nextUrl) other.src = nextUrl;
+      el.__seqSlot = el.__seqSlot === 1 ? 0 : 1;
+      // 解码完成且当前仍需要该帧时,强制重绘当前帧(跳帧/拖动时间轴时)
+      mySlot.onload = () => {
+        const anim = (window as any).__anim;
+        if (anim && anim.isLoaded && anim.renderer) {
+          try { (anim.renderer as any).renderFrame(anim.currentFrame, true); } catch { /* ignore */ }
+        }
+      };
+    }
+    return orig();
+  };
+}
+
+/* SVG 元素:逐帧切换 <image> 的 href */
+function patchSeqSvgElement(el: any) {
+  const origRender = el.renderFrame ? el.renderFrame.bind(el) : null;
+  if (!origRender) return;
+  el.renderFrame = function (this: any, num: number) {
+    if (seqLayerInd >= 0 && this.data && this.data.ind === seqLayerInd) {
+      const imgEl = this.innerElem || this.imageElem;
+      if (imgEl) {
+        const f = typeof num === 'number' && isFinite(num) ? num : seqCurrentFrame(this.globalData);
+        const url = seqFrameUrl(f);
+        const NS = 'http://www.w3.org/1999/xlink';
+        if (url && imgEl.getAttributeNS(NS, 'href') !== url) {
+          imgEl.setAttributeNS(NS, 'href', url);
+          // 预加载下一帧(利用浏览器图片缓存,让 SVG 换图即时显示)
+          const nextUrl = seqFrameUrl(f + 1);
+          if (nextUrl && seqImgA && seqImgB) {
+            const pre = seqImgA.src === url ? seqImgB : seqImgA;
+            if (pre.src !== nextUrl) pre.src = nextUrl;
+          }
+        }
+      }
+    }
+    return origRender(num);
+  };
+}
+
+/* SVG 渲染器树 patch(图片序列层) */
+function patchSvgRendererTree(renderer: any) {
+  if (renderer.__seqTreePatched) return;
+  renderer.__seqTreePatched = true;
+  // 已构建元素立即应用
+  for (const el of renderer.elements ?? []) {
+    if (el && el.data && !el.__seqElPatched) {
+      el.__seqElPatched = true;
+      if (el.data.ty === 2 && seqLayerInd >= 0 && el.data.ind === seqLayerInd) patchSeqSvgElement(el);
+      else if (el.data.ty === 0 && typeof el.buildItem === 'function') patchSvgRendererTree(el);
+    }
+  }
+  const origBuild = renderer.buildItem.bind(renderer);
+  renderer.buildItem = function (this: any, pos: number) {
+    origBuild(pos);
+    const el = this.elements[pos];
+    if (!el || el.__seqElPatched) return;
+    el.__seqElPatched = true;
+    if (el.data && el.data.ty === 2 && seqLayerInd >= 0 && el.data.ind === seqLayerInd) {
+      patchSeqSvgElement(el);
+    } else if (el.data && el.data.ty === 0 && typeof el.buildItem === 'function') {
+      patchSvgRendererTree(el); // 预合成内
+    }
+  };
+}
+
+/* 导出前确保第 n 帧的序列图片已解码(导出专用图片,与预览隔离) */
+async function ensureSeqDecoded(n: number) {
+  if (seqFrameUrls.length === 0 || !seqExportImg) return;
+  const url = seqFrameUrl(n);
+  if (!url) return;
+  if (seqExportImg.src !== url) {
+    seqExportImg.src = url;
+    if (!seqExportImg.complete) await seqExportImg.decode().catch(() => {});
+  }
 }
 
 /* ---------- DOM 引用 ---------- */
@@ -278,6 +442,7 @@ async function loadData(data: any, name: string) {
   currentName = name;
   captureOriginalState(data);
   captureOriginalShapeState(data);
+  setupImageSequence(data);
   applyFit();
   resetView();
   applyBackground();
@@ -297,6 +462,8 @@ async function loadData(data: any, name: string) {
     (window as any).__lottie = lottie;
     if (selRenderer.value === 'canvas') {
       patchCanvasRendererTree((anim as any).renderer);
+    } else {
+      patchSvgRendererTree((anim as any).renderer);
     }
     anim.addEventListener('DOMLoaded', onAnimReady);
     anim.addEventListener('config_ready', onAnimReady);
@@ -944,6 +1111,7 @@ function reRenderPreservingState() {
   (window as any).__anim = newAnim;
   (window as any).__lottie = lottie;
   if (renderer === 'canvas') patchCanvasRendererTree(newAnim.renderer as any);
+  else patchSvgRendererTree(newAnim.renderer as any);
   newAnim.addEventListener('DOMLoaded', onAnimReady);
   newAnim.addEventListener('config_ready', onAnimReady);
   newAnim.setSpeed(speed);
@@ -1136,6 +1304,7 @@ async function exportVideoMp4(data: any, canvas: HTMLCanvasElement, renderFrame:
 
   for (let i = 0; i < totalFrames; i++) {
     if (exportCancelRequested) throw new ExportCancelledError('导出已取消');
+    await ensureSeqDecoded(data.ip + i);
     renderFrame(data.ip + i);
     const frame = new WebVideoFrame(canvas, { timestamp: Math.round((i * 1e6) / fr), duration: Math.round(1e6 / fr) });
     videoEncoder.encode(frame, { keyFrame: i % 60 === 0 });
@@ -1416,6 +1585,7 @@ async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame:
     const bgraFrames: Uint8Array<ArrayBuffer>[] = [];
     for (let i = 0; i < totalFrames; i++) {
       if (exportCancelRequested) throw new ExportCancelledError('导出已取消');
+      await ensureSeqDecoded(data.ip + i);
       renderFrame(data.ip + i);
       bgraFrames.push(rgbaToBgraBottomUp(ctx.getImageData(0, 0, data.w, data.h), data.w, data.h));
       if (i % 12 === 0) { onProgress(Math.round((i / totalFrames) * 100), '正在处理帧 ' + (i + 1) + ' / ' + totalFrames); await new Promise((r) => setTimeout(r, 0)); }
@@ -1427,6 +1597,7 @@ async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame:
     const jpegFrames: Uint8Array<ArrayBuffer>[] = [];
     for (let i = 0; i < totalFrames; i++) {
       if (exportCancelRequested) throw new ExportCancelledError('导出已取消');
+      await ensureSeqDecoded(data.ip + i);
       renderFrame(data.ip + i);
       const b = await new Promise<Blob>((res, rej) => canvas.toBlob((x) => (x ? res(x) : rej(new Error('toBlob 失败'))), 'image/jpeg', 0.92));
       jpegFrames.push(new Uint8Array(await b.arrayBuffer()));
@@ -1463,6 +1634,7 @@ async function exportVideoAviH264(data: any, canvas: HTMLCanvasElement, renderFr
 
   for (let i = 0; i < totalFrames; i++) {
     if (exportCancelRequested) throw new ExportCancelledError('导出已取消');
+    await ensureSeqDecoded(data.ip + i);
     renderFrame(data.ip + i);
     const frame = new WebVideoFrame(canvas, { timestamp: Math.round((i * 1e6) / fr), duration: Math.round(1e6 / fr) });
     encoder.encode(frame, { keyFrame: i % 60 === 0 });
@@ -1516,7 +1688,7 @@ async function exportVideo() {
       animationData: data,
       audioFactory,
     });
-    patchCanvasRendererTree((renderAnim as any).renderer);
+    patchCanvasRendererTree((renderAnim as any).renderer, true);
     // 修复 Canvas 渲染器 getElementById 扫描到未构建元素时报错的问题
     (renderAnim.renderer as any).getElementById = function (id: number) {
       const els = (this as any).elements || [];
