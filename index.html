@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>三角洲行动撤离动画自定义编辑器</title>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">三角洲行动撤离动画自定义编辑器<span class="tag">编辑 · 预览 · 导出</span></div>
+    </header>
+
+    <main class="layout">
+      <section class="preview-panel">
+        <div class="preview-stage" id="stage">
+          <div class="preview-inner" id="previewInner"></div>
+        </div>
+        <div class="timeline">
+            <input type="range" id="rngFrame" min="0" max="0" step="1" value="0" title="拖动预览时间轴" aria-label="动画时间轴" />
+            <span class="frame">帧 <b id="frameInfo">0 / 0</b> · <span id="timeInfo">0.00s</span></span>
+          </div>
+          <div class="transport">
+          <button id="btnRestart" type="button" title="回到开头">⏮</button>
+          <button id="btnPlay" class="play-btn" type="button" title="播放/暂停(空格键)">▶</button>
+          <label class="loop"><input type="checkbox" id="chkLoop" checked /> 循环</label>
+          <label>速度
+            <input type="range" id="rngSpeed" min="0.1" max="3" step="0.1" value="1" />
+            <span id="speedVal">1.0×</span>
+          </label>
+          
+          <span class="frame">缩放 <b id="zoomInfo">100%</b></span>
+          <button id="btnResetView" type="button" title="复位视图(也可双击预览区)">复位视图</button>
+          <label>导出格式
+            <select id="selFormat" title="导出格式:使用当前背景色;勾选透明背景时自动导出 AVI">
+              <option value="mp4">MP4</option>
+              <option value="avi">AVI</option>
+            </select>
+          </label>
+          <span class="export-hint" id="exportHint"></span>
+          <button id="btnExport" type="button" title="导出视频(含音频,使用当前背景色;透明背景自动导出 AVI)">导出视频</button>
+          <span class="spacer"></span>
+          <label>渲染器
+            <select id="selRenderer">
+              <option value="svg">SVG</option>
+              <option value="canvas">Canvas</option>
+            </select>
+          </label>
+          <label>适配
+            <select id="selFit">
+              <option value="contain">包含</option>
+              <option value="cover">铺满</option>
+              <option value="none">原始</option>
+            </select>
+          </label>
+          <label class="bg">背景色 <input type="color" id="bgColor" value="#16181d" /></label>
+          <label><input type="checkbox" id="chkTransparent" /> 透明背景</label>
+        </div>
+      </section>
+
+      <aside class="side-panel">
+        <h3>动画信息</h3>
+        <dl id="infoList"></dl>
+        <h3>文字图层 <span id="textCount"></span></h3>
+        <ul id="textList"></ul>
+        <h3>形状图层 <span id="shapeCount"></span></h3>
+        <ul id="shapeList"></ul>
+      </aside>
+    </main>
+
+    <div class="export-overlay" id="exportOverlay" hidden>
+      <div class="export-card">
+        <div class="export-head">
+          <span class="export-title">🎬 正在导出视频</span>
+          <span class="export-format" id="exportFormatTag"></span>
+        </div>
+        <div class="export-status" id="exportStatus">正在准备…</div>
+        <div class="export-percent" id="exportPercent">0%</div>
+        <div class="export-bar"><div class="export-bar-fill" id="exportBarFill"></div></div>
+        <div class="export-detail" id="exportDetail"></div>
+        <div class="export-warn" id="exportWarn" hidden></div>
+        <div class="export-actions">
+          <button id="btnExportCancel" type="button">取消导出</button>
+        </div>
+      </div>
+    </div>
+
+    <footer class="statusbar" id="statusbar">就绪</footer>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

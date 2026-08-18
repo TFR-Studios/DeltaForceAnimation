@@ -1,0 +1,11 @@
+# 依赖与构建产物
+node_modules/
+dist/
+
+# 日志与系统文件
+*.log
+.DS_Store
+Thumbs.db
+
+# 动画备份文件(仅保留主文件 animation_data.json)
+animation/animation_data.*.json
