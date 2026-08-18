@@ -514,13 +514,13 @@ function syncExportFormatUI() {
   selFormat.disabled = transparent;
   if (transparent) {
     selFormat.value = 'avi';
-    exportHint.textContent = '已选透明背景,将自动导出 AVI(无压缩,带真正透明通道,文件较大)';
+    exportHint.textContent = '透明 AVI 仅供剪辑软件(剪映/AE/Premiere)导入,系统播放器会显示黑底且卡顿';
     exportHint.classList.add('warn');
   } else if (selFormat.value === 'mp4') {
-    exportHint.textContent = 'MP4 将使用当前背景色导出';
+    exportHint.textContent = 'MP4 将使用当前背景色导出(播放流畅,推荐)';
     exportHint.classList.remove('warn');
   } else {
-    exportHint.textContent = 'AVI 将使用当前背景色导出';
+    exportHint.textContent = 'AVI 为 MJPEG 编码,系统播放器可能卡顿,建议用 VLC 播放或改用 MP4';
     exportHint.classList.remove('warn');
   }
 }
@@ -1413,7 +1413,7 @@ async function exportVideo() {
     ? (wantTransparent ? 'AVI · 无压缩透明' : 'AVI · MJPEG')
     : 'MP4 · H.264';
   const warn = wantTransparent
-    ? '透明 AVI 为无压缩编码,预计文件约 ' + fmtSize(w * h * 4 * totalFrames) + ',导出期间请勿关闭页面。'
+    ? '透明 AVI 为无压缩编码,预计文件约 ' + fmtSize(w * h * 4 * totalFrames) + ';仅供剪辑软件(剪映/AE/Premiere)导入,系统播放器无法正常预览(黑底+卡顿)。导出期间请勿关闭页面。'
     : undefined;
   showExportOverlay({ formatLabel, warn });
   updateExportProgress(0, '正在初始化渲染器…', '');
