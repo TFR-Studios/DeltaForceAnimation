@@ -1163,16 +1163,28 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
   const totalFrames = frameChunks.length;
   const isDib = videoFcc === 'DIB ';
   const frameBytes = w * h * 4;
-  const audioChunks: Uint8Array<ArrayBuffer>[] = [];
-  const CHUNK = 8192 * numCh * 2;
-  for (let off = 0; off < pcm16.length; off += CHUNK) {
-    const n = Math.min(CHUNK, pcm16.length - off);
-    const pad = n % 2 ? 1 : 0;
-    const c = new Uint8Array(n + pad); c.set(pcm16.subarray(off, off + n));
-    audioChunks.push(c);
-  }
   const bytesPerSample = numCh * 2;
   const hasAudio = numCh > 0;
+
+  // 音频按"每帧时长"切片,与视频帧交错写入 movi —— 播放器顺序读取,
+  // 无需在文件头尾之间频繁 seek,显著改善大文件(尤其无压缩透明 AVI)的播放流畅度
+  const audioSlices: Uint8Array<ArrayBuffer>[] = [];
+  if (hasAudio) {
+    const samplesPerFrame = Math.max(1, Math.round(audioRate / fr));
+    const frameAudioBytes = samplesPerFrame * bytesPerSample;
+    for (let f = 0; f < totalFrames; f++) {
+      const start = f * frameAudioBytes;
+      if (start >= pcm16.length) break;
+      const end = Math.min(pcm16.length, start + frameAudioBytes);
+      let slice = pcm16.subarray(start, end);
+      if (slice.length % 2) { // 偶字节对齐
+        const c = new Uint8Array(slice.length + 1);
+        c.set(slice);
+        slice = c;
+      }
+      audioSlices.push(slice as Uint8Array<ArrayBuffer>);
+    }
+  }
 
   // 尺寸计算:LIST 块的大小字段 = 内容(四cc + 子块),不含 LIST 自身 8 字节头
   const avihChunkSize = 8 + 56;                    // 'avih' chunk
@@ -1182,8 +1194,10 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
   const videoStrlContent = 4 + strhChunkSize + strfVideoChunkSize;  // 'strl' + strh + strf
   const audioStrlContent = 4 + strhChunkSize + strfAudioChunkSize;  // 'auds' + strh + strf
   const hdrlContent = 4 + avihChunkSize + (8 + videoStrlContent) + (hasAudio ? 8 + audioStrlContent : 0);  // 'hdrl'
-  const moviContent = 4 + frameChunks.reduce((s, c) => s + 8 + c.length, 0) + audioChunks.reduce((s, c) => s + 8 + c.length, 0);  // 'movi'
-  const idxEntries = totalFrames + audioChunks.length;
+  const moviContent = 4
+    + frameChunks.reduce((s, c) => s + 8 + c.length, 0)
+    + audioSlices.reduce((s, c) => s + 8 + c.length, 0);  // 'movi'(音视频交错)
+  const idxEntries = totalFrames + audioSlices.length;
   const idxDataBytes = idxEntries * 16;
   // RIFF 大小字段 = 文件总大小 - 8('RIFF' + size 本身)
   const riffSize = 28 + hdrlContent + moviContent + idxDataBytes;
@@ -1259,7 +1273,7 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
     df.setUint16(16, 0, true);
     parts.push(ascii('strf'), u32(18), strf);
   }
-  // movi
+  // movi(音视频交错:每帧视频后紧跟该帧时长的音频块)
   parts.push(ascii('LIST'), u32(moviContent), ascii('movi'));
   let moviOffset = 4; // 相对 movi list 内容的偏移
   const idx: { fourcc: string; flags: number; offset: number; size: number }[] = [];
@@ -1268,11 +1282,12 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
     parts.push(ascii(frameFcc), u32(c.length), c);
     idx.push({ fourcc: frameFcc, flags: frameKeyFlags && frameKeyFlags[i] ? 0x10 : 0x00, offset: moviOffset, size: c.length });
     moviOffset += 8 + c.length;
-  }
-  for (const c of audioChunks) {
-    parts.push(ascii('01wb'), u32(c.length), c);
-    idx.push({ fourcc: '01wb', flags: 0x10, offset: moviOffset, size: c.length });
-    moviOffset += 8 + c.length;
+    const a = audioSlices[i];
+    if (a) {
+      parts.push(ascii('01wb'), u32(a.length), a);
+      idx.push({ fourcc: '01wb', flags: 0x10, offset: moviOffset, size: a.length });
+      moviOffset += 8 + a.length;
+    }
   }
   // idx1
   parts.push(ascii('idx1'), u32(idxDataBytes));

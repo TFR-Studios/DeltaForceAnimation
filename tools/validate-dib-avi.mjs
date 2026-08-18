@@ -42,16 +42,26 @@ function buildAvi(w, h, fr, videoFcc, strf, frameFcc, frameChunks, pcm16, numCh,
   const totalFrames = frameChunks.length;
   const isDib = videoFcc === 'DIB ';
   const frameBytes = w * h * 4;
-  const audioChunks = [];
-  const CHUNK = 8192 * numCh * 2;
-  for (let off = 0; off < pcm16.length; off += CHUNK) {
-    const n = Math.min(CHUNK, pcm16.length - off);
-    const pad = n % 2 ? 1 : 0;
-    const c = new Uint8Array(n + pad); c.set(pcm16.subarray(off, off + n));
-    audioChunks.push(c);
-  }
   const bytesPerSample = numCh * 2;
   const hasAudio = numCh > 0;
+
+  const audioSlices = [];
+  if (hasAudio) {
+    const samplesPerFrame = Math.max(1, Math.round(audioRate / fr));
+    const frameAudioBytes = samplesPerFrame * bytesPerSample;
+    for (let f = 0; f < totalFrames; f++) {
+      const start = f * frameAudioBytes;
+      if (start >= pcm16.length) break;
+      const end = Math.min(pcm16.length, start + frameAudioBytes);
+      let slice = pcm16.subarray(start, end);
+      if (slice.length % 2) {
+        const c = new Uint8Array(slice.length + 1);
+        c.set(slice);
+        slice = c;
+      }
+      audioSlices.push(slice);
+    }
+  }
 
   const avihChunkSize = 8 + 56;
   const strhChunkSize = 8 + 56;
@@ -60,8 +70,10 @@ function buildAvi(w, h, fr, videoFcc, strf, frameFcc, frameChunks, pcm16, numCh,
   const videoStrlContent = 4 + strhChunkSize + strfVideoChunkSize;
   const audioStrlContent = 4 + strhChunkSize + strfAudioChunkSize;
   const hdrlContent = 4 + avihChunkSize + (8 + videoStrlContent) + (hasAudio ? 8 + audioStrlContent : 0);
-  const moviContent = 4 + frameChunks.reduce((s, c) => s + 8 + c.length, 0) + audioChunks.reduce((s, c) => s + 8 + c.length, 0);
-  const idxEntries = totalFrames + audioChunks.length;
+  const moviContent = 4
+    + frameChunks.reduce((s, c) => s + 8 + c.length, 0)
+    + audioSlices.reduce((s, c) => s + 8 + c.length, 0);
+  const idxEntries = totalFrames + audioSlices.length;
   const idxDataBytes = idxEntries * 16;
   const riffSize = 28 + hdrlContent + moviContent + idxDataBytes;
 
@@ -134,15 +146,17 @@ function buildAvi(w, h, fr, videoFcc, strf, frameFcc, frameChunks, pcm16, numCh,
   parts.push(ascii('LIST'), u32(moviContent), ascii('movi'));
   let moviOffset = 4;
   const idx = [];
-  for (const c of frameChunks) {
+  for (let i = 0; i < frameChunks.length; i++) {
+    const c = frameChunks[i];
     parts.push(ascii(frameFcc), u32(c.length), c);
     idx.push({ fourcc: frameFcc, flags: 0x10, offset: moviOffset, size: c.length });
     moviOffset += 8 + c.length;
-  }
-  for (const c of audioChunks) {
-    parts.push(ascii('01wb'), u32(c.length), c);
-    idx.push({ fourcc: '01wb', flags: 0x10, offset: moviOffset, size: c.length });
-    moviOffset += 8 + c.length;
+    const a = audioSlices[i];
+    if (a) {
+      parts.push(ascii('01wb'), u32(a.length), a);
+      idx.push({ fourcc: '01wb', flags: 0x10, offset: moviOffset, size: a.length });
+      moviOffset += 8 + a.length;
+    }
   }
   parts.push(ascii('idx1'), u32(idxDataBytes));
   for (const e of idx) {
