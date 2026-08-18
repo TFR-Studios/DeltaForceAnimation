@@ -28,10 +28,11 @@ function rgbaToBgraBottomUp(img, w, h) {
     const s = y * rowBytes;
     const d = (h - 1 - y) * rowBytes;
     for (let x = 0; x < rowBytes; x += 4) {
-      out[d + x] = src[s + x + 2];
-      out[d + x + 1] = src[s + x + 1];
-      out[d + x + 2] = src[s + x];
-      out[d + x + 3] = src[s + x + 3];
+      const a = src[s + x + 3];
+      out[d + x] = Math.round((src[s + x + 2] * a) / 255);
+      out[d + x + 1] = Math.round((src[s + x + 1] * a) / 255);
+      out[d + x + 2] = Math.round((src[s + x] * a) / 255);
+      out[d + x + 3] = a;
     }
   }
   return out;

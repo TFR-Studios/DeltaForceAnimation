@@ -514,7 +514,7 @@ function syncExportFormatUI() {
   selFormat.disabled = transparent;
   if (transparent) {
     selFormat.value = 'avi';
-    exportHint.textContent = '透明 AVI 供剪辑软件(剪映/AE/Premiere)导入;播放器(PotPlayer 等)不合成 alpha,半透明会显示为不透明';
+    exportHint.textContent = '透明 AVI 已采用预乘 alpha,PotPlayer 可正常显示半透明效果';
     exportHint.classList.add('warn');
   } else if (selFormat.value === 'mp4') {
     exportHint.textContent = 'MP4 将使用当前背景色导出(播放流畅,推荐)';
@@ -1333,7 +1333,9 @@ function h264Strf(w: number, h: number, avcC: Uint8Array<ArrayBuffer>): Uint8Arr
   return strf;
 }
 
-/* ImageData(RGBA,自上而下) → DIB 帧(BGRA,自下而上,保留 alpha) */
+/* ImageData(RGBA,自上而下) → DIB 帧(BGRA,自下而上,保留 alpha)
+ * 注意:输出为【预乘 alpha】——Windows/DirectShow 生态(PotPlayer 等)按
+ * premultiplied 语义合成 alpha,straight 数据会被误渲染为不透明亮色。 */
 function rgbaToBgraBottomUp(img: ImageData, w: number, h: number): Uint8Array<ArrayBuffer> {
   const src = img.data;
   const out = new Uint8Array(w * h * 4);
@@ -1342,10 +1344,11 @@ function rgbaToBgraBottomUp(img: ImageData, w: number, h: number): Uint8Array<Ar
     const s = y * rowBytes;
     const d = (h - 1 - y) * rowBytes;
     for (let x = 0; x < rowBytes; x += 4) {
-      out[d + x] = src[s + x + 2];     // B
-      out[d + x + 1] = src[s + x + 1]; // G
-      out[d + x + 2] = src[s + x];     // R
-      out[d + x + 3] = src[s + x + 3]; // A
+      const a = src[s + x + 3];
+      out[d + x] = Math.round((src[s + x + 2] * a) / 255);     // B(预乘)
+      out[d + x + 1] = Math.round((src[s + x + 1] * a) / 255); // G(预乘)
+      out[d + x + 2] = Math.round((src[s + x] * a) / 255);     // R(预乘)
+      out[d + x + 3] = a;
     }
   }
   return out;
@@ -1476,7 +1479,7 @@ async function exportVideo() {
     ? (wantTransparent ? 'AVI · 无压缩透明' : 'AVI · H.264')
     : 'MP4 · H.264';
   const warn = wantTransparent
-    ? '透明 AVI 为无压缩编码,预计文件约 ' + fmtSize(w * h * 4 * totalFrames) + '。注意:视频播放器(PotPlayer/WMP/VLC)播放时不合成 alpha 通道,半透明组件会显示为不透明——这是所有带透明视频的通性,请在剪映/AE/Premiere 中导入验证。导出期间请勿关闭页面。'
+    ? '透明 AVI 为无压缩编码,预计文件约 ' + fmtSize(w * h * 4 * totalFrames) + ';已采用预乘 alpha(premultiplied),与 PotPlayer/Windows 渲染语义一致,半透明组件可正常显示。导出期间请勿关闭页面。'
     : undefined;
   showExportOverlay({ formatLabel, warn });
   updateExportProgress(0, '正在初始化渲染器…', '');
