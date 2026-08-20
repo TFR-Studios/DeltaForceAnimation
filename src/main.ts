@@ -1758,6 +1758,11 @@ async function resampleTo(channels: Float32Array[], fromRate: number, toRate: nu
 }
 
 function downloadBlob(blob: Blob, filename: string) {
+  // 开发模式:把同一份字节流上传到 dev server 落盘(tools/user-export.avi),
+  // 用于分析真实导出的文件结构(仅 dev,不影响生产)
+  if (import.meta.env.DEV) {
+    fetch('/save-avi', { method: 'POST', body: blob }).catch(() => {});
+  }
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
