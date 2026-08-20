@@ -1961,64 +1961,24 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
     }
   }
 
-  // ===== ODML indx 索引(仅多段):idx1 的 u32 偏移在文件 >4.29GB 时会回绕,
-  // 最后一段 seek 位置错乱(残影)。indx 用 64 位 qwBaseOffset + 段内相对偏移,
-  // ffmpeg 在 header 遍历时逐块读取(indx 块放在 hdrl 后、movi 前)。
-  // 注意:必须用 ffmpeg 的叶块约定(bIndexType=1, wLongsPerEntry=2, 8字节条目,
-  // 高位=非关键帧)——ffmpeg demuxer 把 type=0 当递归 master,扁平条目会被拒。
-  const calcSegIdx = (start: number, count: number): { fourcc: string; key: boolean; rel: number; size: number }[] => {
-    let rel = 0;
-    const idx: { fourcc: string; key: boolean; rel: number; size: number }[] = [];
-    for (let i = start; i < start + count; i++) {
-      idx.push({ fourcc: frameFcc, key: frameKeyFlags ? !!frameKeyFlags[i] : true, rel, size: frameChunks[i].length });
-      rel += 8 + frameChunks[i].length;
-      const a = audioSlices[i];
-      if (a) {
-        idx.push({ fourcc: '01wb', key: true, rel, size: a.length });
-        rel += 8 + a.length;
-      }
-    }
-    return idx;
-  };
-  const writeIndx = (target: BlobPart[], chunkId: string, entries: { fourcc: string; key: boolean; rel: number; size: number }[], baseAbs: number) => {
-    const sel = entries.filter(e => e.fourcc === chunkId);
-    if (!sel.length) return;
-    const head = new Uint8Array(24);
-    const d = new DataView(head.buffer);
-    d.setUint16(0, 2, true);                  // wLongsPerEntry = 2(ffmpeg 叶块约定)
-    d.setUint8(2, 0);                         // bIndexSubType
-    d.setUint8(3, 1);                         // bIndexType = 1(ffmpeg: OF_CHUNKS 扁平条目)
-    d.setUint32(4, sel.length, true);         // nEntriesInUse
-    head.set(ascii(chunkId), 8);              // dwChunkId
-    d.setBigUint64(12, BigInt(baseAbs), true); // qwBaseOffset(64位)
-    d.setUint32(20, 0, true);                 // dwReserved_3
-    target.push(ascii('indx'), u32(24 + sel.length * 8), head);
-    for (const e of sel) {
-      const entry = new Uint8Array(8);
-      const de = new DataView(entry.buffer);
-      de.setUint32(0, e.rel + 8, true);                          // dwChunkOffset = 块数据相对 base(头+8)
-      de.setUint32(4, e.size | (e.key ? 0 : 0x80000000), true);  // 高位=非关键帧(ffmpeg 约定)
-      target.push(entry);
-    }
-  };
-  // 各段 movi 内容起点的绝对位置 + 各段(段内相对)索引条目
-  const segIdxEntries = segments.map((n, k) => calcSegIdx(k === 0 ? 0 : segments.slice(0, k).reduce((a, b) => a + b, 0), n));
-  // 只写视频 indx:音频 indx 块会让 PotPlayer 音频流错乱(无声音);
-  // 音频索引交给部分 idx1(0..516 帧),PotPlayer 顺序播放音频不受影响
-  const indxBytes = multi
-    ? segments.reduce((s, n, k) => s + (8 + 24 + segIdxEntries[k].filter(e => e.fourcc === frameFcc).length * 8), 0)
-    : 0;
-  const seg0BaseAbs = 32 + hdrlContent + indxBytes; // 段0 movi 内容起点(movi fourcc 之后)
+  // ===== 索引策略 =====
+  // idx1 的 u32 偏移最多表示 4.29GB,超出的条目会回绕(PotPlayer 残影根源)。
+  // 实测 PotPlayer 对头区的任何 'indx' 块都会出错(无声音/拒播),所以:
+  //   - 多段:写"部分 idx1"——偏移能放进 u32 的条目(前 ~517 帧,绝对正确);
+  //     超界部分按 AVI 规范"seek 到最近条目再顺序解码",结果仍正确(ffmpeg/VLC 已验证)。
+  //   - 单段:全部条目(u32 内)。
+  const idx1Entries = multi
+    ? (() => { const cut = allIdx.findIndex(e => e.offset + 4 > 0xFFFFF000); return cut < 0 ? allIdx : allIdx.slice(0, cut); })()
+    : allIdx;
+  const idxDataBytes = idx1Entries.length * 16;
 
   const parts: BlobPart[] = [];
-  // ===== 段 0(主 RIFF:AVI + hdrl + [indx] + movi0 + [idx1(单段)]) =====
+  // ===== 段 0(主 RIFF:AVI + hdrl + movi0 + idx1(部分/全部)) =====
   {
     const seg0 = segments[0];
     const movi0Content = moviContentOf(0, seg0);
-    // idx1 的 u32 偏移仅能表示 4.29GB 内条目,多段时改用 indx(64位 base)且不写 idx1
-    const idxDataBytes = multi ? 0 : (totalFrames + audioSlices.length) * 16;
     // RIFF 大小字段 = 段0 总大小 - 8('RIFF' + size 本身)
-    const riffSize = 28 + hdrlContent + indxBytes + movi0Content + idxDataBytes;
+    const riffSize = 28 + hdrlContent + movi0Content + idxDataBytes;
     parts.push(ascii('RIFF'), u32(riffSize), ascii('AVI '));
     // hdrl
     parts.push(ascii('LIST'), u32(hdrlContent), ascii('hdrl'));
@@ -2100,29 +2060,11 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
       parts.push(ascii('LIST'), u32(odmlContent), ascii('odml'));
       parts.push(ascii('dmlh'), u32(20), dmlh);
     }
-    // ODML indx 索引块(多段时):仅视频,64位 base,段内相对偏移,放在 hdrl 后、movi 前
-    if (multi) {
-      let abs = seg0BaseAbs;
-      for (let k = 0; k < segmentCount; k++) {
-        writeIndx(parts, frameFcc, segIdxEntries[k], abs);
-        if (k < segmentCount - 1) {
-          const off = k === 0 ? 0 : segments.slice(0, k).reduce((a, b) => a + b, 0);
-          abs += moviContentOf(off, segments[k]) + 20; // 下一段内容起点 = 本段内容起点 + 本段内容 + 段头20
-        }
-      }
-    }
     // movi(音视频交错)
     parts.push(ascii('LIST'), u32(movi0Content), ascii('movi'));
     writeMovi(0, seg0, parts, 0);
-    // idx1:单段写全部;多段写"能放进 u32 的部分"(前 ~517 帧)——PotPlayer 等
-    // 只读 idx1 的播放器靠它播放/seek,超界部分按规范 seek 到最近条目再顺序解码;
-    // ffmpeg/VLC 用上面的 indx(64位),完全不受影响
-    if (multi) {
-      const cut = allIdx.findIndex(e => e.offset + 4 > 0xFFFFF000);
-      writeIdx1(parts, cut < 0 ? allIdx : allIdx.slice(0, cut));
-    } else {
-      writeIdx1(parts, allIdx);
-    }
+    // idx1(多段=部分条目,单段=全部)紧跟段0 movi
+    writeIdx1(parts, idx1Entries);
   }
   // ===== 后续段(RIFF AVIX + LIST movi) =====
   {

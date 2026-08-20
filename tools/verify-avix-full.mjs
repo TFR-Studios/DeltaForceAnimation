@@ -4,7 +4,6 @@ import fs from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 
 const OUT = process.env.AVI_OUT || 'I:/Delta Force custom animation/tools/.avix-full.avi';
-const NO_INDX = process.env.NO_INDX === '1'; // A/B 对照:跳过 indx 块(仅部分 idx1)
 const W = 1920, H = 1080;
 const FRAME_BYTES = W * H * 4;
 const TOTAL = 609; // 4.1GB > 4.29GB? 500×8.3MB=4.15GB < 4.29GB! 用 520 帧 = 4.31GB
@@ -103,51 +102,20 @@ function buildAvi(w, h, fr, videoFcc, strf, frameFcc, frameChunks, pcm16, numCh,
       off += segments[k];
     }
   }
-  // ODML indx 索引(仅多段):idx1 的 u32 偏移 >4.29GB 回绕,indx 用 64位 base + 段内相对偏移
-  const calcSegIdx = (start, count) => {
-    let rel = 0;
-    const idx = [];
-    for (let i = start; i < start + count; i++) {
-      idx.push({ fourcc: frameFcc, key: frameKeyFlags ? !!frameKeyFlags[i] : true, rel, size: frameChunks[i].length });
-      rel += 8 + frameChunks[i].length;
-      const a = audioSlices[i];
-      if (a) { idx.push({ fourcc: '01wb', key: true, rel, size: a.length }); rel += 8 + a.length; }
-    }
-    return idx;
-  };
-  const writeIndx = (target, chunkId, entries, baseAbs) => {
-    const sel = entries.filter(e => e.fourcc === chunkId);
-    if (!sel.length) return;
-    const head = new Uint8Array(24);
-    const d = new DataView(head.buffer);
-    d.setUint16(0, 2, true);
-    d.setUint8(2, 0);
-    d.setUint8(3, 1);
-    d.setUint32(4, sel.length, true);
-    head.set(ascii(chunkId), 8);
-    d.setBigUint64(12, BigInt(baseAbs), true);
-    d.setUint32(20, 0, true);
-    target.push(ascii('indx'), u32(24 + sel.length * 8), head);
-    for (const e of sel) {
-      const entry = new Uint8Array(8);
-      const de = new DataView(entry.buffer);
-      de.setUint32(0, e.rel + 8, true);
-      de.setUint32(4, e.size | (e.key ? 0 : 0x80000000), true);
-      target.push(entry);
-    }
-  };
-  const segIdxEntries = segments.map((n, k) => calcSegIdx(k === 0 ? 0 : segments.slice(0, k).reduce((a, b) => a + b, 0), n));
-  // 只写视频 indx(音频 indx 块会让 PotPlayer 无声音;音频索引交给部分 idx1)
-  const indxBytes = multi && !NO_INDX
-    ? segments.reduce((s, n, k) => s + (8 + 24 + segIdxEntries[k].filter(e => e.fourcc === frameFcc).length * 8), 0)
-    : 0;
-  const seg0BaseAbs = 32 + hdrlContent + indxBytes;
+  // ===== 索引策略 =====
+  // idx1 的 u32 偏移最多表示 4.29GB,超出的条目回绕(PotPlayer 残影根源)。
+  // 实测 PotPlayer 对头区任何 'indx' 块都会出错(无声音/拒播),所以不写 indx:
+  //   - 多段:写"部分 idx1"(u32 内条目,前 ~517 帧);超界 seek 按规范跳到最近条目再顺序解码。
+  //   - 单段:全部条目。
+  const idx1Entries = multi
+    ? (() => { const cut = allIdx.findIndex(e => e.offset + 4 > 0xFFFFF000); return cut < 0 ? allIdx : allIdx.slice(0, cut); })()
+    : allIdx;
+  const idxDataBytes = idx1Entries.length * 16;
   const parts = [];
   {
     const seg0 = segments[0];
     const movi0Content = moviContentOf(0, seg0);
-    const idxDataBytes = multi ? 0 : (totalFrames + audioSlices.length) * 16;
-    const riffSize = 28 + hdrlContent + indxBytes + movi0Content + idxDataBytes;
+    const riffSize = 28 + hdrlContent + movi0Content + idxDataBytes;
     parts.push(ascii('RIFF'), u32(riffSize), ascii('AVI '));
     parts.push(ascii('LIST'), u32(hdrlContent), ascii('hdrl'));
     {
@@ -204,25 +172,9 @@ function buildAvi(w, h, fr, videoFcc, strf, frameFcc, frameChunks, pcm16, numCh,
       parts.push(ascii('LIST'), u32(odmlContent), ascii('odml'));
       parts.push(ascii('dmlh'), u32(20), dmlh);
     }
-    if (multi && !NO_INDX) {
-      let abs = seg0BaseAbs;
-      for (let k = 0; k < segmentCount; k++) {
-        writeIndx(parts, frameFcc, segIdxEntries[k], abs);
-        if (k < segmentCount - 1) {
-          const off = k === 0 ? 0 : segments.slice(0, k).reduce((a, b) => a + b, 0);
-          abs += moviContentOf(off, segments[k]) + 20;
-        }
-      }
-    }
     parts.push(ascii('LIST'), u32(movi0Content), ascii('movi'));
     writeMovi(0, seg0, parts, 0);
-    // idx1:单段全部;多段截断到 u32 边界(前 ~517 帧),PotPlayer 等 idx1-only 播放器用
-    if (multi) {
-      const cut = allIdx.findIndex(e => e.offset + 4 > 0xFFFFF000);
-      writeIdx1(parts, cut < 0 ? allIdx : allIdx.slice(0, cut));
-    } else {
-      writeIdx1(parts, allIdx);
-    }
+    writeIdx1(parts, idx1Entries);
   }
   {
     let offset = segments[0];
