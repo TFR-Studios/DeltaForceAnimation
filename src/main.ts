@@ -293,13 +293,18 @@ function seqCurrentFrame(globalData: any): number {
 }
 
 /* canvas 元素:在 prepareFrame(每帧无条件调用)中切换图片,不依赖渲染器 _mdf;
- * 当前槽绘制,另一槽预载下一帧。导出模式(__seqUseExport)只挂导出专用图片。 */
+ * 当前槽绘制,另一槽预载下一帧。导出模式(__seqUseExport)只挂导出专用图片。
+ * 关键:lottie 的 renderFrame 仅在 globalData._mdf 为真时才真正重绘元素——
+ * 静态层(变换/透明度不变)画过一次后永不重绘,序列换图不会生效(画面冻结=残影),
+ * 所以换图后必须强制 this._mdf / globalData._mdf。 */
 function patchSeqCanvasElement(el: any) {
   const origPrepare = el.prepareFrame ? el.prepareFrame.bind(el) : null;
   if (origPrepare) {
     el.prepareFrame = function (this: any, num: number) {
+      let changed = false;
       if (this.__seqUseExport) {
         if (seqExportImg && this.img !== seqExportImg) this.img = seqExportImg;
+        changed = true; // 导出模式:seqExportImg 内容每帧在变,必须每帧强制重绘
       } else {
         const f = typeof num === 'number' && isFinite(num) ? num : seqCurrentFrame(this.globalData);
         const url = seqFrameUrl(f);
@@ -307,7 +312,7 @@ function patchSeqCanvasElement(el: any) {
           const mySlot = el.__seqSlot === 1 ? seqImgB : seqImgA;
           const other = mySlot === seqImgA ? seqImgB : seqImgA;
           if (mySlot.src !== url) mySlot.src = url;
-          if (this.img !== mySlot) this.img = mySlot;
+          if (this.img !== mySlot) { this.img = mySlot; changed = true; }
           const nextUrl = seqFrameUrl(f + 1);
           if (nextUrl && other.src !== nextUrl) other.src = nextUrl;
           el.__seqSlot = el.__seqSlot === 1 ? 0 : 1;
@@ -319,7 +324,13 @@ function patchSeqCanvasElement(el: any) {
           };
         }
       }
-      return origPrepare(num);
+      const r = origPrepare(num);
+      // 换图后强制重绘:lottie 只在 globalData._mdf 时调用元素 renderFrame
+      if (changed) {
+        this._mdf = true;
+        if (this.globalData) this.globalData._mdf = true;
+      }
+      return r;
     };
   }
   // 兜底:绘制前再次确保图片正确(覆盖 prepareFrame 不可用的路径)
