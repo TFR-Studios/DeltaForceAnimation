@@ -91,25 +91,32 @@ function buildAvi(w, h, fr, videoFcc, strf, frameFcc, frameChunks, pcm16, numCh,
     }
     return idx;
   };
-  const allIdx = [];
-  {
+  // 跨段 base 计算(两遍法:idxDataBytes 依赖截断点,截断点依赖 base,但截断点
+  // 只由 4.29GB 边界决定,16KB 级平移不会改变它)
+  const calcAllIdx = (idxData) => {
+    const out = [];
     let off = segments[0];
-    let base = moviContentOf(0, segments[0]) + 20;
-    allIdx.push(...calcIdx(0, segments[0], 0));
+    // 段 k 第一帧块相对段0内容起点的偏移 = Σ前面段 movi 内容 + idx1块(8+idxData) + 段头(20)
+    // idx1 块在段0 内 movi0 之后必须计入;段头 = RIFF(8)+AVIX(4)+LIST(8) = 20,
+    // 'movi' fourcc 已含在 moviContentOf 内,不能重复加
+    let base = moviContentOf(0, segments[0]) + idxData + 28;
+    out.push(...calcIdx(0, segments[0], 0));
     for (let k = 1; k < segmentCount; k++) {
-      allIdx.push(...calcIdx(off, segments[k], base));
-      base += moviContentOf(off, segments[k]) + 24;
+      out.push(...calcIdx(off, segments[k], base));
+      base += moviContentOf(off, segments[k]) + 20;
       off += segments[k];
     }
-  }
+    return out;
+  };
+  let allIdx = calcAllIdx(0);
   // ===== 索引策略 =====
   // idx1 的 u32 偏移最多表示 4.29GB,超出的条目回绕(PotPlayer 残影根源)。
   // 实测 PotPlayer 对头区任何 'indx' 块都会出错(无声音/拒播),所以不写 indx:
   //   - 多段:写"部分 idx1"(u32 内条目,前 ~517 帧);超界 seek 按规范跳到最近条目再顺序解码。
   //   - 单段:全部条目。
-  const idx1Entries = multi
-    ? (() => { const cut = allIdx.findIndex(e => e.offset + 4 > 0xFFFFF000); return cut < 0 ? allIdx : allIdx.slice(0, cut); })()
-    : allIdx;
+  const idxCut = multi ? allIdx.findIndex(e => e.offset + 4 > 0xFFFFF000) : -1;
+  if (multi) allIdx = calcAllIdx((idxCut < 0 ? allIdx.length : idxCut) * 16);
+  const idx1Entries = idxCut < 0 ? allIdx : allIdx.slice(0, idxCut);
   const idxDataBytes = idx1Entries.length * 16;
   const parts = [];
   {
@@ -290,6 +297,77 @@ while (pos + 12 < avi.length) {
 }
 fs.closeSync(fd);
 console.log('AVIX 段数:', segments, segments > 1 ? '✓ 已分段' : '✗ 未分段');
+
+// ===== 关键:idx1 条目位置 vs 实际块位置(跨段偏移计算错误会在此暴露;
+// ffmpeg seek 有 avi_sync 重同步会掩盖该错误,PotPlayer 不会 = 残影/错位/滋滋声) =====
+{
+  const rfd = fs.openSync(OUT, 'r');
+  // 定位 idx1(段0 内 movi0 后)
+  let idx1At = -1;
+  {
+    let pp = movi0Pos + 8 + movi0Size; // LIST 内容结束 = idx1 位置
+    const h2 = Buffer.alloc(8);
+    fs.readSync(rfd, h2, 0, 8, pp);
+    if (h2.toString('latin1', 0, 4) === 'idx1') idx1At = pp;
+  }
+  if (idx1At < 0) {
+    console.log('✗ 未找到 idx1!');
+  } else {
+    // 扫描全部段的实际块位置
+    const actualV = {}, actualA = {};
+    let frameIdx = 0;
+    const ch3 = Buffer.alloc(8);
+    let p2 = movi0Pos + 12;
+    const mEnd0 = movi0Pos + 8 + movi0Size;
+    while (p2 + 8 <= mEnd0) {
+      fs.readSync(rfd, ch3, 0, 8, p2);
+      const id = ch3.toString('latin1', 0, 4), sz = ch3.readUInt32LE(4);
+      if (id === '00db') { actualV[frameIdx] = p2; frameIdx++; }
+      else if (id === '01wb') { actualA[frameIdx - 1] = p2; }
+      p2 += 8 + sz;
+    }
+    const ih2 = Buffer.alloc(8);
+    fs.readSync(rfd, ih2, 0, 8, p2);
+    if (ih2.toString('latin1', 0, 4) === 'idx1') p2 += 8 + ih2.readUInt32LE(4);
+    while (p2 + 12 < avi.length) {
+      const rb = Buffer.alloc(8);
+      fs.readSync(rfd, rb, 0, 8, p2);
+      if (rb.toString('latin1', 0, 4) !== 'RIFF') break;
+      const riffSz = rb.readUInt32LE(4);
+      const mh = Buffer.alloc(12);
+      fs.readSync(rfd, mh, 0, 12, p2 + 12);
+      const mSize = mh.readUInt32LE(4);
+      let mp = p2 + 24;
+      const mEnd = p2 + 24 + mSize;
+      while (mp + 8 <= mEnd) {
+        fs.readSync(rfd, ch3, 0, 8, mp);
+        const id = ch3.toString('latin1', 0, 4), sz = ch3.readUInt32LE(4);
+        if (id === '00db') { actualV[frameIdx] = mp; frameIdx++; }
+        else if (id === '01wb') { actualA[frameIdx - 1] = mp; }
+        mp += 8 + sz;
+      }
+      p2 += 8 + riffSz;
+    }
+    // idx1 条目 vs 实际
+    const e16 = Buffer.alloc(16);
+    const entOf = (k) => { fs.readSync(rfd, e16, 0, 16, idx1At + 8 + k * 16); return { tag: e16.toString('latin1', 0, 4), off: e16.readUInt32LE(8) }; };
+    const dataOffset = actualV[0] - entOf(0).off;
+    const samples = [0, 50, 100, 126, 127, 128, 200, 250, 300, 381, 400, 499, 507, 508, 510, 516, 517];
+    let posOk = true;
+    for (const f of samples) {
+      if (actualV[f] === undefined) continue;
+      const vCalc = entOf(f * 2).off + dataOffset;
+      const aEnt = entOf(f * 2 + 1);
+      const vOk = vCalc === actualV[f];
+      let aOk = true;
+      if (aEnt.tag === '01wb' && actualA[f] !== undefined) aOk = (aEnt.off + dataOffset) === actualA[f];
+      if (!vOk || !aOk) posOk = false;
+      console.log(`条目位置 帧${f}: 视频${vCalc === actualV[f] ? '✓' : '✗差' + (vCalc - actualV[f])} 音频${aOk ? '✓' : '✗'}`);
+    }
+    console.log(posOk ? '✓ 全部 idx1 条目位置与文件实际一致' : '✗ idx1 条目位置错误(PotPlayer 残影/错位/滋滋声根源)');
+    fs.closeSync(rfd);
+  }
+}
 
 // 定位帧 250/499 的块并检查颜色
 const findFrame = (target) => {

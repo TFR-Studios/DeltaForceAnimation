@@ -1949,27 +1949,34 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
     }
     return idx;
   };
-  const allIdx: { fourcc: string; flags: number; offset: number; size: number }[] = [];
-  {
+  // 跨段 base 计算(两遍法:idxDataBytes 依赖截断点,截断点依赖 base,但截断点
+  // 只由 4.29GB 边界决定,16KB 级平移不会改变它,所以第一遍用占位值求截断,
+  // 第二遍用真实 idxDataBytes 重算。截断点在 517/518 帧之间,与段偏移无关)
+  const calcAllIdx = (idxData: number): { fourcc: string; flags: number; offset: number; size: number }[] => {
+    const out: { fourcc: string; flags: number; offset: number; size: number }[] = [];
     let off = segments[0];
-    let base = moviContentOf(0, segments[0]) + 20; // 段 k 第一帧块头 = Σ前面段 movi 内容 + 段头 24×前面段数 - 4
-    allIdx.push(...calcIdx(0, segments[0], 0));
+    // 段 k 第一帧块相对段0内容起点的偏移 = Σ前面段 movi 内容 + idx1块(8+idxData) + 段头(20)
+    // 注意:idx1 块在段0 内 movi0 之后,必须计入;段头 = RIFF(8)+AVIX(4)+LIST(8) = 20,
+    // 'movi' fourcc 已含在 moviContentOf 内,不能重复加
+    let base = moviContentOf(0, segments[0]) + idxData + 28;
+    out.push(...calcIdx(0, segments[0], 0));
     for (let k = 1; k < segmentCount; k++) {
-      allIdx.push(...calcIdx(off, segments[k], base));
-      base += moviContentOf(off, segments[k]) + 24;
+      out.push(...calcIdx(off, segments[k], base));
+      base += moviContentOf(off, segments[k]) + 20;
       off += segments[k];
     }
-  }
-
+    return out;
+  };
+  let allIdx = calcAllIdx(0);
   // ===== 索引策略 =====
   // idx1 的 u32 偏移最多表示 4.29GB,超出的条目会回绕(PotPlayer 残影根源)。
   // 实测 PotPlayer 对头区的任何 'indx' 块都会出错(无声音/拒播),所以:
   //   - 多段:写"部分 idx1"——偏移能放进 u32 的条目(前 ~517 帧,绝对正确);
   //     超界部分按 AVI 规范"seek 到最近条目再顺序解码",结果仍正确(ffmpeg/VLC 已验证)。
   //   - 单段:全部条目(u32 内)。
-  const idx1Entries = multi
-    ? (() => { const cut = allIdx.findIndex(e => e.offset + 4 > 0xFFFFF000); return cut < 0 ? allIdx : allIdx.slice(0, cut); })()
-    : allIdx;
+  const idxCut = multi ? allIdx.findIndex(e => e.offset + 4 > 0xFFFFF000) : -1;
+  if (multi) allIdx = calcAllIdx((idxCut < 0 ? allIdx.length : idxCut) * 16);
+  const idx1Entries = idxCut < 0 ? allIdx : allIdx.slice(0, idxCut);
   const idxDataBytes = idx1Entries.length * 16;
 
   const parts: BlobPart[] = [];
