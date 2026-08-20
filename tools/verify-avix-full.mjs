@@ -3,10 +3,10 @@
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 
-const OUT = 'I:/Delta Force custom animation/tools/.avix-big.avi';
+const OUT = 'I:/Delta Force custom animation/tools/.avix-full.avi';
 const W = 1920, H = 1080;
 const FRAME_BYTES = W * H * 4;
-const TOTAL = 500; // 4.1GB > 4.29GB? 500×8.3MB=4.15GB < 4.29GB! 用 520 帧 = 4.31GB
+const TOTAL = 609; // 4.1GB > 4.29GB? 500×8.3MB=4.15GB < 4.29GB! 用 520 帧 = 4.31GB
 // 用 520 帧:520 × 8,294,400 = 4,313,088,000 > 4,294,967,296 ✓ 触发分段
 
 function ascii(s) { const b = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i); return b; }
@@ -311,7 +311,7 @@ const th = Buffer.alloc(8);
 const movi0Size = th.readUInt32LE(4);
 console.log('RIFF0 size:', riff0, riff0 < 4294967295 ? '✓ 未溢出' : '✗ 溢出');
 // 段0 idx1 条目数(从 idx1 chunk 头读)
-let pos = movi0Pos + 8 + movi0Size; // LIST 内容结束 = 段0 末尾
+let pos = movi0Pos + 12 + movi0Size;
 const idxHead = Buffer.alloc(8);
 fs.readSync(fd, idxHead, 0, 8, pos);
 console.log('movi0 后块:', idxHead.toString('latin1', 0, 4), 'size', idxHead.readUInt32LE(4));

@@ -12,3 +12,6 @@ animation/animation_data.*.json
 
 # 验证脚本生成的测试视频
 tools/*.avi
+
+# 用户导出的视频(避免提交 GitHub)
+/*.avi

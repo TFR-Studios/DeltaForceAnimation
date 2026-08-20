@@ -3,10 +3,10 @@
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 
-const OUT = 'I:/Delta Force custom animation/tools/.avix-big.avi';
+const OUT = 'I:/Delta Force custom animation/tools/.avix-single.avi';
 const W = 1920, H = 1080;
 const FRAME_BYTES = W * H * 4;
-const TOTAL = 500; // 4.1GB > 4.29GB? 500×8.3MB=4.15GB < 4.29GB! 用 520 帧 = 4.31GB
+const TOTAL = 100; // 4.1GB > 4.29GB? 500×8.3MB=4.15GB < 4.29GB! 用 520 帧 = 4.31GB
 // 用 520 帧:520 × 8,294,400 = 4,313,088,000 > 4,294,967,296 ✓ 触发分段
 
 function ascii(s) { const b = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i); return b; }
@@ -102,50 +102,12 @@ function buildAvi(w, h, fr, videoFcc, strf, frameFcc, frameChunks, pcm16, numCh,
       off += segments[k];
     }
   }
-  // ODML indx 索引(仅多段):idx1 的 u32 偏移 >4.29GB 回绕,indx 用 64位 base + 段内相对偏移
-  const calcSegIdx = (start, count) => {
-    let rel = 0;
-    const idx = [];
-    for (let i = start; i < start + count; i++) {
-      idx.push({ fourcc: frameFcc, key: frameKeyFlags ? !!frameKeyFlags[i] : true, rel, size: frameChunks[i].length });
-      rel += 8 + frameChunks[i].length;
-      const a = audioSlices[i];
-      if (a) { idx.push({ fourcc: '01wb', key: true, rel, size: a.length }); rel += 8 + a.length; }
-    }
-    return idx;
-  };
-  const writeIndx = (target, chunkId, entries, baseAbs) => {
-    const sel = entries.filter(e => e.fourcc === chunkId);
-    if (!sel.length) return;
-    const head = new Uint8Array(24);
-    const d = new DataView(head.buffer);
-    d.setUint16(0, 4, true);
-    d.setUint8(2, 0);
-    d.setUint8(3, 0);
-    d.setUint32(4, sel.length, true);
-    head.set(ascii(chunkId), 8);
-    d.setBigUint64(12, BigInt(baseAbs), true);
-    d.setUint32(20, 0, true);
-    target.push(ascii('indx'), u32(24 + sel.length * 16), head);
-    for (const e of sel) {
-      const entry = new Uint8Array(16);
-      const de = new DataView(entry.buffer);
-      de.setUint32(0, e.rel + 8, true);
-      de.setUint32(4, e.size | (e.key ? 0x80000000 : 0), true);
-      target.push(entry);
-    }
-  };
-  const segIdxEntries = segments.map((n, k) => calcSegIdx(k === 0 ? 0 : segments.slice(0, k).reduce((a, b) => a + b, 0), n));
-  const indxBytes = multi
-    ? segments.reduce((s, n, k) => s + (8 + 24 + segIdxEntries[k].filter(e => e.fourcc === frameFcc).length * 16) + (hasAudio ? 8 + 24 + segIdxEntries[k].filter(e => e.fourcc === '01wb').length * 16 : 0), 0)
-    : 0;
-  const seg0BaseAbs = 32 + hdrlContent + indxBytes;
   const parts = [];
   {
     const seg0 = segments[0];
     const movi0Content = moviContentOf(0, seg0);
-    const idxDataBytes = multi ? 0 : (totalFrames + audioSlices.length) * 16;
-    const riffSize = 28 + hdrlContent + indxBytes + movi0Content + idxDataBytes;
+    const idxDataBytes = (totalFrames + audioSlices.length) * 16;
+    const riffSize = 28 + hdrlContent + movi0Content + idxDataBytes;
     parts.push(ascii('RIFF'), u32(riffSize), ascii('AVI '));
     parts.push(ascii('LIST'), u32(hdrlContent), ascii('hdrl'));
     {
@@ -202,20 +164,9 @@ function buildAvi(w, h, fr, videoFcc, strf, frameFcc, frameChunks, pcm16, numCh,
       parts.push(ascii('LIST'), u32(odmlContent), ascii('odml'));
       parts.push(ascii('dmlh'), u32(20), dmlh);
     }
-    if (multi) {
-      let abs = seg0BaseAbs;
-      for (let k = 0; k < segmentCount; k++) {
-        writeIndx(parts, frameFcc, segIdxEntries[k], abs);
-        if (hasAudio) writeIndx(parts, '01wb', segIdxEntries[k], abs);
-        if (k < segmentCount - 1) {
-          const off = k === 0 ? 0 : segments.slice(0, k).reduce((a, b) => a + b, 0);
-          abs += moviContentOf(off, segments[k]) + 20;
-        }
-      }
-    }
     parts.push(ascii('LIST'), u32(movi0Content), ascii('movi'));
     writeMovi(0, seg0, parts, 0);
-    if (!multi) writeIdx1(parts, allIdx);
+    writeIdx1(parts, allIdx);
   }
   {
     let offset = segments[0];
@@ -298,20 +249,11 @@ const head = Buffer.alloc(4096);
 fs.readSync(fd, head, 0, 4096, 0);
 const riff0 = head.readUInt32LE(4);
 const hdrl = head.readUInt32LE(16);
-// 跳过 hdrl 后的 indx 块(多段时存在),找到真正的 LIST movi
-let movi0Pos = 12 + 8 + hdrl;
-const th = Buffer.alloc(8);
-{
-  for (;;) {
-    fs.readSync(fd, th, 0, 8, movi0Pos);
-    if (th.toString('latin1', 0, 4) === 'indx') { movi0Pos += 8 + th.readUInt32LE(4); continue; }
-    break;
-  }
-}
-const movi0Size = th.readUInt32LE(4);
+const movi0Pos = 12 + 8 + hdrl;
+const movi0Size = head.readUInt32LE(movi0Pos + 4);
 console.log('RIFF0 size:', riff0, riff0 < 4294967295 ? '✓ 未溢出' : '✗ 溢出');
 // 段0 idx1 条目数(从 idx1 chunk 头读)
-let pos = movi0Pos + 8 + movi0Size; // LIST 内容结束 = 段0 末尾
+let pos = movi0Pos + 12 + movi0Size;
 const idxHead = Buffer.alloc(8);
 fs.readSync(fd, idxHead, 0, 8, pos);
 console.log('movi0 后块:', idxHead.toString('latin1', 0, 4), 'size', idxHead.readUInt32LE(4));
@@ -416,7 +358,6 @@ console.log('\n--- seek 路径验证(播放器方式) ---');
 const seekTargets = [0.5, 2.2, 3.5, 5.0, 6.5, 8.0, 9.5];
 let seekOk = true;
 for (const ss of seekTargets) {
-  if (ss >= TOTAL / 60) { console.log(`seek ${ss}s: 跳过(超出时长 ${(TOTAL / 60).toFixed(2)}s)`); continue; }
   try {
     const raw = execFileSync('ffmpeg', ['-y', '-v', 'error', '-ss', String(ss), '-i', OUT, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgba', '-'], { maxBuffer: 200 * 1024 * 1024, timeout: 90000 });
     if (raw.length === 0) { console.log(`seek ${ss}s: ✗ 无输出`); seekOk = false; continue; }

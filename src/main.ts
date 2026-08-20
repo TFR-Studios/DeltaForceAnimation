@@ -1911,7 +1911,7 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
     for (let i = start; i < start + count; i++) {
       const c = frameChunks[i];
       target.push(ascii(frameFcc), u32(c.length), c);
-      idx.push({ fourcc: frameFcc, flags: frameKeyFlags && frameKeyFlags[i] ? 0x10 : 0x00, offset: moviOffset, size: c.length });
+      idx.push({ fourcc: frameFcc, flags: frameKeyFlags ? (frameKeyFlags[i] ? 0x10 : 0x00) : 0x10, offset: moviOffset, size: c.length });
       moviOffset += 8 + c.length;
       const a = audioSlices[i];
       if (a) {
@@ -1935,17 +1935,87 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
     }
   };
 
-  const parts: BlobPart[] = [];
+  // 预计算所有段的 idx 条目(段0 的 idx1 需要包含全部帧,ffmpeg 只在第一个 movi 后扫描 idx1)
+  const calcIdx = (start: number, count: number, baseOffset: number): { fourcc: string; flags: number; offset: number; size: number }[] => {
+    let moviOffset = baseOffset + 4;
+    const idx: { fourcc: string; flags: number; offset: number; size: number }[] = [];
+    for (let i = start; i < start + count; i++) {
+      idx.push({ fourcc: frameFcc, flags: frameKeyFlags ? (frameKeyFlags[i] ? 0x10 : 0x00) : 0x10, offset: moviOffset, size: frameChunks[i].length });
+      moviOffset += 8 + frameChunks[i].length;
+      if (audioSlices[i]) {
+        idx.push({ fourcc: '01wb', flags: 0x10, offset: moviOffset, size: audioSlices[i].length });
+        moviOffset += 8 + audioSlices[i].length;
+      }
+    }
+    return idx;
+  };
   const allIdx: { fourcc: string; flags: number; offset: number; size: number }[] = [];
-  // ===== 段 0(主 RIFF:AVI + hdrl + movi0 + idx1(全部帧条目,多段时跨段索引) =====
+  {
+    let off = segments[0];
+    let base = moviContentOf(0, segments[0]) + 20; // 段 k 第一帧块头 = Σ前面段 movi 内容 + 段头 24×前面段数 - 4
+    allIdx.push(...calcIdx(0, segments[0], 0));
+    for (let k = 1; k < segmentCount; k++) {
+      allIdx.push(...calcIdx(off, segments[k], base));
+      base += moviContentOf(off, segments[k]) + 24;
+      off += segments[k];
+    }
+  }
+
+  // ===== ODML indx 索引(仅多段):idx1 的 u32 偏移在文件 >4.29GB 时会回绕,
+  // 最后一段 seek 位置错乱(残影)。indx 用 64 位 qwBaseOffset + 段内 u32 相对偏移,
+  // ffmpeg 在 header 遍历时逐块读取(indx 块放在 hdrl 后、movi 前)。
+  // 条目:dwChunkOffset(u32, 相对 base 的块数据偏移) + dwChunkLength(u32, 高位=关键帧)
+  const calcSegIdx = (start: number, count: number): { fourcc: string; key: boolean; rel: number; size: number }[] => {
+    let rel = 0;
+    const idx: { fourcc: string; key: boolean; rel: number; size: number }[] = [];
+    for (let i = start; i < start + count; i++) {
+      idx.push({ fourcc: frameFcc, key: frameKeyFlags ? !!frameKeyFlags[i] : true, rel, size: frameChunks[i].length });
+      rel += 8 + frameChunks[i].length;
+      const a = audioSlices[i];
+      if (a) {
+        idx.push({ fourcc: '01wb', key: true, rel, size: a.length });
+        rel += 8 + a.length;
+      }
+    }
+    return idx;
+  };
+  const writeIndx = (target: BlobPart[], chunkId: string, entries: { fourcc: string; key: boolean; rel: number; size: number }[], baseAbs: number) => {
+    const sel = entries.filter(e => e.fourcc === chunkId);
+    if (!sel.length) return;
+    const head = new Uint8Array(24);
+    const d = new DataView(head.buffer);
+    d.setUint16(0, 4, true);                  // wLongsPerEntry
+    d.setUint8(2, 0);                         // bIndexSubType
+    d.setUint8(3, 0);                         // bIndexType: AVI_INDEX_OF_CHUNKS
+    d.setUint32(4, sel.length, true);         // nEntriesInUse
+    head.set(ascii(chunkId), 8);              // dwChunkId
+    d.setBigUint64(12, BigInt(baseAbs), true); // qwBaseOffset(64位)
+    d.setUint32(20, 0, true);                 // dwReserved_3
+    target.push(ascii('indx'), u32(24 + sel.length * 16), head);
+    for (const e of sel) {
+      const entry = new Uint8Array(16);
+      const de = new DataView(entry.buffer);
+      de.setUint32(0, e.rel + 8, true);                       // dwChunkOffset = 块数据相对 base(头+8)
+      de.setUint32(4, e.size | (e.key ? 0x80000000 : 0), true); // dwChunkLength,高位=关键帧
+      target.push(entry);
+    }
+  };
+  // 各段 movi 内容起点的绝对位置 + 各段(段内相对)索引条目
+  const segIdxEntries = segments.map((n, k) => calcSegIdx(k === 0 ? 0 : segments.slice(0, k).reduce((a, b) => a + b, 0), n));
+  const indxBytes = multi
+    ? segments.reduce((s, n, k) => s + (8 + 24 + segIdxEntries[k].filter(e => e.fourcc === frameFcc).length * 16) + (hasAudio ? 8 + 24 + segIdxEntries[k].filter(e => e.fourcc === '01wb').length * 16 : 0), 0)
+    : 0;
+  const seg0BaseAbs = 32 + hdrlContent + indxBytes; // 段0 movi 内容起点(movi fourcc 之后)
+
+  const parts: BlobPart[] = [];
+  // ===== 段 0(主 RIFF:AVI + hdrl + [indx] + movi0 + [idx1(单段)]) =====
   {
     const seg0 = segments[0];
     const movi0Content = moviContentOf(0, seg0);
-    // idx1 始终紧跟段0 movi(ffmpeg 只在第一个 movi 后扫描 idx1,遇到后续 RIFF 段会停止):
-    // 多段时 idx1 包含全部帧条目(offset 统一相对段0 movi 内容起点,uint32 可表示)
-    const idxDataBytes = (totalFrames + audioSlices.length) * 16;
+    // idx1 的 u32 偏移仅能表示 4.29GB 内条目,多段时改用 indx(64位 base)且不写 idx1
+    const idxDataBytes = multi ? 0 : (totalFrames + audioSlices.length) * 16;
     // RIFF 大小字段 = 段0 总大小 - 8('RIFF' + size 本身)
-    const riffSize = 28 + hdrlContent + movi0Content + idxDataBytes;
+    const riffSize = 28 + hdrlContent + indxBytes + movi0Content + idxDataBytes;
     parts.push(ascii('RIFF'), u32(riffSize), ascii('AVI '));
     // hdrl
     parts.push(ascii('LIST'), u32(hdrlContent), ascii('hdrl'));
@@ -1983,7 +2053,9 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
       d.setUint32(32, totalFrames, true); // length
       d.setUint32(36, isDib ? frameBytes : 0, true); // dwSuggestedBufferSize
       d.setUint32(40, 0xffffffff, true); // dwQuality: -1 使用默认质量
-      d.setUint32(44, isDib ? frameBytes : 0, true); // dwSampleSize: 无压缩视频为固定帧大小
+      // dwSampleSize 必须为 0:ffmpeg 的 seek 会把时间戳 × dwSampleSize 再查索引,
+      // 无压缩帧若设置帧大小会导致 seek 失败(播放器残影/卡死)
+      d.setUint32(44, 0, true);
       parts.push(ascii('strh'), u32(56), strh);
       // strf (BITMAPINFOHEADER,长度可变:40 或 40+avcC)
       parts.push(ascii('strf'), u32(strf.length), strf);
@@ -2025,34 +2097,39 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
       parts.push(ascii('LIST'), u32(odmlContent), ascii('odml'));
       parts.push(ascii('dmlh'), u32(20), dmlh);
     }
+    // ODML indx 索引块(多段时):64位 base,段内相对偏移,必须放在 hdrl 后、movi 前
+    if (multi) {
+      let abs = seg0BaseAbs;
+      for (let k = 0; k < segmentCount; k++) {
+        writeIndx(parts, frameFcc, segIdxEntries[k], abs);
+        if (hasAudio) writeIndx(parts, '01wb', segIdxEntries[k], abs);
+        if (k < segmentCount - 1) {
+          const off = k === 0 ? 0 : segments.slice(0, k).reduce((a, b) => a + b, 0);
+          abs += moviContentOf(off, segments[k]) + 20; // 下一段内容起点 = 本段内容起点 + 本段内容 + 段头20
+        }
+      }
+    }
     // movi(音视频交错)
     parts.push(ascii('LIST'), u32(movi0Content), ascii('movi'));
-    const idx0 = writeMovi(0, seg0, parts, 0);
-    // idx1 紧跟段0,包含全部帧条目(多段时跨段索引,ffmpeg 只扫描第一个 movi 后的 idx1)
-    allIdx.push(...idx0);
-    if (!multi) {
-      writeIdx1(parts, idx0);
-    }
+    writeMovi(0, seg0, parts, 0);
+    // 单段:idx1 紧跟段0(全部帧偏移 < 4.29GB,uint32 可表示)
+    if (!multi) writeIdx1(parts, allIdx);
   }
   // ===== 后续段(RIFF AVIX + LIST movi) =====
   {
     let offset = segments[0];
-    // 跨段帧的 idx1 offset 统一相对段0 movi 内容起点:
-    // 段 k 第一帧块头 = Σ前面段 movi 内容 + 段头(RIFF8+AVIX4+LIST8+movi4=24)×前面段数
-    let baseOffset = moviContentOf(0, segments[0]) + 20; // 段0 movi + 段1头24 - 4(writeMovi 内部 +4)
+    let baseOffset = moviContentOf(0, segments[0]) + 20;
     for (let k = 1; k < segmentCount; k++) {
       const seg = segments[k];
       const moviKContent = moviContentOf(offset, seg);
       const riffSize = 12 + moviKContent; // 'AVIX'(4) + LIST(8+moviContent)
       parts.push(ascii('RIFF'), u32(riffSize), ascii('AVIX'));
       parts.push(ascii('LIST'), u32(moviKContent), ascii('movi'));
-      allIdx.push(...writeMovi(offset, seg, parts, baseOffset));
+      writeMovi(offset, seg, parts, baseOffset);
       baseOffset += moviKContent + 24;
       offset += seg;
     }
   }
-  // ===== 多段:idx1(段0 后)写入全部帧条目 =====
-  if (multi) writeIdx1(parts, allIdx);
 
   return new Blob(parts, { type: 'video/x-msvideo' });
 }
