@@ -137,8 +137,9 @@ function buildAvi(w, h, fr, videoFcc, strf, frameFcc, frameChunks, pcm16, numCh,
     }
   };
   const segIdxEntries = segments.map((n, k) => calcSegIdx(k === 0 ? 0 : segments.slice(0, k).reduce((a, b) => a + b, 0), n));
+  // 只写视频 indx(音频 indx 块会让 PotPlayer 无声音;音频索引交给部分 idx1)
   const indxBytes = multi && !NO_INDX
-    ? segments.reduce((s, n, k) => s + (8 + 24 + segIdxEntries[k].filter(e => e.fourcc === frameFcc).length * 8) + (hasAudio ? 8 + 24 + segIdxEntries[k].filter(e => e.fourcc === '01wb').length * 8 : 0), 0)
+    ? segments.reduce((s, n, k) => s + (8 + 24 + segIdxEntries[k].filter(e => e.fourcc === frameFcc).length * 8), 0)
     : 0;
   const seg0BaseAbs = 32 + hdrlContent + indxBytes;
   const parts = [];
@@ -207,7 +208,6 @@ function buildAvi(w, h, fr, videoFcc, strf, frameFcc, frameChunks, pcm16, numCh,
       let abs = seg0BaseAbs;
       for (let k = 0; k < segmentCount; k++) {
         writeIndx(parts, frameFcc, segIdxEntries[k], abs);
-        if (hasAudio) writeIndx(parts, '01wb', segIdxEntries[k], abs);
         if (k < segmentCount - 1) {
           const off = k === 0 ? 0 : segments.slice(0, k).reduce((a, b) => a + b, 0);
           abs += moviContentOf(off, segments[k]) + 20;

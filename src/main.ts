@@ -2003,8 +2003,10 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
   };
   // 各段 movi 内容起点的绝对位置 + 各段(段内相对)索引条目
   const segIdxEntries = segments.map((n, k) => calcSegIdx(k === 0 ? 0 : segments.slice(0, k).reduce((a, b) => a + b, 0), n));
+  // 只写视频 indx:音频 indx 块会让 PotPlayer 音频流错乱(无声音);
+  // 音频索引交给部分 idx1(0..516 帧),PotPlayer 顺序播放音频不受影响
   const indxBytes = multi
-    ? segments.reduce((s, n, k) => s + (8 + 24 + segIdxEntries[k].filter(e => e.fourcc === frameFcc).length * 8) + (hasAudio ? 8 + 24 + segIdxEntries[k].filter(e => e.fourcc === '01wb').length * 8 : 0), 0)
+    ? segments.reduce((s, n, k) => s + (8 + 24 + segIdxEntries[k].filter(e => e.fourcc === frameFcc).length * 8), 0)
     : 0;
   const seg0BaseAbs = 32 + hdrlContent + indxBytes; // 段0 movi 内容起点(movi fourcc 之后)
 
@@ -2098,12 +2100,11 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
       parts.push(ascii('LIST'), u32(odmlContent), ascii('odml'));
       parts.push(ascii('dmlh'), u32(20), dmlh);
     }
-    // ODML indx 索引块(多段时):64位 base,段内相对偏移,必须放在 hdrl 后、movi 前
+    // ODML indx 索引块(多段时):仅视频,64位 base,段内相对偏移,放在 hdrl 后、movi 前
     if (multi) {
       let abs = seg0BaseAbs;
       for (let k = 0; k < segmentCount; k++) {
         writeIndx(parts, frameFcc, segIdxEntries[k], abs);
-        if (hasAudio) writeIndx(parts, '01wb', segIdxEntries[k], abs);
         if (k < segmentCount - 1) {
           const off = k === 0 ? 0 : segments.slice(0, k).reduce((a, b) => a + b, 0);
           abs += moviContentOf(off, segments[k]) + 20; // 下一段内容起点 = 本段内容起点 + 本段内容 + 段头20

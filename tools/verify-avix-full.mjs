@@ -3,7 +3,8 @@
 import fs from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 
-const OUT = 'I:/Delta Force custom animation/tools/.avix-full.avi';
+const OUT = process.env.AVI_OUT || 'I:/Delta Force custom animation/tools/.avix-full.avi';
+const NO_INDX = process.env.NO_INDX === '1'; // A/B 对照:跳过 indx 块(仅部分 idx1)
 const W = 1920, H = 1080;
 const FRAME_BYTES = W * H * 4;
 const TOTAL = 609; // 4.1GB > 4.29GB? 500×8.3MB=4.15GB < 4.29GB! 用 520 帧 = 4.31GB
@@ -136,8 +137,9 @@ function buildAvi(w, h, fr, videoFcc, strf, frameFcc, frameChunks, pcm16, numCh,
     }
   };
   const segIdxEntries = segments.map((n, k) => calcSegIdx(k === 0 ? 0 : segments.slice(0, k).reduce((a, b) => a + b, 0), n));
-  const indxBytes = multi
-    ? segments.reduce((s, n, k) => s + (8 + 24 + segIdxEntries[k].filter(e => e.fourcc === frameFcc).length * 8) + (hasAudio ? 8 + 24 + segIdxEntries[k].filter(e => e.fourcc === '01wb').length * 8 : 0), 0)
+  // 只写视频 indx(音频 indx 块会让 PotPlayer 无声音;音频索引交给部分 idx1)
+  const indxBytes = multi && !NO_INDX
+    ? segments.reduce((s, n, k) => s + (8 + 24 + segIdxEntries[k].filter(e => e.fourcc === frameFcc).length * 8), 0)
     : 0;
   const seg0BaseAbs = 32 + hdrlContent + indxBytes;
   const parts = [];
@@ -202,11 +204,10 @@ function buildAvi(w, h, fr, videoFcc, strf, frameFcc, frameChunks, pcm16, numCh,
       parts.push(ascii('LIST'), u32(odmlContent), ascii('odml'));
       parts.push(ascii('dmlh'), u32(20), dmlh);
     }
-    if (multi) {
+    if (multi && !NO_INDX) {
       let abs = seg0BaseAbs;
       for (let k = 0; k < segmentCount; k++) {
         writeIndx(parts, frameFcc, segIdxEntries[k], abs);
-        if (hasAudio) writeIndx(parts, '01wb', segIdxEntries[k], abs);
         if (k < segmentCount - 1) {
           const off = k === 0 ? 0 : segments.slice(0, k).reduce((a, b) => a + b, 0);
           abs += moviContentOf(off, segments[k]) + 20;
