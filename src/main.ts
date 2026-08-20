@@ -2403,6 +2403,8 @@ async function exportVideo() {
     const renderFrame = (n: number) => {
       (renderAnim as any).renderer.renderFrame(n, true);
       if (popupExportAnim) (popupExportAnim as any).renderer.renderFrame(n, true);
+      // 每帧先清空合成画布!!!透明模式之前缺失:历史帧全部叠加进当前帧 = 残影(上一帧不消失)
+      octx.clearRect(0, 0, w, h);
       // 动画画布保持透明,背景通过合成画布垫在下方,避免破坏轨道遮罩合成
       if (bg) {
         octx.fillStyle = bg;
