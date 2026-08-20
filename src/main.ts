@@ -425,6 +425,13 @@ const textList = $<HTMLUListElement>('textList');
 const textCount = $<HTMLElement>('textCount');
 const shapeList = $<HTMLUListElement>('shapeList');
 const shapeCount = $<HTMLElement>('shapeCount');
+const chkPopup = $<HTMLInputElement>('chkPopup');
+const popupLayer = $<HTMLDivElement>('popupLayer');
+const popupCount = $<HTMLElement>('popupCount');
+const popupTextList = $<HTMLUListElement>('popupTextList');
+const popupTextCount = $<HTMLElement>('popupTextCount');
+const popupShapeList = $<HTMLUListElement>('popupShapeList');
+const popupShapeCount = $<HTMLElement>('popupShapeCount');
 const statusbar = $<HTMLElement>('statusbar');
 
 /* ---------- 状态 ---------- */
@@ -482,6 +489,7 @@ async function loadData(data: any, name: string) {
     } else {
       patchSvgRendererTree((anim as any).renderer);
     }
+    rebuildPopupOverlay(); // 弹窗与主动画同渲染器、同帧号跟随
     anim.addEventListener('DOMLoaded', onAnimReady);
     anim.addEventListener('config_ready', onAnimReady);
     anim.addEventListener('data_failed', () => setStatus('动画数据解析失败,无法渲染', true));
@@ -727,6 +735,14 @@ function tick() {
         rngFrame.value = String(f);
     }
   }
+  // 弹窗叠加层按帧号跟随主动画(播放/暂停/拖动时间轴均同步)
+  if (popupAnim && anim && anim.isLoaded) {
+    const f = Math.round(anim.currentFrame);
+    if (f !== popupLastFrame) {
+      popupLastFrame = f;
+      try { popupAnim.goToAndStop(f, true); } catch { /* ignore */ }
+    }
+  }
   requestAnimationFrame(tick);
 }
 requestAnimationFrame(tick);
@@ -893,50 +909,19 @@ function findLayerByInd(layers: any[], ind: number): any | null {
   return null;
 }
 
-/* 文字宽度测量(编辑时用于保持居中) */
-let measureCtx: CanvasRenderingContext2D | null = null;
-function getMeasureCtx() {
-  if (!measureCtx) measureCtx = document.createElement('canvas').getContext('2d');
-  return measureCtx;
-}
-
-function measureTextWidth(text: string, fontName: string, fontSize: number): number {
-  const fontDef = currentData?.fonts?.list?.find((f: any) => f.fName === fontName || f.fFamily === fontName);
-  const family = (fontDef && fontDef.fFamily) || fontName || 'sans-serif';
-  const ctx = getMeasureCtx();
-  if (!ctx) return 0;
-  ctx.font = fontSize + 'px "' + family + '"';
-  const lines = String(text).split('\r');
-  let maxW = 0;
-  for (const line of lines) {
-    const w = ctx.measureText(line).width;
-    if (w > maxW) maxW = w;
-  }
-  return maxW;
-}
-
+/* 文字对齐由动画数据的 j 字段原生处理(lottie 每帧按实际文字宽度对齐):
+ * - j=2 居中:文本绕锚点(即父级定位点)居中,任意自定义文字宽度都保持居中;
+ * - j=0 左对齐:文本从锚点(固定左边缘)起向右排,任意自定义文字宽度都保持左对齐。
+ * 因此编辑文字时不再需要挪动锚点(旧逻辑会让左对齐文字随宽度变化而漂移)。 */
 function setLayerText(layer: any, newText: string) {
   const td = layer?.t?.d?.k;
   if (!td) return;
-  const s = (Array.isArray(td) ? td[0]?.s : td?.s) || {};
-  const oldText = s.t ?? '';
   // 统一换行为 AE/Bodymovin 使用的 \r
   const normalized = newText.replace(/\r\n|\r|\n/g, '\r');
   if (Array.isArray(td)) {
     for (const kf of td) if (kf.s) kf.s.t = normalized;
   } else if (td.s) {
     td.s.t = normalized;
-  }
-  // 保持居中:锚点原本位于文字中心,文字宽度变化时按变化量的一半调整锚点 X
-  if (s.f && layer.ks?.a) {
-    const oldW = measureTextWidth(oldText, s.f, s.s);
-    const newW = measureTextWidth(normalized, s.f, s.s);
-    const delta = (newW - oldW) / 2;
-    if (layer.ks.a.a === 0) {
-      layer.ks.a.k[0] = (layer.ks.a.k[0] || 0) + delta;
-    } else if (Array.isArray(layer.ks.a.k)) {
-      for (const kf of layer.ks.a.k) if (kf.s) kf.s[0] = (kf.s[0] || 0) + delta;
-    }
   }
 }
 
@@ -1102,6 +1087,503 @@ function renderShapeList(data: any) {
   });
 }
 
+/* ---------- 弹窗叠加层(windows_animation) ----------
+ * windows_animation.json 与主动画同尺寸(1920×1080@60fps),作为可选叠加层显示:
+ * - 由「显示弹窗」复选框控制显隐;
+ * - 与主动画按帧号同步(goToAndStop),播放/暂停/拖动时间轴/渲染器切换都跟随主动画;
+ * - 文字图层可改文字/颜色/对齐(默认居中,即文档数据 j=2,lottie 每帧按实际文字
+ *   宽度原生居中,参考 renderInnerContent 中 doc.j 的对齐分支);
+ * - 颜色图层可改填充/描边,但名称含「蒙版」的图层不可改色。 */
+let popupData: any = null;
+let popupVisible = false; // 弹窗默认关闭,由「显示弹窗」复选框开启
+let popupAnim: AnimationItem | null = null;
+let popupLastFrame = -1;
+let popupEditTimer: number | undefined;
+
+function destroyPopupAnim() {
+  if (popupAnim) {
+    try { popupAnim.destroy(); } catch { /* ignore */ }
+    popupAnim = null;
+  }
+  popupLayer.innerHTML = '';
+}
+
+function rebuildPopupOverlay() {
+  destroyPopupAnim();
+  // destroyAnim() 会清空 previewInner,弹窗层可能被移除,先重新挂回(即使当前隐藏也要保持挂载)
+  if (!popupLayer.isConnected) previewInner.appendChild(popupLayer);
+  if (!popupVisible || !popupData) {
+    popupLayer.hidden = true;
+    return;
+  }
+  popupLayer.hidden = false;
+  popupLayer.style.width = popupData.w + 'px';
+  popupLayer.style.height = popupData.h + 'px';
+  try {
+    const renderer = selRenderer.value === 'canvas' ? 'canvas' : 'svg';
+    popupAnim = lottie.loadAnimation({
+      container: popupLayer,
+      renderer,
+      loop: true,
+      autoplay: false,
+      animationData: popupData,
+      audioFactory,
+    });
+    if (renderer === 'canvas') patchCanvasRendererTree((popupAnim as any).renderer);
+    else patchSvgRendererTree((popupAnim as any).renderer);
+    popupLastFrame = -1; // 下一帧 tick 自动同步到主动画当前帧
+  } catch (e) {
+    setStatus('弹窗载入失败: ' + (e as Error).message, true);
+  }
+}
+
+function rebuildPopupPreservingState() {
+  if (!popupAnim) return;
+  const frame = popupAnim.currentFrame;
+  rebuildPopupOverlay();
+  if (popupAnim && typeof frame === 'number' && isFinite(frame)) {
+    popupAnim.goToAndStop(frame, true);
+    popupLastFrame = frame;
+  }
+}
+
+function setLayerAlign(layer: any, j: number) {
+  const td = layer?.t?.d?.k;
+  if (!td) return;
+  if (Array.isArray(td)) {
+    for (const kf of td) if (kf.s) kf.s.j = j;
+  } else if (td.s) {
+    td.s.j = j;
+  }
+}
+
+function textDocOf(layer: any): any | null {
+  const td = layer?.t?.d?.k;
+  return (Array.isArray(td) ? td[0]?.s : td?.s) ?? null;
+}
+
+/* ---------- 弹窗宽度自适应文字宽度 ----------
+ * 弹窗底板(「弹窗用的底板」「弹窗底部」)以锚点(合成 x=960)为中心,文字以自身
+ * 锚点(x=975.11)为中心,j=2 居中排列。两者锚点距离固定,因此只要底板宽度增量
+ * 与文字宽度增量一致,左右留白就保持恒定:
+ *   新底板X缩放 = 原X缩放 × (底板原宽 + 文字增量) / 底板原宽
+ * 文字增量按文字图层自身缩放折算为合成单位(本例 40.215%)。 */
+let popupMeasureCtx: CanvasRenderingContext2D | null = null;
+
+function getPopupMeasureCtx(): CanvasRenderingContext2D | null {
+  if (!popupMeasureCtx) {
+    popupMeasureCtx = document.createElement('canvas').getContext('2d');
+  }
+  return popupMeasureCtx;
+}
+
+/* 用真实内嵌字体测量一段文字的最大行宽(文字空间 px,字号 = doc.s) */
+function measurePopupTextWidth(text: string, doc: any): number {
+  const ctx = getPopupMeasureCtx();
+  if (!ctx || !doc || !doc.s) return 0;
+  const fontDef = (popupData?.fonts?.list ?? []).find((f: any) => f.fName === doc.f || f.fFamily === doc.f);
+  const family = (fontDef && fontDef.fFamily) || doc.f || 'sans-serif';
+  ctx.font = doc.s + 'px "' + family + '"';
+  let maxW = 0;
+  for (const line of String(text).split('\r')) {
+    const w = ctx.measureText(line).width;
+    if (w > maxW) maxW = w;
+  }
+  return maxW;
+}
+
+/* 弹窗文字图层的原始文字(用于计算增量) */
+const popupOrigTexts = new Map<number, string>();
+
+/* 弹窗底板几何:名称匹配的图层,记录基准 X 缩放与形状基准宽度 */
+const POPUP_PANEL_NAMES = ['弹窗用的底板', '弹窗底部'];
+let popupPanelBaseScaleX = 0;
+let popupPanelBaseShapeW = 0;
+
+function findPanelLayers(): any[] {
+  if (!popupData) return [];
+  const out: any[] = [];
+  const walk = (layers: any[]) => {
+    for (const l of layers ?? []) {
+      if (POPUP_PANEL_NAMES.includes(l.nm)) out.push(l);
+      if (Array.isArray(l.layers)) walk(l.layers);
+    }
+  };
+  walk(popupData.layers);
+  return out;
+}
+
+/* 弹窗文字图层缩放(本例 40.215%,静态) */
+function popupTextLayerScale(): number {
+  if (!popupData) return 1;
+  for (const t of collectTextLayers(popupData)) {
+    const layer = findLayerByInd(popupData.layers, t.ind);
+    const s = layer?.ks?.s;
+    if (s && s.a === 0 && Array.isArray(s.k) && s.k[0]) return s.k[0] / 100;
+  }
+  return 1;
+}
+
+/* 弹窗蒙版几何:记录其 X 缩放动画关键帧的基准值(终值 276.8) */
+const POPUP_MASK_NAMES = ['蒙版'];
+let popupMaskBaseKeys: { s: number[] }[] = [];
+
+function findMaskLayers(): any[] {
+  if (!popupData) return [];
+  const out: any[] = [];
+  const walk = (layers: any[]) => {
+    for (const l of layers ?? []) {
+      if (POPUP_MASK_NAMES.includes(l.nm)) out.push(l);
+      if (Array.isArray(l.layers)) walk(l.layers);
+    }
+  };
+  walk(popupData.layers);
+  return out;
+}
+
+/* 弹窗图标几何:感叹号字形(锚点右偏 204.8)与菱形底座(中心=锚点) */
+const POPUP_ICON_NAMES = ['感叹号', '感叹号的底'];
+const ICON_GAP = 4;      // 图标右缘与文字左缘的间距(合成单位,越小越靠右)
+const ICON_HALF_W = 11.3; // 菱形底座包围盒半宽(18.25×0.87408×√2/2)
+
+function findIconLayers(): any[] {
+  if (!popupData) return [];
+  const out: any[] = [];
+  const walk = (layers: any[]) => {
+    for (const l of layers ?? []) {
+      if (POPUP_ICON_NAMES.includes(l.nm)) out.push(l);
+      if (Array.isArray(l.layers)) walk(l.layers);
+    }
+  };
+  walk(popupData.layers);
+  return out;
+}
+
+/* NULL CONTROL 父级原点合成X(= NULL_p.x - NULL_a.x,本例 789.136) */
+function popupNullOriginX(): number {
+  const nullLayer = (popupData?.layers ?? []).find((l: any) => l.nm === 'NULL CONTROL' || l.ind === 7);
+  const p = nullLayer?.ks?.p, a = nullLayer?.ks?.a;
+  if (p && a && p.a === 0 && a.a === 0) return p.k[0] - a.k[0];
+  return 789.136;
+}
+
+/* 弹窗文字图层锚点的合成X(固定,j=2 居中中心) */
+function popupTextAnchorCompX(): number {
+  for (const t of collectTextLayers(popupData)) {
+    const layer = findLayerByInd(popupData.layers, t.ind);
+    const s = layer?.ks?.s, p = layer?.ks?.p, a = layer?.ks?.a;
+    if (s && p && a && s.a === 0 && p.a === 0 && a.a === 0) {
+      return popupNullOriginX() + p.k[0] - (s.k[0] / 100) * a.k[0];
+    }
+  }
+  return 975.11;
+}
+
+/* 弹窗原始文字宽度(合成单位,测量 × 文字图层缩放) */
+function popupOrigTextWidthComp(): number {
+  let w = 0;
+  for (const t of collectTextLayers(popupData)) {
+    const layer = findLayerByInd(popupData.layers, t.ind);
+    const doc = layer ? textDocOf(layer) : null;
+    if (!doc) continue;
+    const m = measurePopupTextWidth(popupOrigTexts.get(t.ind) ?? '', doc) * popupTextLayerScale();
+    if (m > w) w = m;
+  }
+  return w;
+}
+
+/* 感叹号图标中心合成X:始终位于文字左缘左侧固定间距 */
+function popupIconCenterCompX(deltaComp: number): number {
+  const textLeft = popupTextAnchorCompX() - (popupOrigTextWidthComp() + deltaComp) / 2;
+  return textLeft - ICON_GAP - ICON_HALF_W;
+}
+
+/* 定位感叹号图标(字形 + 菱形底座)到文字左侧,随文字左缘移动 */
+function positionPopupIcon(deltaComp: number) {
+  const cxNull = popupIconCenterCompX(deltaComp) - popupNullOriginX();
+  for (const layer of findIconLayers()) {
+    const p = layer?.ks?.p;
+    if (!(p && p.a === 0 && Array.isArray(p.k))) continue;
+    if (layer.nm === '感叹号的底') {
+      p.k[0] = cxNull; // 菱形中心即锚点
+    } else if (layer.nm === '感叹号') {
+      p.k[0] = cxNull + 204.8; // 字形在锚点右侧 204.8(形状空间)
+    }
+  }
+}
+
+/* 文字宽度变化 → 同步调整底板/蒙版宽度与图标位置(增量一致,两侧留白不变) */
+function adaptPopupPanelWidth() {
+  if (!popupData || popupPanelBaseScaleX <= 0 || popupPanelBaseShapeW <= 0) return;
+  // 取所有文字图层中"增长最多"的增量(负数=整体变短,面板同样收窄)
+  let deltaText: number | null = null;
+  for (const t of collectTextLayers(popupData)) {
+    const layer = findLayerByInd(popupData.layers, t.ind);
+    const doc = layer ? textDocOf(layer) : null;
+    if (!doc) continue;
+    const cur = measurePopupTextWidth(doc.t ?? '', doc);
+    const orig = measurePopupTextWidth(popupOrigTexts.get(t.ind) ?? '', doc);
+    const d = cur - orig;
+    if (deltaText === null || d > deltaText) deltaText = d;
+  }
+  if (deltaText === null) return;
+  const deltaComp = deltaText * popupTextLayerScale(); // 折算合成单位
+  // 注意:popupPanelBaseScaleX 是百分数(如 280.202),换算小数后才是底板原宽
+  const panelW = popupPanelBaseShapeW * (popupPanelBaseScaleX / 100);
+  const k = (panelW + deltaComp) / panelW;
+  // 1) 底板宽度
+  const newScale = popupPanelBaseScaleX * k;
+  for (const layer of findPanelLayers()) {
+    const s = layer?.ks?.s;
+    if (s && s.a === 0 && Array.isArray(s.k)) {
+      s.k[0] = newScale;
+    }
+  }
+  // 2) 蒙版宽度(动画关键帧 X 同比例,0 与终值都 ×k)
+  for (const layer of findMaskLayers()) {
+    const s = layer?.ks?.s;
+    if (!s || !Array.isArray(s.k)) continue;
+    s.k.forEach((kf: any, i: number) => {
+      const base = popupMaskBaseKeys[i];
+      if (base && Array.isArray(kf.s) && base.s) kf.s[0] = base.s[0] * k;
+    });
+  }
+  // 3) 感叹号图标:定位到文字左侧,随文字左缘移动
+  positionPopupIcon(deltaComp);
+}
+
+
+const originalPopupTextState = new Map<number, { text: string; fc: number[]; j: number }>();
+const originalPopupShapeState = new Map<number, { fill: number[] | null; stroke: number[] | null }>();
+
+function capturePopupOriginalState() {
+  originalPopupTextState.clear();
+  originalPopupShapeState.clear();
+  popupOrigTexts.clear();
+  popupPanelBaseScaleX = 0;
+  popupPanelBaseShapeW = 0;
+  popupMaskBaseKeys = [];
+  if (!popupData) return;
+  for (const t of collectTextLayers(popupData)) {
+    const layer = findLayerByInd(popupData.layers, t.ind);
+    const s = layer ? textDocOf(layer) : null;
+    if (!s) continue;
+    originalPopupTextState.set(t.ind, {
+      text: s.t ?? '',
+      fc: s.fc ? [...s.fc] : [1, 1, 1],
+      j: typeof s.j === 'number' ? s.j : 2,
+    });
+    popupOrigTexts.set(t.ind, s.t ?? '');
+  }
+  for (const s of shapeLayerColorInfo(popupData)) {
+    originalPopupShapeState.set(s.ind, {
+      fill: s.fill ? [...s.fill] : null,
+      stroke: s.stroke ? [...s.stroke] : null,
+    });
+  }
+  // 底板基准几何:形状基准宽(rc 宽度)× X 缩放
+  for (const layer of findPanelLayers()) {
+    const s = layer?.ks?.s;
+    if (!(s && s.a === 0 && Array.isArray(s.k) && s.k[0])) continue;
+    const walk = (items: any[]) => {
+      for (const it of items ?? []) {
+        if (it.ty === 'rc' && it.s?.a === 0 && Array.isArray(it.s.k) && it.s.k[0] > 0) {
+          popupPanelBaseShapeW = Math.max(popupPanelBaseShapeW, it.s.k[0]);
+        }
+        if (Array.isArray(it.it)) walk(it.it);
+      }
+    };
+    walk(layer.shapes);
+    popupPanelBaseScaleX = s.k[0];
+    break;
+  }
+  // 蒙版基准几何:记录 X 缩放动画关键帧(0 与终值,供宽度自适应同比例缩放)
+  for (const layer of findMaskLayers()) {
+    const s = layer?.ks?.s;
+    if (!s || !Array.isArray(s.k)) continue;
+    popupMaskBaseKeys = s.k
+      .filter((kf: any) => Array.isArray(kf.s))
+      .map((kf: any) => ({ s: [kf.s[0], kf.s[1], kf.s[2]] }));
+    break;
+  }
+}
+
+function onPopupTextEdited(ind: number, text: string) {
+  if (!popupData) return;
+  const layer = findLayerByInd(popupData.layers, ind);
+  if (!layer) return;
+  setLayerText(layer, text); // 居中由 j=2 原生保持,不挪锚点
+  window.clearTimeout(popupEditTimer);
+  popupEditTimer = window.setTimeout(() => {
+    void (async () => {
+      await loadEmbeddedFonts(popupData); // 保证测量用真实字体
+      adaptPopupPanelWidth(); // 文字宽度变化 → 底板宽度同步
+      rebuildPopupPreservingState();
+    })();
+  }, 250);
+}
+
+function onPopupColorChanged(ind: number, hex: string) {
+  if (!popupData) return;
+  const layer = findLayerByInd(popupData.layers, ind);
+  if (!layer) return;
+  setLayerColor(layer, hex);
+  window.clearTimeout(popupEditTimer);
+  popupEditTimer = window.setTimeout(() => rebuildPopupPreservingState(), 250);
+}
+
+function onPopupAlignChanged(ind: number, j: number) {
+  if (!popupData) return;
+  const layer = findLayerByInd(popupData.layers, ind);
+  if (!layer) return;
+  setLayerAlign(layer, j);
+  window.clearTimeout(popupEditTimer);
+  popupEditTimer = window.setTimeout(() => rebuildPopupPreservingState(), 250);
+}
+
+function onPopupShapeColorChanged(ind: number, hex: string, kind: 'fill' | 'stroke') {
+  if (!popupData) return;
+  const layer = findLayerByInd(popupData.layers, ind);
+  if (!layer) return;
+  if (kind === 'fill') setShapeFillColor(layer, hex);
+  else setShapeStrokeColor(layer, hex);
+  window.clearTimeout(popupEditTimer);
+  popupEditTimer = window.setTimeout(() => rebuildPopupPreservingState(), 250);
+}
+
+function onPopupTextReset(ind: number) {
+  const orig = originalPopupTextState.get(ind);
+  if (!orig || !popupData) return;
+  const layer = findLayerByInd(popupData.layers, ind);
+  if (!layer) return;
+  setLayerText(layer, orig.text);
+  setLayerColor(layer, fcToHex(orig.fc));
+  setLayerAlign(layer, orig.j);
+  const ta = popupTextList.querySelector<HTMLTextAreaElement>('.pt-input[data-ind="' + ind + '"]');
+  if (ta) ta.value = String(orig.text).replace(/\r/g, '\n');
+  const ci = popupTextList.querySelector<HTMLInputElement>('.pt-color[data-ind="' + ind + '"]');
+  if (ci) setColorPickerValue(ci, fcToHex(orig.fc));
+  const al = popupTextList.querySelector<HTMLSelectElement>('.t-align[data-ind="' + ind + '"]');
+  if (al) al.value = String(orig.j);
+  window.clearTimeout(popupEditTimer);
+  popupEditTimer = window.setTimeout(() => {
+    void (async () => {
+      await loadEmbeddedFonts(popupData);
+      adaptPopupPanelWidth(); // 文字恢复原宽 → 底板恢复基准宽
+      rebuildPopupPreservingState();
+    })();
+  }, 250);
+}
+
+function onPopupShapeReset(ind: number) {
+  const orig = originalPopupShapeState.get(ind);
+  if (!orig || !popupData) return;
+  const layer = findLayerByInd(popupData.layers, ind);
+  if (!layer) return;
+  if (orig.fill) setShapeFillColor(layer, fcToHex(orig.fill));
+  if (orig.stroke) setShapeStrokeColor(layer, fcToHex(orig.stroke));
+  const fi = popupShapeList.querySelector<HTMLInputElement>('.pt-fill[data-ind="' + ind + '"]');
+  if (fi && orig.fill) setColorPickerValue(fi, fcToHex(orig.fill));
+  const si = popupShapeList.querySelector<HTMLInputElement>('.pt-stroke[data-ind="' + ind + '"]');
+  if (si && orig.stroke) setColorPickerValue(si, fcToHex(orig.stroke));
+  window.clearTimeout(popupEditTimer);
+  popupEditTimer = window.setTimeout(() => rebuildPopupPreservingState(), 250);
+}
+
+function renderPopupLists() {
+  if (!popupData) return;
+  const texts = collectTextLayers(popupData);
+  popupTextCount.textContent = '· ' + texts.length + ' 个';
+  popupTextList.innerHTML = texts
+    .map((t) => {
+      const layer = findLayerByInd(popupData.layers, t.ind);
+      const s = layer ? textDocOf(layer) : null;
+      const isMask = /蒙版/.test(t.nm); // 蒙版图层不可改色
+      const hex = fcToHex(s?.fc);
+      const j = typeof s?.j === 'number' ? s.j : 2;
+      const displayText = String(t.text).replace(/\r/g, '\n');
+      const rows = Math.max(1, displayText.split('\n').length);
+      const colorHtml = isMask
+        ? ''
+        : '<label class="t-color-label">颜色 <input type="color" class="pt-color" data-ind="' + t.ind + '" value="' + hex + '" /><input type="text" class="hex-input" value="' + hex + '" spellcheck="false" placeholder="#rrggbb" /></label>';
+      return (
+        '<li class="text-item">' +
+        '<div class="text-item-head">' +
+        '<span class="t-name">' + esc(t.nm) + '</span>' +
+        '<button class="t-reset pt-reset" data-ind="' + t.ind + '" type="button" title="重置文字与颜色">↺ 重置</button>' +
+        '</div>' +
+        '<textarea class="t-input pt-input" rows="' + rows + '" data-ind="' + t.ind + '" spellcheck="false"></textarea>' +
+        '<div class="t-row">' +
+        colorHtml +
+        '<label class="t-color-label">对齐 <select class="t-align" data-ind="' + t.ind + '" title="文字对齐方式(默认居中 j=2)">' +
+        '<option value="0"' + (j === 0 ? ' selected' : '') + '>左</option>' +
+        '<option value="2"' + (j === 2 ? ' selected' : '') + '>居中</option>' +
+        '<option value="1"' + (j === 1 ? ' selected' : '') + '>右</option>' +
+        '</select></label>' +
+        '</div>' +
+        '</li>'
+      );
+    })
+    .join('');
+  popupTextList.querySelectorAll<HTMLTextAreaElement>('.pt-input').forEach((ta) => {
+    const target = texts.find((t) => t.ind === Number(ta.dataset.ind));
+    if (target) ta.value = String(target.text).replace(/\r/g, '\n');
+    ta.addEventListener('input', () => onPopupTextEdited(Number(ta.dataset.ind), ta.value));
+  });
+  popupTextList.querySelectorAll<HTMLInputElement>('.pt-color').forEach((ci) => {
+    bindColorPicker(ci, (hex) => onPopupColorChanged(Number(ci.dataset.ind), hex));
+  });
+  popupTextList.querySelectorAll<HTMLSelectElement>('.t-align').forEach((al) => {
+    al.addEventListener('change', () => onPopupAlignChanged(Number(al.dataset.ind), Number(al.value)));
+  });
+  popupTextList.querySelectorAll<HTMLButtonElement>('.pt-reset').forEach((btn) => {
+    btn.addEventListener('click', () => onPopupTextReset(Number(btn.dataset.ind)));
+  });
+
+  // 颜色图层:名称含「蒙版」的图层不列入,不可改色
+  const shapes = shapeLayerColorInfo(popupData).filter((s) => !/蒙版/.test(s.nm));
+  popupCount.textContent = '· ' + (texts.length + shapes.length) + ' 项可编辑';
+  popupShapeCount.textContent = '· ' + shapes.length + ' 个';
+  popupShapeList.innerHTML = shapes
+    .map((s) => {
+      const fillHex = s.fill ? fcToHex(s.fill) : null;
+      const strokeHex = s.stroke ? fcToHex(s.stroke) : null;
+      let colorHtml = '';
+      if (fillHex) colorHtml += '<label class="t-color-label">填充 <input type="color" class="pt-fill" data-ind="' + s.ind + '" value="' + fillHex + '" /><input type="text" class="hex-input" value="' + fillHex + '" spellcheck="false" placeholder="#rrggbb" /></label>';
+      if (strokeHex) colorHtml += '<label class="t-color-label">描边 <input type="color" class="pt-stroke" data-ind="' + s.ind + '" value="' + strokeHex + '" /><input type="text" class="hex-input" value="' + strokeHex + '" spellcheck="false" placeholder="#rrggbb" /></label>';
+      return (
+        '<li class="text-item">' +
+        '<div class="text-item-head">' +
+        '<span class="t-name">' + esc(s.nm) + '</span>' +
+        '<button class="t-reset pt-reset" data-ind="' + s.ind + '" type="button" title="重置颜色">↺ 重置</button>' +
+        '</div>' +
+        '<div class="shape-colors">' + colorHtml + '</div>' +
+        '</li>'
+      );
+    })
+    .join('');
+  popupShapeList.querySelectorAll<HTMLInputElement>('.pt-fill').forEach((ci) => {
+    bindColorPicker(ci, (hex) => onPopupShapeColorChanged(Number(ci.dataset.ind), hex, 'fill'));
+  });
+  popupShapeList.querySelectorAll<HTMLInputElement>('.pt-stroke').forEach((ci) => {
+    bindColorPicker(ci, (hex) => onPopupShapeColorChanged(Number(ci.dataset.ind), hex, 'stroke'));
+  });
+  popupShapeList.querySelectorAll<HTMLButtonElement>('.pt-reset').forEach((btn) => {
+    btn.addEventListener('click', () => onPopupShapeReset(Number(btn.dataset.ind)));
+  });
+}
+
+/* 「显示弹窗」开关:显隐叠加层(字体先加载,避免首帧回退系统字体) */
+chkPopup.addEventListener('change', () => {
+  popupVisible = chkPopup.checked;
+  if (popupVisible && popupData) {
+    void loadEmbeddedFonts(popupData).then(() => rebuildPopupOverlay());
+  } else {
+    destroyPopupAnim();
+    popupLayer.hidden = true;
+  }
+});
+
 function reRenderPreservingState() {
   if (!currentData || !anim) return;
   const frame = anim.currentFrame;
@@ -1129,6 +1611,7 @@ function reRenderPreservingState() {
   (window as any).__lottie = lottie;
   if (renderer === 'canvas') patchCanvasRendererTree(newAnim.renderer as any);
   else patchSvgRendererTree(newAnim.renderer as any);
+  rebuildPopupOverlay();
   newAnim.addEventListener('DOMLoaded', onAnimReady);
   newAnim.addEventListener('config_ready', onAnimReady);
   newAnim.setSpeed(speed);
@@ -1144,6 +1627,7 @@ function reRenderPreservingState() {
  * 音频不使用 JSON 内嵌版本,改用 animation 目录下的音频文件(一并打包进网站)。 */
 import animationDataJson from '../animation/animation_data.json?raw';
 import bundledAudioUrl from '../animation/gunmuchenggong.mp3?url';
+import windowsAnimationRaw from '../animation/windows animation/windows_animation.json?raw';
 
 let bootAnimation: any;
 try {
@@ -1161,6 +1645,15 @@ try {
 } catch (e) {
   console.error('[内置动画数据解析失败]', e);
   setStatus('内置动画数据解析失败: ' + (e as Error).message, true);
+}
+
+/* 弹窗动画(windows_animation.json)同样打包进网站,启动时解析。
+ * 不含音频/图片资源,仅内嵌字体。 */
+try {
+  popupData = JSON.parse(windowsAnimationRaw);
+} catch (e) {
+  console.error('[弹窗动画数据解析失败]', e);
+  setStatus('弹窗动画数据解析失败: ' + (e as Error).message, true);
 }
 
 /* ---------- 视频导出 ---------- */
@@ -1668,6 +2161,19 @@ async function exportVideoAviH264(data: any, canvas: HTMLCanvasElement, renderFr
   downloadBlob(blob, 'animation.avi');
 }
 
+/* 导出专用 Canvas 渲染器 patch:文字兜底 + 修复 getElementById 扫描未构建元素报错 */
+function patchExportCanvasRenderer(renderer: any) {
+  patchCanvasRendererTree(renderer, true);
+  renderer.getElementById = function (id: number) {
+    const els = this.elements || [];
+    for (let i = 0; i < els.length; i++) {
+      const el = els[i];
+      if (el && el.data && el.data.ind === id) return el;
+    }
+    return null;
+  };
+}
+
 async function exportVideo() {
   if (exporting || !currentData) return;
   exporting = true;
@@ -1679,9 +2185,11 @@ async function exportVideo() {
   const w = data.w, h = data.h;
   const fr = data.fr || 60;
   const totalFrames = Math.round((data.op ?? 0) - (data.ip ?? 0));
-  const formatLabel = format === 'avi'
+  const withPopup = popupVisible && !!popupData;
+  const popupTag = withPopup ? ' · 含弹窗' : '';
+  const formatLabel = (format === 'avi'
     ? (wantTransparent ? 'AVI · 无压缩透明' : 'AVI · H.264')
-    : 'MP4 · H.264';
+    : 'MP4 · H.264') + popupTag;
   const warn = wantTransparent
     ? '透明 AVI 为无压缩编码,预计文件约 ' + fmtSize(w * h * 4 * totalFrames) + ';已采用预乘 alpha(premultiplied),与 PotPlayer/Windows 渲染语义一致,半透明组件可正常显示。导出期间请勿关闭页面。'
     : undefined;
@@ -1689,6 +2197,9 @@ async function exportVideo() {
   updateExportProgress(0, '正在初始化渲染器…', '');
   let container: HTMLDivElement | null = null;
   let renderAnim: AnimationItem | null = null;
+  let popupExportContainer: HTMLDivElement | null = null;
+  let popupExportAnim: AnimationItem | null = null;
+  let popupExportCanvas: HTMLCanvasElement | null = null;
   try {
     setStatus(wantTransparent
       ? '导出中: 已选透明背景,自动导出 AVI…'
@@ -1705,39 +2216,47 @@ async function exportVideo() {
       animationData: data,
       audioFactory,
     });
-    patchCanvasRendererTree((renderAnim as any).renderer, true);
-    // 修复 Canvas 渲染器 getElementById 扫描到未构建元素时报错的问题
-    (renderAnim.renderer as any).getElementById = function (id: number) {
-      const els = (this as any).elements || [];
-      for (let i = 0; i < els.length; i++) {
-        const el = els[i];
-        if (el && el.data && el.data.ind === id) return el;
-      }
-      return null;
-    };
+    patchExportCanvasRenderer((renderAnim as any).renderer);
     const canvas = container.querySelector('canvas') as HTMLCanvasElement;
     if (!canvas) throw new Error('无法创建渲染画布');
-    // 导出背景:MP4 / AVI(未勾选透明)都使用当前选择的背景色;透明背景不填充
-    const bg: string | null = wantTransparent ? null : bgColor.value;
-    let outCanvas: HTMLCanvasElement | null = null;
-    let octx: CanvasRenderingContext2D | null = null;
-    if (bg) {
-      outCanvas = document.createElement('canvas');
-      outCanvas.width = w;
-      outCanvas.height = h;
-      octx = outCanvas.getContext('2d');
-      if (!octx) throw new Error('无法创建导出画布');
+    // 弹窗合成:导出时若开启弹窗,用同一帧号驱动弹窗渲染器,叠加到主动画之上
+    if (withPopup) {
+      await loadEmbeddedFonts(popupData);
+      popupExportContainer = document.createElement('div');
+      popupExportContainer.style.cssText = 'position:fixed;left:-10000px;top:0;width:' + w + 'px;height:' + h + 'px;';
+      document.body.appendChild(popupExportContainer);
+      popupExportAnim = lottie.loadAnimation({
+        container: popupExportContainer,
+        renderer: 'canvas',
+        rendererSettings: { dpr: 1 },
+        loop: false,
+        autoplay: false,
+        animationData: popupData,
+        audioFactory,
+      });
+      patchExportCanvasRenderer((popupExportAnim as any).renderer);
+      popupExportCanvas = popupExportContainer.querySelector('canvas') as HTMLCanvasElement | null;
+      if (!popupExportCanvas) throw new Error('无法创建弹窗渲染画布');
     }
+    // 合成画布:背景 + 主动画 + 弹窗(透明模式不填充背景,保留 alpha)
+    const bg: string | null = wantTransparent ? null : bgColor.value;
+    const outCanvas = document.createElement('canvas');
+    outCanvas.width = w;
+    outCanvas.height = h;
+    const octx = outCanvas.getContext('2d');
+    if (!octx) throw new Error('无法创建导出画布');
     const renderFrame = (n: number) => {
       (renderAnim as any).renderer.renderFrame(n, true);
+      if (popupExportAnim) (popupExportAnim as any).renderer.renderFrame(n, true);
       // 动画画布保持透明,背景通过合成画布垫在下方,避免破坏轨道遮罩合成
-      if (octx && outCanvas) {
-        octx.fillStyle = bg as string;
+      if (bg) {
+        octx.fillStyle = bg;
         octx.fillRect(0, 0, w, h);
-        octx.drawImage(canvas, 0, 0);
       }
+      octx.drawImage(canvas, 0, 0);
+      if (popupExportCanvas) octx.drawImage(popupExportCanvas, 0, 0);
     };
-    const srcCanvas = outCanvas ?? canvas;
+    const srcCanvas = outCanvas;
 
     if (format === 'avi') {
       if (wantTransparent) {
@@ -1776,6 +2295,8 @@ async function exportVideo() {
   } finally {
     if (renderAnim) { try { renderAnim.destroy(); } catch { /* ignore */ } }
     if (container) container.remove();
+    if (popupExportAnim) { try { popupExportAnim.destroy(); } catch { /* ignore */ } }
+    if (popupExportContainer) popupExportContainer.remove();
     exporting = false;
     btnExport.disabled = false;
   }
@@ -1786,5 +2307,15 @@ btnExport.addEventListener('click', exportVideo);
 
 if (bootAnimation) {
   void loadData(bootAnimation, 'animation_data.json');
+}
+
+/* 弹窗初始化:记录原始状态、渲染编辑列表、定位图标、加载弹窗叠加层(字体就绪后) */
+if (popupData) {
+  capturePopupOriginalState();
+  renderPopupLists();
+  void loadEmbeddedFonts(popupData).then(() => {
+    positionPopupIcon(0); // 感叹号图标初始定位到文字图层左侧
+    if (chkPopup.checked) rebuildPopupOverlay();
+  });
 }
 

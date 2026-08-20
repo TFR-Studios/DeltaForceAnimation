@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>" />
     <title>三角洲行动撤离动画自定义编辑器</title>
   </head>
   <body>
@@ -13,7 +14,9 @@
     <main class="layout">
       <section class="preview-panel">
         <div class="preview-stage" id="stage">
-          <div class="preview-inner" id="previewInner"></div>
+          <div class="preview-inner" id="previewInner">
+            <div class="popup-layer" id="popupLayer" hidden></div>
+          </div>
         </div>
         <div class="timeline">
             <input type="range" id="rngFrame" min="0" max="0" step="1" value="0" title="拖动预览时间轴" aria-label="动画时间轴" />
@@ -64,6 +67,18 @@
         <ul id="textList"></ul>
         <h3>形状图层 <span id="shapeCount"></span></h3>
         <ul id="shapeList"></ul>
+        <h3>弹窗图层 <span id="popupCount"></span></h3>
+        <div class="popup-panel">
+          <label class="popup-toggle" title="显示/隐藏 windows_animation.json 弹窗(与主动画同帧号同步)">
+            <input type="checkbox" id="chkPopup" /> 显示弹窗
+            <span class="popup-file">windows_animation.json</span>
+          </label>
+          <h4>弹窗文字 <span id="popupTextCount"></span></h4>
+          <ul id="popupTextList"></ul>
+          <h4>弹窗颜色(蒙版除外) <span id="popupShapeCount"></span></h4>
+          <ul id="popupShapeList"></ul>
+          <p class="popup-note">提示:名称含「蒙版」的图层不可改色;弹窗文字默认居中对齐,编辑文字后仍保持居中。</p>
+        </div>
       </aside>
     </main>
 

@@ -85,6 +85,14 @@ label.btn-file:hover { border-color: var(--accent); }
 .preview-stage.panning { cursor: grabbing; }
 .preview-stage svg, .preview-stage canvas { pointer-events: none; }
 .preview-inner { position: absolute; left: 50%; top: 50%; transform-origin: center; will-change: transform; }
+/* 弹窗叠加层(windows_animation):与主动画同画布叠放,同步帧号驱动 */
+.popup-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+.popup-layer[hidden] { display: none; }
 .preview-empty {
   position: absolute; inset: 0;
   display: flex; align-items: center; justify-content: center;
@@ -166,7 +174,7 @@ input[type="color"] { padding: 0; width: 34px; height: 26px; }
 #infoList dd { margin: 0; word-break: break-all; }
 
 #textList { list-style: none; margin: 0; padding: 0; }
-#textList li {
+#textList li, #popupTextList li, #popupShapeList li {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -174,7 +182,8 @@ input[type="color"] { padding: 0; width: 34px; height: 26px; }
   border-bottom: 1px dashed var(--border);
   font-size: 12px;
 }
-#textList li:last-child { border-bottom: none; }
+#textList li:last-child, #popupTextList li:last-child, #popupShapeList li:last-child { border-bottom: none; }
+#popupTextList, #popupShapeList { list-style: none; margin: 0; padding: 0; }
 .t-name { color: var(--dim); }
 .t-text { font-size: 13px; color: var(--text); word-break: break-all; white-space: pre-wrap; }
 .text-item { gap: 5px; }
@@ -242,6 +251,57 @@ input[type="color"] { padding: 0; width: 34px; height: 26px; }
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+/* 弹窗面板 */
+.popup-panel {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px 10px;
+  background: var(--panel-2);
+}
+.popup-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+}
+.popup-toggle input[type="checkbox"] { accent-color: var(--accent); }
+.popup-file {
+  font-size: 10px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 0 5px;
+  margin-left: 2px;
+}
+.side-panel h4 {
+  margin: 12px 0 2px;
+  font-size: 11px;
+  color: var(--dim);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.popup-note {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--dim);
+  line-height: 1.5;
+}
+.t-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.t-align {
+  min-width: 0;
+  width: 64px;
+  padding: 2px 4px;
+  font-size: 12px;
+  flex: none;
 }
 
 /* 状态栏 */
