@@ -1,9 +1,10 @@
 // Node 验证多段 AVIX:移植 buildAvi(与 main.ts 一致),构造 500 帧(4.1GB)带音频,
 // ffprobe 读全 + ffmpeg 解码首/中/尾帧验证内容
 import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 
-const OUT = 'I:/Delta Force custom animation/tools/.avix-big.avi';
+const OUT = process.env.AVI_OUT || 'I:/Delta Force custom animation/tools/.avix-big.avi';
+const NO_INDX = process.env.NO_INDX === '1'; // A/B 对照:跳过 indx 块(仅部分 idx1)
 const W = 1920, H = 1080;
 const FRAME_BYTES = W * H * 4;
 const TOTAL = 500; // 4.1GB > 4.29GB? 500×8.3MB=4.15GB < 4.29GB! 用 520 帧 = 4.31GB
@@ -119,25 +120,25 @@ function buildAvi(w, h, fr, videoFcc, strf, frameFcc, frameChunks, pcm16, numCh,
     if (!sel.length) return;
     const head = new Uint8Array(24);
     const d = new DataView(head.buffer);
-    d.setUint16(0, 4, true);
+    d.setUint16(0, 2, true);
     d.setUint8(2, 0);
-    d.setUint8(3, 0);
+    d.setUint8(3, 1);
     d.setUint32(4, sel.length, true);
     head.set(ascii(chunkId), 8);
     d.setBigUint64(12, BigInt(baseAbs), true);
     d.setUint32(20, 0, true);
-    target.push(ascii('indx'), u32(24 + sel.length * 16), head);
+    target.push(ascii('indx'), u32(24 + sel.length * 8), head);
     for (const e of sel) {
-      const entry = new Uint8Array(16);
+      const entry = new Uint8Array(8);
       const de = new DataView(entry.buffer);
       de.setUint32(0, e.rel + 8, true);
-      de.setUint32(4, e.size | (e.key ? 0x80000000 : 0), true);
+      de.setUint32(4, e.size | (e.key ? 0 : 0x80000000), true);
       target.push(entry);
     }
   };
   const segIdxEntries = segments.map((n, k) => calcSegIdx(k === 0 ? 0 : segments.slice(0, k).reduce((a, b) => a + b, 0), n));
-  const indxBytes = multi
-    ? segments.reduce((s, n, k) => s + (8 + 24 + segIdxEntries[k].filter(e => e.fourcc === frameFcc).length * 16) + (hasAudio ? 8 + 24 + segIdxEntries[k].filter(e => e.fourcc === '01wb').length * 16 : 0), 0)
+  const indxBytes = multi && !NO_INDX
+    ? segments.reduce((s, n, k) => s + (8 + 24 + segIdxEntries[k].filter(e => e.fourcc === frameFcc).length * 8) + (hasAudio ? 8 + 24 + segIdxEntries[k].filter(e => e.fourcc === '01wb').length * 8 : 0), 0)
     : 0;
   const seg0BaseAbs = 32 + hdrlContent + indxBytes;
   const parts = [];
@@ -202,7 +203,7 @@ function buildAvi(w, h, fr, videoFcc, strf, frameFcc, frameChunks, pcm16, numCh,
       parts.push(ascii('LIST'), u32(odmlContent), ascii('odml'));
       parts.push(ascii('dmlh'), u32(20), dmlh);
     }
-    if (multi) {
+    if (multi && !NO_INDX) {
       let abs = seg0BaseAbs;
       for (let k = 0; k < segmentCount; k++) {
         writeIndx(parts, frameFcc, segIdxEntries[k], abs);
@@ -215,7 +216,13 @@ function buildAvi(w, h, fr, videoFcc, strf, frameFcc, frameChunks, pcm16, numCh,
     }
     parts.push(ascii('LIST'), u32(movi0Content), ascii('movi'));
     writeMovi(0, seg0, parts, 0);
-    if (!multi) writeIdx1(parts, allIdx);
+    // idx1:单段全部;多段截断到 u32 边界(前 ~517 帧),PotPlayer 等 idx1-only 播放器用
+    if (multi) {
+      const cut = allIdx.findIndex(e => e.offset + 4 > 0xFFFFF000);
+      writeIdx1(parts, cut < 0 ? allIdx : allIdx.slice(0, cut));
+    } else {
+      writeIdx1(parts, allIdx);
+    }
   }
   {
     let offset = segments[0];
@@ -412,23 +419,37 @@ for (const [label, f] of [['首帧', 0], ['中帧', Math.floor(TOTAL / 2)], ['�
 }
 
 // ===== 关键:seek 路径验证(播放器方式,跨段 seek) =====
+// 必须满足:(1) R 通道精确命中 (2) trace 出现 'XX ' 行(= 走了 avi_read_seek 索引路径,
+// 而非 generic 从头扫描的回退)
 console.log('\n--- seek 路径验证(播放器方式) ---');
 const seekTargets = [0.5, 2.2, 3.5, 5.0, 6.5, 8.0, 9.5];
 let seekOk = true;
 for (const ss of seekTargets) {
   if (ss >= TOTAL / 60) { console.log(`seek ${ss}s: 跳过(超出时长 ${(TOTAL / 60).toFixed(2)}s)`); continue; }
   try {
-    const raw = execFileSync('ffmpeg', ['-y', '-v', 'error', '-ss', String(ss), '-i', OUT, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgba', '-'], { maxBuffer: 200 * 1024 * 1024, timeout: 90000 });
+    const t0 = Date.now();
+    const raw = execFileSync('ffmpeg', ['-y', '-v', 'trace', '-ss', String(ss), '-i', OUT, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgba', '-'], { maxBuffer: 200 * 1024 * 1024, timeout: 90000, stdio: ['ignore', 'pipe', 'pipe'] });
+    const dt = Date.now() - t0;
     if (raw.length === 0) { console.log(`seek ${ss}s: ✗ 无输出`); seekOk = false; continue; }
     const frame = Math.round(ss * 60);
     const c = frame % 251;
     const px = raw[0];
     const ok = px === c;
     if (!ok) seekOk = false;
-    console.log(`seek ${ss}s (帧≈${frame}, 段${Math.floor(frame / Math.ceil(TOTAL / segments.length))}): R=${px} (期望 ${c}) ${ok ? '✓' : '✗'}`);
+    console.log(`seek ${ss}s (帧≈${frame}): R=${px} (期望 ${c}) ${ok ? '✓' : '✗'} [${dt}ms]`);
   } catch (e) {
     console.log(`seek ${ss}s: 错误 ${String(e).slice(0, 80)}`);
     seekOk = false;
   }
+}
+// 单独验证一次 trace 是否走索引路径(XX 行)
+try {
+  const tr = spawnSync('ffmpeg', ['-v', 'trace', '-ss', '9.5', '-i', OUT, '-frames:v', '1', '-f', 'null', '-'], { maxBuffer: 50 * 1024 * 1024, timeout: 90000, encoding: 'utf8' });
+  const hasXX = /XX \d+ \d+ \d+/.test(tr.stderr || '');
+  console.log(hasXX ? '✓ trace 显示走了索引路径(XX 行)' : '✗ 未走索引路径(可能是 generic 扫描回退!)');
+  if (!hasXX) seekOk = false;
+} catch (e) {
+  console.log('trace 检查失败: ' + String(e).slice(0, 80));
+  seekOk = false;
 }
 console.log(seekOk ? '✅ seek 路径全部正确(播放器可正常跨段读取)' : '✗ seek 路径存在问题');

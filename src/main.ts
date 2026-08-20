@@ -1962,9 +1962,10 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
   }
 
   // ===== ODML indx 索引(仅多段):idx1 的 u32 偏移在文件 >4.29GB 时会回绕,
-  // 最后一段 seek 位置错乱(残影)。indx 用 64 位 qwBaseOffset + 段内 u32 相对偏移,
+  // 最后一段 seek 位置错乱(残影)。indx 用 64 位 qwBaseOffset + 段内相对偏移,
   // ffmpeg 在 header 遍历时逐块读取(indx 块放在 hdrl 后、movi 前)。
-  // 条目:dwChunkOffset(u32, 相对 base 的块数据偏移) + dwChunkLength(u32, 高位=关键帧)
+  // 注意:必须用 ffmpeg 的叶块约定(bIndexType=1, wLongsPerEntry=2, 8字节条目,
+  // 高位=非关键帧)——ffmpeg demuxer 把 type=0 当递归 master,扁平条目会被拒。
   const calcSegIdx = (start: number, count: number): { fourcc: string; key: boolean; rel: number; size: number }[] => {
     let rel = 0;
     const idx: { fourcc: string; key: boolean; rel: number; size: number }[] = [];
@@ -1984,26 +1985,26 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
     if (!sel.length) return;
     const head = new Uint8Array(24);
     const d = new DataView(head.buffer);
-    d.setUint16(0, 4, true);                  // wLongsPerEntry
+    d.setUint16(0, 2, true);                  // wLongsPerEntry = 2(ffmpeg 叶块约定)
     d.setUint8(2, 0);                         // bIndexSubType
-    d.setUint8(3, 0);                         // bIndexType: AVI_INDEX_OF_CHUNKS
+    d.setUint8(3, 1);                         // bIndexType = 1(ffmpeg: OF_CHUNKS 扁平条目)
     d.setUint32(4, sel.length, true);         // nEntriesInUse
     head.set(ascii(chunkId), 8);              // dwChunkId
     d.setBigUint64(12, BigInt(baseAbs), true); // qwBaseOffset(64位)
     d.setUint32(20, 0, true);                 // dwReserved_3
-    target.push(ascii('indx'), u32(24 + sel.length * 16), head);
+    target.push(ascii('indx'), u32(24 + sel.length * 8), head);
     for (const e of sel) {
-      const entry = new Uint8Array(16);
+      const entry = new Uint8Array(8);
       const de = new DataView(entry.buffer);
-      de.setUint32(0, e.rel + 8, true);                       // dwChunkOffset = 块数据相对 base(头+8)
-      de.setUint32(4, e.size | (e.key ? 0x80000000 : 0), true); // dwChunkLength,高位=关键帧
+      de.setUint32(0, e.rel + 8, true);                          // dwChunkOffset = 块数据相对 base(头+8)
+      de.setUint32(4, e.size | (e.key ? 0 : 0x80000000), true);  // 高位=非关键帧(ffmpeg 约定)
       target.push(entry);
     }
   };
   // 各段 movi 内容起点的绝对位置 + 各段(段内相对)索引条目
   const segIdxEntries = segments.map((n, k) => calcSegIdx(k === 0 ? 0 : segments.slice(0, k).reduce((a, b) => a + b, 0), n));
   const indxBytes = multi
-    ? segments.reduce((s, n, k) => s + (8 + 24 + segIdxEntries[k].filter(e => e.fourcc === frameFcc).length * 16) + (hasAudio ? 8 + 24 + segIdxEntries[k].filter(e => e.fourcc === '01wb').length * 16 : 0), 0)
+    ? segments.reduce((s, n, k) => s + (8 + 24 + segIdxEntries[k].filter(e => e.fourcc === frameFcc).length * 8) + (hasAudio ? 8 + 24 + segIdxEntries[k].filter(e => e.fourcc === '01wb').length * 8 : 0), 0)
     : 0;
   const seg0BaseAbs = 32 + hdrlContent + indxBytes; // 段0 movi 内容起点(movi fourcc 之后)
 
@@ -2112,8 +2113,15 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
     // movi(音视频交错)
     parts.push(ascii('LIST'), u32(movi0Content), ascii('movi'));
     writeMovi(0, seg0, parts, 0);
-    // 单段:idx1 紧跟段0(全部帧偏移 < 4.29GB,uint32 可表示)
-    if (!multi) writeIdx1(parts, allIdx);
+    // idx1:单段写全部;多段写"能放进 u32 的部分"(前 ~517 帧)——PotPlayer 等
+    // 只读 idx1 的播放器靠它播放/seek,超界部分按规范 seek 到最近条目再顺序解码;
+    // ffmpeg/VLC 用上面的 indx(64位),完全不受影响
+    if (multi) {
+      const cut = allIdx.findIndex(e => e.offset + 4 > 0xFFFFF000);
+      writeIdx1(parts, cut < 0 ? allIdx : allIdx.slice(0, cut));
+    } else {
+      writeIdx1(parts, allIdx);
+    }
   }
   // ===== 后续段(RIFF AVIX + LIST movi) =====
   {
