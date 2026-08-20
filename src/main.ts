@@ -420,6 +420,8 @@ const selRenderer = $<HTMLSelectElement>('selRenderer');
 const selFit = $<HTMLSelectElement>('selFit');
 const bgColor = $<HTMLInputElement>('bgColor');
 const chkTransparent = $<HTMLInputElement>('chkTransparent');
+const chkFlatten = $<HTMLInputElement>('chkFlatten');
+const wrapFlatten = $<HTMLElement>('wrapFlatten');
 const infoList = $<HTMLDListElement>('infoList');
 const textList = $<HTMLUListElement>('textList');
 const textCount = $<HTMLElement>('textCount');
@@ -704,9 +706,12 @@ bgColor.addEventListener('input', applyBackground);
 function syncExportFormatUI() {
   const transparent = chkTransparent.checked;
   selFormat.disabled = transparent;
+  wrapFlatten.style.display = transparent ? '' : 'none';
   if (transparent) {
     selFormat.value = 'avi';
-    exportHint.textContent = '透明 AVI 已采用预乘 alpha,PotPlayer 可正常显示半透明效果';
+    exportHint.textContent = chkFlatten.checked
+      ? '透明将压平到当前背景色(alpha 合成进背景,PotPlayer 无残影;供播放器预览/剪辑无透明需求时使用)'
+      : '透明 AVI 已采用预乘 alpha,保留真实透明通道(供 AE/PR 合成);PotPlayer 预览半透明区域可能出现上一帧残留(残影),属播放器合成行为';
     exportHint.classList.add('warn');
   } else if (selFormat.value === 'mp4') {
     exportHint.textContent = 'MP4 将使用当前背景色导出(播放流畅,推荐)';
@@ -720,6 +725,7 @@ chkTransparent.addEventListener('change', () => {
   applyBackground();
   syncExportFormatUI();
 });
+chkFlatten.addEventListener('change', syncExportFormatUI);
 selFormat.addEventListener('change', syncExportFormatUI);
 syncExportFormatUI();
 
@@ -2146,20 +2152,40 @@ function h264Strf(w: number, h: number, avcC: Uint8Array<ArrayBuffer>): Uint8Arr
 
 /* ImageData(RGBA,自上而下) → DIB 帧(BGRA,自下而上,保留 alpha)
  * 注意:输出为【预乘 alpha】——Windows/DirectShow 生态(PotPlayer 等)按
- * premultiplied 语义合成 alpha,straight 数据会被误渲染为不透明亮色。 */
-function rgbaToBgraBottomUp(img: ImageData, w: number, h: number): Uint8Array<ArrayBuffer> {
+ * premultiplied 语义合成 alpha,straight 数据会被误渲染为不透明亮色。
+ * flattenBg 非空时:把透明压平到背景色并强制 alpha=255(输出不透明帧,
+ * 消除 PotPlayer 对 alpha 视频的残影/上一帧残留;供播放器预览) */
+function rgbaToBgraBottomUp(img: ImageData, w: number, h: number, flattenBg?: string | null): Uint8Array<ArrayBuffer> {
   const src = img.data;
   const out = new Uint8Array(w * h * 4);
   const rowBytes = w * 4;
+  let bgR = 0, bgG = 0, bgB = 0;
+  if (flattenBg) {
+    const m = /^#?([0-9a-f]{6})$/i.exec(flattenBg.trim());
+    if (m) {
+      bgR = parseInt(m[1].slice(0, 2), 16);
+      bgG = parseInt(m[1].slice(2, 4), 16);
+      bgB = parseInt(m[1].slice(4, 6), 16);
+    }
+  }
   for (let y = 0; y < h; y++) {
     const s = y * rowBytes;
     const d = (h - 1 - y) * rowBytes;
     for (let x = 0; x < rowBytes; x += 4) {
       const a = src[s + x + 3];
-      out[d + x] = Math.round((src[s + x + 2] * a) / 255);     // B(预乘)
-      out[d + x + 1] = Math.round((src[s + x + 1] * a) / 255); // G(预乘)
-      out[d + x + 2] = Math.round((src[s + x] * a) / 255);     // R(预乘)
-      out[d + x + 3] = a;
+      if (flattenBg) {
+        // 压平:结果 = 前景×a + 背景×(1-a),alpha 强制 255
+        const ia = 255 - a;
+        out[d + x] = Math.round((src[s + x + 2] * a + bgB * ia) / 255);     // B
+        out[d + x + 1] = Math.round((src[s + x + 1] * a + bgG * ia) / 255); // G
+        out[d + x + 2] = Math.round((src[s + x] * a + bgR * ia) / 255);     // R
+        out[d + x + 3] = 255;
+      } else {
+        out[d + x] = Math.round((src[s + x + 2] * a) / 255);     // B(预乘)
+        out[d + x + 1] = Math.round((src[s + x + 1] * a) / 255); // G(预乘)
+        out[d + x + 2] = Math.round((src[s + x] * a) / 255);     // R(预乘)
+        out[d + x + 3] = a;
+      }
     }
   }
   return out;
@@ -2201,12 +2227,13 @@ async function buildPcm16(data: any, totalFrames: number, fr: number): Promise<{
   return { pcm16, numCh, audioRate };
 }
 
-async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, mode: 'dib' | 'mjpeg') {
+async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, mode: 'dib' | 'mjpeg', flattenBg?: string | null) {
   const { pcm16, numCh, audioRate } = await buildPcm16(data, totalFrames, fr);
 
   let blob: Blob;
   if (mode === 'dib') {
     // 无压缩 32 位 BGRA:直接读取画布像素,真正保留 alpha 透明通道
+    // (flattenBg 非空时压平 alpha 到背景色,输出不透明帧,消除播放器残影)
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('无法读取渲染画布');
     const bgraFrames: Uint8Array<ArrayBuffer>[] = [];
@@ -2214,10 +2241,10 @@ async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame:
       if (exportCancelRequested) throw new ExportCancelledError('导出已取消');
       await ensureSeqDecoded(data.ip + i);
       renderFrame(data.ip + i);
-      bgraFrames.push(rgbaToBgraBottomUp(ctx.getImageData(0, 0, data.w, data.h), data.w, data.h));
+      bgraFrames.push(rgbaToBgraBottomUp(ctx.getImageData(0, 0, data.w, data.h), data.w, data.h, flattenBg));
       if (i % 12 === 0) { onProgress(Math.round((i / totalFrames) * 100), '正在处理帧 ' + (i + 1) + ' / ' + totalFrames); await new Promise((r) => setTimeout(r, 0)); }
     }
-    onProgress(99, '帧处理完成,正在组装 AVI(无压缩透明)…');
+    onProgress(99, flattenBg ? '帧处理完成,正在组装 AVI(压平背景)…' : '帧处理完成,正在组装 AVI(无压缩透明)…');
     blob = buildAviDib(data.w, data.h, fr, bgraFrames, pcm16, numCh, audioRate);
   } else {
     // MJPEG 回退方案(浏览器不支持 WebCodecs 时),播放器可能卡顿
@@ -2377,10 +2404,11 @@ async function exportVideo() {
 
     if (format === 'avi') {
       if (wantTransparent) {
+        const flatten = chkFlatten.checked ? bgColor.value : null;
         await exportVideoAvi(data, srcCanvas, renderFrame, totalFrames, fr, (p, detail) => {
-          updateExportProgress(p, '正在导出透明 AVI(无压缩)', detail ?? '');
-          setStatus('导出透明 AVI(无压缩): ' + p + '%');
-        }, 'dib');
+          updateExportProgress(p, flatten ? '正在导出 AVI(压平背景)' : '正在导出透明 AVI(无压缩)', detail ?? '');
+          setStatus((flatten ? '导出 AVI(压平背景): ' : '导出透明 AVI(无压缩): ') + p + '%');
+        }, 'dib', flatten);
       } else if (WebVideoEncoder && WebVideoFrame) {
         await exportVideoAviH264(data, srcCanvas, renderFrame, totalFrames, fr, (p, detail) => {
           updateExportProgress(p, '正在导出 AVI(H.264)', detail ?? '');
