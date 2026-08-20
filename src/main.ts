@@ -1865,6 +1865,27 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
     }
   }
 
+  // 分段:每段数据 ≤ ~1GB(RIFF/movi 的 size 字段是 uint32,最大 4.29GB,
+  // 无压缩透明 AVI 超过后必须用 AVIX/ODML 分段,否则播放器只读前 1GB 出现残影)
+  const SEGMENT_LIMIT = 0x3F000000;
+  const segments: number[] = [];
+  {
+    let cur = 0, curBytes = 0;
+    for (let i = 0; i < totalFrames; i++) {
+      const fb = 8 + frameChunks[i].length + (audioSlices[i] ? 8 + audioSlices[i].length : 0);
+      if (cur > 0 && curBytes + fb > SEGMENT_LIMIT) {
+        segments.push(cur);
+        cur = 0;
+        curBytes = 0;
+      }
+      cur++;
+      curBytes += fb;
+    }
+    if (cur > 0) segments.push(cur);
+  }
+  const segmentCount = segments.length;
+  const multi = segmentCount > 1;
+
   // 尺寸计算:LIST 块的大小字段 = 内容(四cc + 子块),不含 LIST 自身 8 字节头
   const avihChunkSize = 8 + 56;                    // 'avih' chunk
   const strhChunkSize = 8 + 56;                    // 'strh' chunk
@@ -1872,113 +1893,166 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
   const strfAudioChunkSize = 8 + 18;
   const videoStrlContent = 4 + strhChunkSize + strfVideoChunkSize;  // 'strl' + strh + strf
   const audioStrlContent = 4 + strhChunkSize + strfAudioChunkSize;  // 'auds' + strh + strf
-  const hdrlContent = 4 + avihChunkSize + (8 + videoStrlContent) + (hasAudio ? 8 + audioStrlContent : 0);  // 'hdrl'
-  const moviContent = 4
-    + frameChunks.reduce((s, c) => s + 8 + c.length, 0)
-    + audioSlices.reduce((s, c) => s + 8 + c.length, 0);  // 'movi'(音视频交错)
-  const idxEntries = totalFrames + audioSlices.length;
-  const idxDataBytes = idxEntries * 16;
-  // RIFF 大小字段 = 文件总大小 - 8('RIFF' + size 本身)
-  const riffSize = 28 + hdrlContent + moviContent + idxDataBytes;
+  const odmlContent = 4 + (8 + 20);                // 'odml' + dmlh chunk(ODML 大文件标记)
+  const hdrlContent = 4 + avihChunkSize + (8 + videoStrlContent) + (hasAudio ? 8 + audioStrlContent : 0) + (multi ? 8 + odmlContent : 0);  // 'hdrl'
+
+  const moviContentOf = (start: number, count: number) => {
+    let s = 4; // 'movi'
+    for (let i = start; i < start + count; i++) {
+      s += 8 + frameChunks[i].length;
+      if (audioSlices[i]) s += 8 + audioSlices[i].length;
+    }
+    return s;
+  };
+  // 写一段 movi 的帧块(音视频交错),返回 idx 条目(offset 相对本段 movi 内容起点)
+  const writeMovi = (start: number, count: number, target: BlobPart[], baseOffset: number): { fourcc: string; flags: number; offset: number; size: number }[] => {
+    let moviOffset = baseOffset + 4; // 相对段0 movi 内容起点的偏移(跨段累加)
+    const idx: { fourcc: string; flags: number; offset: number; size: number }[] = [];
+    for (let i = start; i < start + count; i++) {
+      const c = frameChunks[i];
+      target.push(ascii(frameFcc), u32(c.length), c);
+      idx.push({ fourcc: frameFcc, flags: frameKeyFlags && frameKeyFlags[i] ? 0x10 : 0x00, offset: moviOffset, size: c.length });
+      moviOffset += 8 + c.length;
+      const a = audioSlices[i];
+      if (a) {
+        target.push(ascii('01wb'), u32(a.length), a);
+        idx.push({ fourcc: '01wb', flags: 0x10, offset: moviOffset, size: a.length });
+        moviOffset += 8 + a.length;
+      }
+    }
+    return idx;
+  };
+  const writeIdx1 = (target: BlobPart[], idx: { fourcc: string; flags: number; offset: number; size: number }[]) => {
+    target.push(ascii('idx1'), u32(idx.length * 16));
+    for (const e of idx) {
+      const entry = new Uint8Array(16);
+      const d = new DataView(entry.buffer);
+      entry.set(ascii(e.fourcc), 0);
+      d.setUint32(4, e.flags, true);
+      d.setUint32(8, e.offset + 4, true); // 相对 movi 起始
+      d.setUint32(12, e.size, true);
+      target.push(entry);
+    }
+  };
+
   const parts: BlobPart[] = [];
-  parts.push(ascii('RIFF'), u32(riffSize), ascii('AVI '));
-  // hdrl
-  parts.push(ascii('LIST'), u32(hdrlContent), ascii('hdrl'));
-  // avih
+  const allIdx: { fourcc: string; flags: number; offset: number; size: number }[] = [];
+  // ===== 段 0(主 RIFF:AVI + hdrl + movi0 + idx1(全部帧条目,多段时跨段索引) =====
   {
-    const microSecPerFrame = Math.round(1e6 / fr);
-    const avihChunk = new Uint8Array(56);
-    const d = new DataView(avihChunk.buffer);
-    d.setUint32(0, microSecPerFrame, true);
-    d.setUint32(4, isDib ? frameBytes * fr : 0, true); // maxBytesPerSec
-    d.setUint32(8, 0, true);
-    d.setUint32(12, 0x10, true); // flags: HASINDEX
-    d.setUint32(16, totalFrames, true);
-    d.setUint32(20, 0, true);
-    d.setUint32(24, hasAudio ? 2 : 1, true); // streams
-    d.setUint32(28, 0, true);
-    d.setUint32(32, w, true);
-    d.setUint32(36, h, true);
-    parts.push(ascii('avih'), u32(56), avihChunk);
-  }
-  // video strl
-  {
-    parts.push(ascii('LIST'), u32(videoStrlContent), ascii('strl'));
-    // strh
-    const strh = new Uint8Array(56);
-    const d = new DataView(strh.buffer);
-    strh.set(ascii('vids'), 0);
-    strh.set(ascii(videoFcc), 4);
-    d.setUint32(8, 0, true);
-    d.setUint16(12, 0, true); d.setUint16(14, 0, true);
-    d.setUint32(16, 0, true);
-    d.setUint32(20, 1, true); // scale
-    d.setUint32(24, fr, true); // rate
-    d.setUint32(28, 0, true);
-    d.setUint32(32, totalFrames, true); // length
-    d.setUint32(36, isDib ? frameBytes : 0, true); // dwSuggestedBufferSize
-    d.setUint32(40, 0xffffffff, true); // dwQuality: -1 使用默认质量
-    d.setUint32(44, isDib ? frameBytes : 0, true); // dwSampleSize: 无压缩视频为固定帧大小
-    parts.push(ascii('strh'), u32(56), strh);
-    // strf (BITMAPINFOHEADER,长度可变:40 或 40+avcC)
-    parts.push(ascii('strf'), u32(strf.length), strf);
-  }
-  // audio strl
-  if (hasAudio) {
-    parts.push(ascii('LIST'), u32(audioStrlContent), ascii('strl'));
-    const strh = new Uint8Array(56);
-    const d = new DataView(strh.buffer);
-    strh.set(ascii('auds'), 0);
-    d.setUint32(4, 0, true);
-    d.setUint32(8, 0, true);
-    d.setUint16(12, 0, true); d.setUint16(14, 0, true);
-    d.setUint32(16, 0, true);
-    d.setUint32(20, 1, true);
-    d.setUint32(24, audioRate, true);
-    d.setUint32(28, 0, true);
-    d.setUint32(32, Math.floor(pcm16.length / bytesPerSample), true);
-    d.setUint32(36, 0, true);
-    d.setUint32(40, 0xffffffff, true); // -1 quality
-    d.setUint32(44, bytesPerSample, true);
-    parts.push(ascii('strh'), u32(56), strh);
-    const strf = new Uint8Array(18);
-    const df = new DataView(strf.buffer);
-    df.setUint16(0, 1, true); // PCM
-    df.setUint16(2, numCh, true);
-    df.setUint32(4, audioRate, true);
-    df.setUint32(8, audioRate * bytesPerSample, true);
-    df.setUint16(12, bytesPerSample, true);
-    df.setUint16(14, 16, true);
-    df.setUint16(16, 0, true);
-    parts.push(ascii('strf'), u32(18), strf);
-  }
-  // movi(音视频交错:每帧视频后紧跟该帧时长的音频块)
-  parts.push(ascii('LIST'), u32(moviContent), ascii('movi'));
-  let moviOffset = 4; // 相对 movi list 内容的偏移
-  const idx: { fourcc: string; flags: number; offset: number; size: number }[] = [];
-  for (let i = 0; i < frameChunks.length; i++) {
-    const c = frameChunks[i];
-    parts.push(ascii(frameFcc), u32(c.length), c);
-    idx.push({ fourcc: frameFcc, flags: frameKeyFlags && frameKeyFlags[i] ? 0x10 : 0x00, offset: moviOffset, size: c.length });
-    moviOffset += 8 + c.length;
-    const a = audioSlices[i];
-    if (a) {
-      parts.push(ascii('01wb'), u32(a.length), a);
-      idx.push({ fourcc: '01wb', flags: 0x10, offset: moviOffset, size: a.length });
-      moviOffset += 8 + a.length;
+    const seg0 = segments[0];
+    const movi0Content = moviContentOf(0, seg0);
+    // idx1 始终紧跟段0 movi(ffmpeg 只在第一个 movi 后扫描 idx1,遇到后续 RIFF 段会停止):
+    // 多段时 idx1 包含全部帧条目(offset 统一相对段0 movi 内容起点,uint32 可表示)
+    const idxDataBytes = (totalFrames + audioSlices.length) * 16;
+    // RIFF 大小字段 = 段0 总大小 - 8('RIFF' + size 本身)
+    const riffSize = 28 + hdrlContent + movi0Content + idxDataBytes;
+    parts.push(ascii('RIFF'), u32(riffSize), ascii('AVI '));
+    // hdrl
+    parts.push(ascii('LIST'), u32(hdrlContent), ascii('hdrl'));
+    // avih
+    {
+      const microSecPerFrame = Math.round(1e6 / fr);
+      const avihChunk = new Uint8Array(56);
+      const d = new DataView(avihChunk.buffer);
+      d.setUint32(0, microSecPerFrame, true);
+      d.setUint32(4, isDib ? frameBytes * fr : 0, true); // maxBytesPerSec
+      d.setUint32(8, 0, true);
+      d.setUint32(12, 0x10, true); // flags: HASINDEX
+      d.setUint32(16, totalFrames, true);
+      d.setUint32(20, 0, true);
+      d.setUint32(24, hasAudio ? 2 : 1, true); // streams
+      d.setUint32(28, 0, true);
+      d.setUint32(32, w, true);
+      d.setUint32(36, h, true);
+      parts.push(ascii('avih'), u32(56), avihChunk);
+    }
+    // video strl
+    {
+      parts.push(ascii('LIST'), u32(videoStrlContent), ascii('strl'));
+      // strh
+      const strh = new Uint8Array(56);
+      const d = new DataView(strh.buffer);
+      strh.set(ascii('vids'), 0);
+      strh.set(ascii(videoFcc), 4);
+      d.setUint32(8, 0, true);
+      d.setUint16(12, 0, true); d.setUint16(14, 0, true);
+      d.setUint32(16, 0, true);
+      d.setUint32(20, 1, true); // scale
+      d.setUint32(24, fr, true); // rate
+      d.setUint32(28, 0, true);
+      d.setUint32(32, totalFrames, true); // length
+      d.setUint32(36, isDib ? frameBytes : 0, true); // dwSuggestedBufferSize
+      d.setUint32(40, 0xffffffff, true); // dwQuality: -1 使用默认质量
+      d.setUint32(44, isDib ? frameBytes : 0, true); // dwSampleSize: 无压缩视频为固定帧大小
+      parts.push(ascii('strh'), u32(56), strh);
+      // strf (BITMAPINFOHEADER,长度可变:40 或 40+avcC)
+      parts.push(ascii('strf'), u32(strf.length), strf);
+    }
+    // audio strl
+    if (hasAudio) {
+      parts.push(ascii('LIST'), u32(audioStrlContent), ascii('strl'));
+      const strh = new Uint8Array(56);
+      const d = new DataView(strh.buffer);
+      strh.set(ascii('auds'), 0);
+      d.setUint32(4, 0, true);
+      d.setUint32(8, 0, true);
+      d.setUint16(12, 0, true); d.setUint16(14, 0, true);
+      d.setUint32(16, 0, true);
+      d.setUint32(20, 1, true);
+      d.setUint32(24, audioRate, true);
+      d.setUint32(28, 0, true);
+      d.setUint32(32, Math.floor(pcm16.length / bytesPerSample), true);
+      d.setUint32(36, 0, true);
+      d.setUint32(40, 0xffffffff, true); // -1 quality
+      d.setUint32(44, bytesPerSample, true);
+      parts.push(ascii('strh'), u32(56), strh);
+      const strf = new Uint8Array(18);
+      const df = new DataView(strf.buffer);
+      df.setUint16(0, 1, true); // PCM
+      df.setUint16(2, numCh, true);
+      df.setUint32(4, audioRate, true);
+      df.setUint32(8, audioRate * bytesPerSample, true);
+      df.setUint16(12, bytesPerSample, true);
+      df.setUint16(14, 16, true);
+      df.setUint16(16, 0, true);
+      parts.push(ascii('strf'), u32(18), strf);
+    }
+    // ODML 标记(仅大文件分段时):让 AE/PR/PotPlayer 识别为 AVI 2.0
+    if (multi) {
+      const dmlh = new Uint8Array(20);
+      const dd = new DataView(dmlh.buffer);
+      dd.setUint32(0, totalFrames, true); // dwTotalFrames
+      parts.push(ascii('LIST'), u32(odmlContent), ascii('odml'));
+      parts.push(ascii('dmlh'), u32(20), dmlh);
+    }
+    // movi(音视频交错)
+    parts.push(ascii('LIST'), u32(movi0Content), ascii('movi'));
+    const idx0 = writeMovi(0, seg0, parts, 0);
+    // idx1 紧跟段0,包含全部帧条目(多段时跨段索引,ffmpeg 只扫描第一个 movi 后的 idx1)
+    allIdx.push(...idx0);
+    if (!multi) {
+      writeIdx1(parts, idx0);
     }
   }
-  // idx1
-  parts.push(ascii('idx1'), u32(idxDataBytes));
-  for (const e of idx) {
-    const entry = new Uint8Array(16);
-    const d = new DataView(entry.buffer);
-    entry.set(ascii(e.fourcc), 0);
-    d.setUint32(4, e.flags, true);
-    d.setUint32(8, e.offset + 4, true); // 相对 movi 起始
-    d.setUint32(12, e.size, true);
-    parts.push(entry);
+  // ===== 后续段(RIFF AVIX + LIST movi) =====
+  {
+    let offset = segments[0];
+    // 跨段帧的 idx1 offset 统一相对段0 movi 内容起点:
+    // 段 k 第一帧块头 = Σ前面段 movi 内容 + 段头(RIFF8+AVIX4+LIST8+movi4=24)×前面段数
+    let baseOffset = moviContentOf(0, segments[0]) + 20; // 段0 movi + 段1头24 - 4(writeMovi 内部 +4)
+    for (let k = 1; k < segmentCount; k++) {
+      const seg = segments[k];
+      const moviKContent = moviContentOf(offset, seg);
+      const riffSize = 12 + moviKContent; // 'AVIX'(4) + LIST(8+moviContent)
+      parts.push(ascii('RIFF'), u32(riffSize), ascii('AVIX'));
+      parts.push(ascii('LIST'), u32(moviKContent), ascii('movi'));
+      allIdx.push(...writeMovi(offset, seg, parts, baseOffset));
+      baseOffset += moviKContent + 24;
+      offset += seg;
+    }
   }
+  // ===== 多段:idx1(段0 后)写入全部帧条目 =====
+  if (multi) writeIdx1(parts, allIdx);
 
   return new Blob(parts, { type: 'video/x-msvideo' });
 }
