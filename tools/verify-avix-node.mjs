@@ -75,7 +75,7 @@ function buildAvi(w, h, fr, videoFcc, strf, frameFcc, frameChunks, pcm16, numCh,
       const d = new DataView(entry.buffer);
       entry.set(ascii(e.fourcc), 0);
       d.setUint32(4, e.flags, true);
-      d.setUint32(8, e.offset + 4, true);
+      d.setUint32(8, e.offset, true); // 相对 'movi' fourcc 位置,第一条目=4(标准约定,PotPlayer 按此计算)
       d.setUint32(12, e.size, true);
       target.push(entry);
     }
@@ -114,7 +114,7 @@ function buildAvi(w, h, fr, videoFcc, strf, frameFcc, frameChunks, pcm16, numCh,
   // 实测 PotPlayer 对头区任何 'indx' 块都会出错(无声音/拒播),所以不写 indx:
   //   - 多段:写"部分 idx1"(u32 内条目,前 ~517 帧);超界 seek 按规范跳到最近条目再顺序解码。
   //   - 单段:全部条目。
-  const idxCut = multi ? allIdx.findIndex(e => e.offset + 4 > 0xFFFFF000) : -1;
+  const idxCut = multi ? allIdx.findIndex(e => e.offset > 0xFFFFF000) : -1;
   if (multi) allIdx = calcAllIdx((idxCut < 0 ? allIdx.length : idxCut) * 16);
   const idx1Entries = idxCut < 0 ? allIdx : allIdx.slice(0, idxCut);
   const idxDataBytes = idx1Entries.length * 16;
@@ -348,23 +348,25 @@ console.log('AVIX 段数:', segments, segments > 1 ? '✓ 已分段' : '✗ 未�
       }
       p2 += 8 + riffSz;
     }
-    // idx1 条目 vs 实际
+    // idx1 条目 vs 实际(严格约定:off 相对 'movi' fourcc 位置 = movi0Pos+8,第一条目必须=4)
     const e16 = Buffer.alloc(16);
     const entOf = (k) => { fs.readSync(rfd, e16, 0, 16, idx1At + 8 + k * 16); return { tag: e16.toString('latin1', 0, 4), off: e16.readUInt32LE(8) }; };
-    const dataOffset = actualV[0] - entOf(0).off;
+    const moviListPos = movi0Pos + 8; // 'movi' fourcc 绝对位置
+    const firstOff = entOf(0).off;
+    if (firstOff !== 4) console.log(`✗ 第一条目 off=${firstOff} 应为 4(标准约定)!`);
     const samples = [0, 50, 100, 126, 127, 128, 200, 250, 300, 381, 400, 499, 507, 508, 510, 516, 517];
     let posOk = true;
     for (const f of samples) {
       if (actualV[f] === undefined) continue;
-      const vCalc = entOf(f * 2).off + dataOffset;
+      const vCalc = entOf(f * 2).off + moviListPos;
       const aEnt = entOf(f * 2 + 1);
       const vOk = vCalc === actualV[f];
       let aOk = true;
-      if (aEnt.tag === '01wb' && actualA[f] !== undefined) aOk = (aEnt.off + dataOffset) === actualA[f];
+      if (aEnt.tag === '01wb' && actualA[f] !== undefined) aOk = (aEnt.off + moviListPos) === actualA[f];
       if (!vOk || !aOk) posOk = false;
       console.log(`条目位置 帧${f}: 视频${vCalc === actualV[f] ? '✓' : '✗差' + (vCalc - actualV[f])} 音频${aOk ? '✓' : '✗'}`);
     }
-    console.log(posOk ? '✓ 全部 idx1 条目位置与文件实际一致' : '✗ idx1 条目位置错误(PotPlayer 残影/错位/滋滋声根源)');
+    console.log(posOk ? '✓ 全部 idx1 条目位置符合标准约定(off+movi位置=实际)' : '✗ idx1 条目位置错误(PotPlayer 残影/错位/滋滋声根源)');
     fs.closeSync(rfd);
   }
 }

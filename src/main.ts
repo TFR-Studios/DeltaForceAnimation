@@ -1929,7 +1929,10 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
       const d = new DataView(entry.buffer);
       entry.set(ascii(e.fourcc), 0);
       d.setUint32(4, e.flags, true);
-      d.setUint32(8, e.offset + 4, true); // 相对 movi 起始
+      // dwChunkOffset = 相对 'movi' fourcc 位置的偏移,第一条目 = 4(标准约定,
+      // 与 ffmpeg/VirtualDub 一致)。曾写成 +4(第一条目=8),ffmpeg 有校准能容忍,
+      // PotPlayer 按原始约定计算会整体 +4 偏差 → 音频读到块头当数据 = 滋滋声
+      d.setUint32(8, e.offset, true);
       d.setUint32(12, e.size, true);
       target.push(entry);
     }
@@ -1974,7 +1977,7 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
   //   - 多段:写"部分 idx1"——偏移能放进 u32 的条目(前 ~517 帧,绝对正确);
   //     超界部分按 AVI 规范"seek 到最近条目再顺序解码",结果仍正确(ffmpeg/VLC 已验证)。
   //   - 单段:全部条目(u32 内)。
-  const idxCut = multi ? allIdx.findIndex(e => e.offset + 4 > 0xFFFFF000) : -1;
+  const idxCut = multi ? allIdx.findIndex(e => e.offset > 0xFFFFF000) : -1;
   if (multi) allIdx = calcAllIdx((idxCut < 0 ? allIdx.length : idxCut) * 16);
   const idx1Entries = idxCut < 0 ? allIdx : allIdx.slice(0, idxCut);
   const idxDataBytes = idx1Entries.length * 16;

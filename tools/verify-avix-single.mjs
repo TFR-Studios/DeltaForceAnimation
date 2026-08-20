@@ -75,7 +75,7 @@ function buildAvi(w, h, fr, videoFcc, strf, frameFcc, frameChunks, pcm16, numCh,
       const d = new DataView(entry.buffer);
       entry.set(ascii(e.fourcc), 0);
       d.setUint32(4, e.flags, true);
-      d.setUint32(8, e.offset + 4, true);
+      d.setUint32(8, e.offset, true); // 相对 'movi' fourcc 位置,第一条目=4(标准约定)
       d.setUint32(12, e.size, true);
       target.push(entry);
     }
