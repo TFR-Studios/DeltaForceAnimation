@@ -168,4 +168,10 @@ npm run preview  # 本地预览构建产物(与线上一致)
 
 ## License
 
-尚未配置(开源前请补充 LICENSE 文件并在此注明)。
+[![License: GPL v3](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](./LICENSE)
+
+Copyright © 2026 [TF注册表 (TFR-Studios)](https://github.com/TFR-Studios)
+
+本项目以 **GNU General Public License v3.0(GPL-3.0)** 开源,完整条款见 [LICENSE](./LICENSE):可以自由使用、修改与再分发,但基于本仓库代码的衍生作品必须同样以 GPL-3.0 发布,且程序**不提供任何担保**。
+
+> 注意:LICENSE 仅适用于仓库自研的编辑器代码;仓库内的游戏动画素材(JSON/PNG/音频)版权归原游戏版权方所有,不在 GPL-3.0 授予范围内,开源 / 商用前请自行确认授权(见文首「注意」)。

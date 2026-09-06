@@ -1,3 +1,20 @@
+Delta Force Animation Editor (三角洲行动动画编辑器)
+Copyright (C) 2026 TF注册表 (TFR-Studios)
+Project home: https://github.com/TFR-Studios/DeltaForceAnimation
+
+A browser-based Lottie/Bodymovin editor for previewing, editing and
+exporting Delta Force HUD animations.
+
+This project is licensed under the GNU General Public License,
+version 3 (GPL-3.0); the full terms and conditions are set out below.
+See also <https://www.gnu.org/licenses/>.
+
+NOTE: The in-game animation assets bundled in this repository
+(animation JSON / PNG / audio files) belong to their original
+copyright holders and are NOT covered by this license.
+
+========================================================================
+
                     GNU GENERAL PUBLIC LICENSE
                        Version 3, 29 June 2007
 
