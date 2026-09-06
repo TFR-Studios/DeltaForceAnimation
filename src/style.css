@@ -557,3 +557,66 @@ input[type="color"] { padding: 0; width: 34px; height: 26px; }
 .export-actions { margin-top: 18px; }
 .export-actions button { min-width: 110px; padding: 8px 16px; font-size: 14px; }
 .export-actions button:disabled { opacity: 0.5; cursor: default; }
+/* 动画数据按需加载浮层:切换动画下载数据包时的进度提示 */
+#dataLoading {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(6, 8, 12, 0.62);
+  backdrop-filter: blur(2px);
+}
+#dataLoading[hidden] { display: none; }
+.dl-card {
+  width: min(430px, 88vw);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 20px;
+  box-shadow: 0 14px 44px rgba(0, 0, 0, 0.5);
+}
+.dl-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 14px;
+  font-size: 13px;
+  color: #dbe1ea;
+}
+.dl-title b { font-weight: 600; }
+.dl-pct {
+  font-size: 12px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.dl-bar {
+  margin-top: 12px;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.dl-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #2563eb, #3b82f6, #60a5fa);
+  transition: width 0.12s linear;
+}
+.dl-fill.indet {
+  width: 38% !important;
+  animation: dlSlide 1.1s ease-in-out infinite;
+}
+@keyframes dlSlide {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(360%); }
+}
+.dl-note {
+  margin-top: 10px;
+  font-size: 11px;
+  color: #6b7280;
+  line-height: 1.5;
+}

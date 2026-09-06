@@ -155,6 +155,15 @@
       </aside>
     </main>
 
+    <!-- 切换动画时按需下载数据包的加载浮层(实时进度) -->
+    <div id="dataLoading" hidden>
+      <div class="dl-card">
+        <div class="dl-title"><b id="dlTitle">正在加载动画数据…</b><span id="dataLoadingPct" class="dl-pct">0%</span></div>
+        <div class="dl-bar"><div class="dl-fill" id="dataLoadingFill"></div></div>
+        <div class="dl-note">首次进入该动画需下载对应数据包,之后浏览器会缓存,再切换即秒开</div>
+      </div>
+    </div>
+
     <div class="export-overlay" id="exportOverlay" hidden>
       <div class="export-card">
         <div class="export-head">
