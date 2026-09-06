@@ -1078,12 +1078,11 @@ previewStage.addEventListener('dblclick', resetView);
 btnResetView.addEventListener('click', resetView);
 
 function applyBackground() {
-  if (chkTransparent.checked) {
-    previewStage.style.background =
-      'repeating-conic-gradient(#2a2d33 0% 25%, #22252a 0% 50%) 50% / 20px 20px';
-  } else {
-    previewStage.style.background = bgColor.value;
-  }
+  /* 背景(背景色 / 透明棋盘格)只应用于画布框内(previewInner,尺寸随动画数据:撤离 1920×1080、位置暴露 3840×1080);
+   * 框外区域固定为黑底 + 网格 + 平铺「超出区域,不予显示」提示(见 style.css),与导出无关。 */
+  previewInner.style.background = chkTransparent.checked
+    ? 'repeating-conic-gradient(#2a2d33 0% 25%, #22252a 0% 50%) 50% / 20px 20px'
+    : bgColor.value;
 }
 bgColor.addEventListener('input', applyBackground);
 
@@ -3181,7 +3180,7 @@ let currentAnimKey = 'extraction';
 
 /* ---------- 二次扫描开关状态 ---------- */
 let showNextScan = false; // 是否显示二次扫描(主动画后紧接着播第二段)
-let nextDuration = 2.7; // 第二段时长(秒,默认 2.7s)
+let nextDuration = 3.2; // 第二段时长(秒,默认 3.2s)
 
 /* ---------- 位置暴露动画图标选择 ---------- */
 let currentIconName = DEFAULT_ICON_NAME;
@@ -3189,7 +3188,7 @@ let customIcons: { name: string; url: string }[] = []; // 用户上传的自定�
 
 /* ---------- 图标显示开关 ----------
  * 「显示图标」开关(默认勾选):取消后主段与二次扫描段的图标图层透明度动画
- * 置 0(隐藏),文字 p.x 置 960(画面中心,两段一致);恢复勾选时还原原值。注意:图标隐藏不能只设静态 ks.o=0(lottie 对静态
+ * 置 0(隐藏),文字 p.x 置 1920(3840×1080 画布中心,两段一致);恢复勾选时还原原值。注意:图标隐藏不能只设静态 ks.o=0(lottie 对静态
  * 透明度不应用,图层仍会渲染),必须用动画关键帧 {a:1,k:[{t:0,s:[0]}]}。
  * 图标显示状态下加载数据时捕获原值;隐藏状态下重建动画(切换/改文字等)时
  * 保留上次捕获的原值,保证恢复后与原始一致。 */
@@ -3197,16 +3196,18 @@ let buildSerial = 0; // 动画重建序号:并发/连发重建时只让最新一
 let iconVisible = true; // 「显示图标」开关状态(默认显示)
 const iconOpacityOriginal = new Map<number, { a: number; k: any }>(); // 图标层 ind → 原 ks.o
 const textPosXOriginal = new Map<number, number>(); // 文字层 ind → 原 p.x
-/* 隐藏图标时底框整组随文字回中:文字 p.x 置 960 后,主段的底框/两侧竖条等组件
- * 仍停留在“图标+文字”布局处(静止帧实测中心 995.5),文字相对底框偏左约 34 合成
- * 单位。这里把主段父级「空 2」(ind 3)整体左移,使底框中心与文字中心(≈961)
- * 重合,底框左右留白对称、观感居中;恢复图标时还原。二次扫描段(ind 103)的底框
- * 本身就以 960 为中心,无需偏移。数值按当前内置动画 JSON 静止帧实测,若更换/重
- * 导出动画数据导致底框基准位置变化,需要重新标定。 */
+/* 隐藏图标时底框整组随文字回中:位置暴露动画画布已加宽为 3840×1080,数据整体
+ * 平移 +930(可见态内容实测中心 990 → 1920)。文字 p.x 置 1920 后,主段的底框/
+ * 两侧竖条等组件仍停留在“图标+文字”布局处(静止帧实测中心 1925.5,即旧 995.5+930),
+ * 文字相对底框偏左约 34 合成单位。这里把主段父级「空 2」(ind 3)整体左移 -34.3,
+ * 使底框中心与文字中心(≈1921)重合,底框左右留白对称、观感居中;恢复图标时还原。
+ * 二次扫描段(ind 103)的底框本身就以 1920 为中心,无需偏移。数值按当前内置动画
+ * JSON(3840×1080)静止帧实测换算,若更换/重导出动画数据导致底框基准位置变化,
+ * 需要重新标定。 */
 const PLATE_PARENT_X_SHIFT = new Map<number, number>([[3, -34.3]]); // 空 2 ind → 隐藏时左移量(合成单位)
 const plateParentXOriginal = new Map<number, number>(); // 空 2 ind → 原 p.x
 /* 隐藏图标居中微调:不同字体/文字内容的字形存在固有光学偏差(墨迹/笔画分布不
- * 完全对称),纯数值很难替人眼定“正中”。提供 ±px 手动微调,叠加在 960 上,
+ * 完全对称),纯数值很难替人眼定“正中”。提供 ±px 手动微调,叠加在 1920 上,
  * 只影响「显示图标」未勾选时的文字与其跟随的底框;SVG/Canvas、预览/导出一致。 */
 let iconCenterNudge = 0; // 合成单位,正值右移;0 = 关闭微调
 let nudgeRebuildTimer: number | undefined; // 连点微调防抖(220ms):一次快速连点只合并成一次重建
@@ -3221,11 +3222,11 @@ function changeIconNudge(delta: number) {
     nudgeRebuildTimer = window.setTimeout(() => setIconVisible(false), 220);
   }
 }
-/* 画面中心取 p.x=960 而不做额外偏移(此前按“锚点偏移 −anchorX×缩放”≈1.18
+/* 画面中心取 p.x=1920 而不做额外偏移(此前按“锚点偏移 −anchorX×缩放”≈1.18
  * 与“固定 18.43”均实测偏左):本字体 ProjectD Type 字形墨迹在其字格内略偏左
  * (约 0.5 字格 ≈ 1.5 合成单位),按字格中心/锚点校正反而让墨迹视觉中心落在
- * 958.4 附近(观感偏左)。逐字形墨迹实测:p.x=960 时主段「位置暴露」墨迹中心
- * 959.6、二次扫描「即将扫描移动单位」960.2,观感最居中;SVG 与 Canvas 一致。 */
+ * 1918.4 附近(观感偏左)。逐字形墨迹实测:p.x=1920 时主段「位置暴露」墨迹中心
+ * 1919.6、二次扫描「即将扫描移动单位」1920.2,观感最居中;SVG 与 Canvas 一致。 */
 function captureIconState() {
   if (!chkIcon.checked) return; // 仅图标显示时记录原始状态,隐藏时保留上次记录
   iconOpacityOriginal.clear();
@@ -3287,8 +3288,8 @@ function setIconVisible(visible: boolean, rerender = true) {
       const orig = textPosXOriginal.get(ind);
       if (orig !== undefined) p.k[0] = orig;
     } else {
-      // 画面中心:960 + 手动微调(见 iconCenterNudge 注释)。
-      p.k[0] = 960 + iconCenterNudge;
+      // 画面中心:1920(3840 宽画布)+ 手动微调(见 iconCenterNudge 注释)。
+      p.k[0] = 1920 + iconCenterNudge;
     }
   }
   // 底框整组随文字回中:从捕获的原值按偏移量取绝对值,重复触发(隐藏状态下重建等)
