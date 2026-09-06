@@ -2,19 +2,116 @@ import lottie, { type AnimationItem } from 'lottie-web';
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import './style.css';
 
+/* ---------- 启动加载界面 ----------
+ * #app-loading 的样式是内联在 index.html 中的(不依赖本文件 import 的 style.css),
+ * 因此在样式表加载完成前即可渲染显示;本模块在 import 到 style.css 之后执行,
+ * 代表样式已就绪,这里启动块状进度条动画。
+ * 进度推进到接近完成时停滞等待;主动画首次 ready 后(符号 flag)快速冲到 100%,
+ * 走到 100% 才淡出并移除加载界面(真正做到"进度条走满再进入网站")。 */
+let appLoadingHidden = false;
+let appLoadingReady = false; // 主动画已就绪,允许进度条收尾到 100%
+
+function renderLoadingPct(pct: number) {
+  const bar = document.getElementById('ldBar');
+  const pctEl = document.getElementById('ldPct');
+  if (bar) {
+    const on = Math.round((Math.min(100, pct) / 100) * (bar.children.length || 1));
+    for (let i = 0; i < bar.children.length; i++) bar.children[i].classList.toggle('on', i < on);
+  }
+  if (pctEl) pctEl.textContent = Math.round(pct) + '%';
+}
+
+function finishAppLoading() {
+  appLoadingReady = true;
+}
+
+function hideAppLoading(pct = 100) {
+  if (appLoadingHidden) return;
+  appLoadingHidden = true;
+  renderLoadingPct(pct);
+  const el = document.getElementById('app-loading');
+  if (el) {
+    el.classList.add('is-hidden');
+    window.setTimeout(() => el.remove(), 500);
+  }
+}
+
+(function startLoadingProgress() {
+  const bar = document.getElementById('ldBar');
+  if (!bar) return;
+  const blocks = 22;
+  for (let i = 0; i < blocks; i++) bar.appendChild(document.createElement('i'));
+  let step = 0;
+  const timer = window.setInterval(() => {
+    if (appLoadingReady) {
+      step += 4; // 就绪后快速冲过最后一段
+    } else {
+      // 未就绪:推进到 96% 附近停滞等待,不提前放行
+      step = Math.min(96, step + (step >= 60 ? 1 : 2));
+    }
+    if (step >= 100) {
+      renderLoadingPct(100);
+      window.clearInterval(timer);
+      window.setTimeout(() => hideAppLoading(100), 250);
+      return;
+    }
+    renderLoadingPct(step);
+  }, 70);
+})();
+
+/* 音效播放音量(0-1):预览与导出统一使用,调低以避免音效过响 */
+const AUDIO_VOLUME = 0.3;
+
 /* ---------- 音频工厂 ----------
  * lottie-web 默认依赖 window.Howl(howler.js);没有 Howl 时它会返回一个缺 pause/volume
  * 方法的桩对象,一旦动画 pause/stop 就会抛 "this.audio.pause is not a function"。
  * 这里注入基于原生 HTMLAudioElement 的工厂:既修掉崩溃,又能真正播放 JSON 内嵌的音频。
+ * 同时处理浏览器自动播放策略:动画 autoplay 触发的 play() 在无用户手势时会被拦截,
+ * 这里在首次用户交互(点击/按键)时自动重试,保证用户一定能听到音效。
  */
+/* 音频元素缓存:同一资源只创建一个 Audio 元素并复用。
+ * 每次重建动画(lottie 会为每个音频层新建 Audio 元素)都会发起新请求,
+ * 旧元素被 GC 时若请求仍在进行会中止加载,控制台报 net::ERR_ABORTED。
+ * 元素常驻缓存不会被回收,既消除该报错,也避免重复请求。 */
+const audioElCache = new Map<string, HTMLAudioElement>();
+
 const audioFactory = (assetPath: string) => {
-  const el = new Audio();
-  el.src = assetPath;
-  el.preload = 'auto';
+  let el = audioElCache.get(assetPath);
+  if (!el) {
+    el = new Audio();
+    el.preload = 'auto';
+    audioElCache.set(assetPath, el);
+  }
+  el.src = assetPath; // 同值赋值是幂等操作,不会重新发起加载
+  let wantPlay = false; // lottie 期望该音频处于播放状态
+  let retryHandler: (() => void) | null = null;
+
+  const tryPlay = () => {
+    const p = el.play();
+    if (p && typeof (p as Promise<void>).catch === 'function') {
+      (p as Promise<void>).catch((e: any) => {
+        // 自动播放被浏览器拦截:等待首次用户交互后重试(仅当 lottie 仍期望播放时)
+        if (e && e.name === 'NotAllowedError' && wantPlay && !retryHandler) {
+          console.warn('[AUDIO] 自动播放被浏览器拦截,等待用户交互后重试');
+          const onGesture = () => {
+            window.removeEventListener('pointerdown', onGesture);
+            window.removeEventListener('keydown', onGesture);
+            retryHandler = null;
+            // 延迟到点击事件处理完成后:若点击的是播放按钮(会暂停动画),此时 wantPlay 已为 false,跳过重试避免"开始又立即暂停"
+            window.setTimeout(() => { if (wantPlay) tryPlay(); }, 0);
+          };
+          retryHandler = onGesture;
+          window.addEventListener('pointerdown', onGesture, { once: true });
+          window.addEventListener('keydown', onGesture, { once: true });
+        }
+      });
+    }
+  };
+
   const setVolume = (v?: number) => { if (v !== undefined) el.volume = v; };
   return {
-    play: () => { el.play().catch(() => { /* 浏览器自动播放策略拦截时忽略 */ }); },
-    pause: () => { el.pause(); },
+    play: () => { wantPlay = true; tryPlay(); },
+    pause: () => { wantPlay = false; el.pause(); },
     seek: (t?: number) => { if (t !== undefined) el.currentTime = t; return el.currentTime; },
     playing: () => !el.paused && !el.ended,
     rate: (r?: number) => { if (r !== undefined) el.playbackRate = r; },
@@ -22,6 +119,24 @@ const audioFactory = (assetPath: string) => {
     setVolume, // 类型声明要求
   };
 };
+
+/* 在 lottie 的 AnimationItem.destroy 中先暂停音频:
+ * 动画销毁(切换/重建/导出结束)时 lottie 不会暂停音频层,若不处理,
+ * 缓存的音频元素会继续播放,切换到其他动画时会出现声音重叠。 */
+let audioDestroyPatched = false;
+function patchAudioDestroy(animItem: any) {
+  if (audioDestroyPatched || !animItem) return;
+  const proto = animItem.constructor && animItem.constructor.prototype;
+  if (!proto || typeof proto.destroy !== 'function') return;
+  const orig = proto.destroy;
+  proto.destroy = function (this: any, name?: string) {
+    try {
+      if (this.audioController && typeof this.audioController.pause === 'function') this.audioController.pause();
+    } catch { /* ignore */ }
+    return orig.call(this, name);
+  };
+  audioDestroyPatched = true;
+}
 
 /* ---------- 字体预加载 ----------
  * Bodymovin 可将 TTF 字体文件以 base64 内嵌在 fonts.list[].fPath 中。
@@ -219,6 +334,7 @@ function patchCanvasRendererTree(renderer: any, exportMode = false) {
       } else if (el.data.ty === 0 && typeof el.buildItem === 'function') {
         patchCanvasRendererTree(el, exportMode); // 预合成内
       }
+      if (getDropShadow(el.data)) patchCanvasDropShadow(el);
     }
   }
   const origBuild = renderer.buildItem.bind(renderer);
@@ -235,6 +351,7 @@ function patchCanvasRendererTree(renderer: any, exportMode = false) {
     } else if (el.data && el.data.ty === 0 && typeof el.buildItem === 'function') {
       patchCanvasRendererTree(el); // 预合成内的文字层
     }
+    if (el.data && getDropShadow(el.data)) patchCanvasDropShadow(el);
   };
 }
 
@@ -377,16 +494,25 @@ function patchSeqSvgElement(el: any) {
   };
 }
 
-/* SVG 渲染器树 patch(图片序列层) */
+/* SVG 渲染器树 patch(图片序列层 + 投影效果) */
 function patchSvgRendererTree(renderer: any) {
   if (renderer.__seqTreePatched) return;
   renderer.__seqTreePatched = true;
+  // 移除根 <g> 上 Lottie 默认应用的固定尺寸 clipPath(1920×1080),并允许 SVG 溢出,
+  // 避免底框随文字变宽后两侧竖条超出合成边界被裁剪(缩放画布时仍可见完整竖条)
+  if (renderer.svgElement) {
+    const rootG = renderer.layerElement;
+    if (rootG && rootG.removeAttribute) rootG.removeAttribute('clip-path');
+    renderer.svgElement.style.overflow = 'visible';
+    renderer.svgElement.setAttribute('overflow', 'visible');
+  }
   // 已构建元素立即应用
   for (const el of renderer.elements ?? []) {
     if (el && el.data && !el.__seqElPatched) {
       el.__seqElPatched = true;
       if (el.data.ty === 2 && seqLayerInd >= 0 && el.data.ind === seqLayerInd) patchSeqSvgElement(el);
       else if (el.data.ty === 0 && typeof el.buildItem === 'function') patchSvgRendererTree(el);
+      if (getDropShadow(el.data)) patchSvgDropShadow(el);
     }
   }
   const origBuild = renderer.buildItem.bind(renderer);
@@ -400,6 +526,7 @@ function patchSvgRendererTree(renderer: any) {
     } else if (el.data && el.data.ty === 0 && typeof el.buildItem === 'function') {
       patchSvgRendererTree(el); // 预合成内
     }
+    if (el.data && getDropShadow(el.data)) patchSvgDropShadow(el);
   };
 }
 
@@ -424,6 +551,13 @@ const btnRestart = $<HTMLButtonElement>('btnRestart');
 const chkLoop = $<HTMLInputElement>('chkLoop');
 const rngSpeed = $<HTMLInputElement>('rngSpeed');
 const speedVal = $<HTMLSpanElement>('speedVal');
+const rngDuration = $<HTMLInputElement>('rngDuration');
+const durationVal = $<HTMLSpanElement>('durationVal');
+const timingSection = $<HTMLDivElement>('timingSection');
+const chkNextScan = $<HTMLInputElement>('chkNextScan');
+const nextDurationRow = $<HTMLLabelElement>('nextDurationRow');
+const rngNextDuration = $<HTMLInputElement>('rngNextDuration');
+const nextDurationVal = $<HTMLSpanElement>('nextDurationVal');
 const frameInfo = $<HTMLElement>('frameInfo');
 const timeInfo = $<HTMLElement>('timeInfo');
 const rngFrame = $<HTMLInputElement>('rngFrame');
@@ -436,6 +570,14 @@ const textList = $<HTMLUListElement>('textList');
 const textCount = $<HTMLElement>('textCount');
 const shapeList = $<HTMLUListElement>('shapeList');
 const shapeCount = $<HTMLElement>('shapeCount');
+const imageSection = $<HTMLDivElement>('imageSection');
+const imageList = $<HTMLUListElement>('imageList');
+const imageCount = $<HTMLElement>('imageCount');
+const iconSection = $<HTMLDivElement>('iconSection');
+const iconList = $<HTMLUListElement>('iconList');
+const iconCount = $<HTMLElement>('iconCount');
+const iconFile = $<HTMLInputElement>('iconFile');
+const chkIcon = $<HTMLInputElement>('chkIcon');
 const chkPopup = $<HTMLInputElement>('chkPopup');
 const popupLayer = $<HTMLDivElement>('popupLayer');
 const popupCount = $<HTMLElement>('popupCount');
@@ -472,11 +614,23 @@ let loadSeq = 0;
 
 async function loadData(data: any, name: string) {
   const seq = ++loadSeq;
+  const serial = ++buildSerial; // 使在途的 reRenderPreservingState 恢复逻辑失效
   destroyAnim();
   currentData = data;
   currentName = name;
+  // 位置暴露动画默认时长 1.25s(内容时长),总播放 = 内容时长 + 5 帧;仅首次载入时应用
+  if (name === '位置暴露动画' && !defaultDurationApplied) {
+    defaultDurationApplied = true;
+    applyMainDuration(data, 1.25);
+  }
+  // 「原始状态」捕获必须放在时长压缩之后:applyMainDuration 会把各图层末尾淡出
+  // 关键帧平移到压缩后的出点(如文字层由 47→61 帧改为 61→75 帧)。若在压缩前捕获,
+  // 点图层「重置」会恢复成压缩前的淡出时刻,导致该图层与其余图层渐隐不同步(乱套)。
   captureOriginalState(data);
   captureOriginalShapeState(data);
+  captureOpacityState(data);
+  captureDikuangBaseState();
+  captureIconState();
   setupImageSequence(data);
   applyFit();
   resetView();
@@ -484,6 +638,8 @@ async function loadData(data: any, name: string) {
   setStatus('字体加载中…');
   await loadEmbeddedFonts(data);
   if (seq !== loadSeq) return; // 载入期间又发起了新的载入请求
+  // 「显示图标」开关未勾选时,对刚载入的数据应用隐藏(图标透明度置 0 + 文字居中)
+  if (!chkIcon.checked) setIconVisible(false, false);
   try {
     anim = lottie.loadAnimation({
       container: previewInner,
@@ -493,6 +649,7 @@ async function loadData(data: any, name: string) {
       animationData: data,
       audioFactory,
     });
+    patchAudioDestroy(anim);
     (window as any).__anim = anim;
     (window as any).__lottie = lottie;
     if (selRenderer.value === 'canvas') {
@@ -503,16 +660,35 @@ async function loadData(data: any, name: string) {
     rebuildPopupOverlay(); // 弹窗与主动画同渲染器、同帧号跟随
     anim.addEventListener('DOMLoaded', onAnimReady);
     anim.addEventListener('config_ready', onAnimReady);
-    anim.addEventListener('data_failed', () => setStatus('动画数据解析失败,无法渲染', true));
+    anim.addEventListener('data_failed', () => { hideAppLoading(); setStatus('动画数据解析失败,无法渲染', true); });
+    // lottie 实例构造时 totalFrames 即已确定;以 rAF 兜底刷新一次帧范围,
+    // 防止 DOMLoaded/config_ready 在监听绑定前就已触发(如二次扫描合并数据),导致时间轴上限停在旧值。
+    scheduleFrameRangeRefresh(seq);
+    // 若之前 reRenderPreservingState 曾隐藏预览区(重建闪避),此处在本次实例就绪后恢复显示;
+    // 仅当本次仍是最新载入/重建时才放行,避免旧实例提前点亮画面。
+    const loadedAnim = anim;
+    const revealIfLatest = () => {
+      if (serial === buildSerial && seq === loadSeq) previewInner.style.visibility = 'visible';
+      void loadedAnim;
+    };
+    loadedAnim.addEventListener('DOMLoaded', revealIfLatest);
+    loadedAnim.addEventListener('config_ready', revealIfLatest);
+    requestAnimationFrame(revealIfLatest);
   } catch (e) {
+    hideAppLoading();
     setStatus('载入失败: ' + (e as Error).message, true);
   }
   updateInfo(data);
+  syncDurationSlider();
+  syncNextDurationSlider();
 }
 
 function onAnimReady() {
+  finishAppLoading(); // 主动画就绪:放行进度条走到 100% 后再隐藏加载界面
   updateFrameRange();
   updateTransport();
+  syncDurationSlider();
+  syncNextDurationSlider();
   setStatus('已载入: ' + currentName);
 }
 
@@ -531,6 +707,22 @@ function updateTransport() {
     rngFrame.min = '0';
     rngFrame.max = String(max);
     rngFrame.value = String(Math.round(anim.currentFrame));
+  }
+
+  /* 在动画实例就绪后刷新时间轴帧范围。lottie 实例构造时 totalFrames 已确定,
+   * 用 rAF 兜底一次,防止 DOMLoaded/config_ready 在监听绑定前触发导致 max 停在旧值。
+   * 传入 preferSeq 时同时校验 loadData 序号,避免陈旧加载覆盖;并校验全局 anim 仍是本次实例。 */
+  function scheduleFrameRangeRefresh(preferSeq?: number) {
+    const a = anim;
+    requestAnimationFrame(() => {
+      if (preferSeq !== undefined && loadSeq !== preferSeq) return;
+      if (!anim || anim !== a) return;
+      const total = Math.round(anim.totalFrames ?? 0);
+      const max = Math.max(0, total - 1);
+      rngFrame.min = '0';
+      rngFrame.max = String(max);
+      rngFrame.value = String(Math.round(anim.currentFrame));
+    });
   }
 
 btnPlay.addEventListener('click', () => {
@@ -575,6 +767,147 @@ rngSpeed.addEventListener('input', () => {
   const v = parseFloat(rngSpeed.value);
   speedVal.textContent = v.toFixed(1) + '×';
   if (anim) anim.setSpeed(v);
+});
+
+/* ---------- 动画时长调整(1s-10s) ----------
+ * 通过把各图层末尾的淡出关键帧对移动到目标时间,并同步更新 op 出点,
+ * 实现动画持续时间调整。仅移动"末尾淡出"(末帧值低于前一帧)的图层,
+ * 避免破坏淡入结构。总播放时长 = 设定时长 + DURATION_BUFFER 帧。 */
+const DURATION_BUFFER = 5; // 在设定时长基础上额外多播放的帧数
+let durationTimer: number | undefined;
+let defaultDurationApplied = false; // 位置暴露动画默认时长仅首次载入时应用
+
+/* 调整指定段(0=第一段,1=二次扫描)的末尾淡出关键帧到目标时长。
+ * 第二段关键帧已整体平移到 __mainOp 之后,末尾淡出以 __mainOp 为基准。 */
+function applyDurationToSegment(data: any, seconds: number, segment: 0 | 1) {
+  const fr = data.fr ?? 60;
+  const targetEnd = Math.max(1, Math.round(seconds * fr));
+  const mainOp = data.__mainOp ?? data.op;
+  const base = segment === 1 ? mainOp : 0;
+  const walk = (layers: any[]) => {
+    for (const l of layers ?? []) {
+      const isSecond = l.ind >= 100;
+      if (isSecond !== (segment === 1)) {
+        if (Array.isArray(l.layers)) walk(l.layers);
+        continue;
+      }
+      const o = l.ks?.o;
+      if (o && o.a === 1 && Array.isArray(o.k) && o.k.length >= 2) {
+        const kf = o.k;
+        const last = kf[kf.length - 1];
+        const prev = kf[kf.length - 2];
+        const lastVal = Number(Array.isArray(last.s) ? last.s[0] : last.s);
+        const prevVal = Number(Array.isArray(prev.s) ? prev.s[0] : prev.s);
+        if (!isFinite(lastVal) || !isFinite(prevVal) || lastVal >= prevVal) {
+          if (Array.isArray(l.layers)) walk(l.layers);
+          continue;
+        }
+        const gap = Math.max(1, last.t - prev.t);
+        prev.t = base + targetEnd - gap;
+        last.t = base + targetEnd;
+      }
+      if (Array.isArray(l.layers)) walk(l.layers);
+    }
+  };
+  walk(data.layers);
+}
+
+/* 应用第一段时长:调整第一段末尾淡出,第一段时长变化时整体平移第二段保持紧接 */
+function applyMainDuration(data: any, seconds: number) {
+  const fr = data.fr ?? 60;
+  const oldMainOp = data.__mainOp ?? data.op;
+  applyDurationToSegment(data, seconds, 0);
+  const newMainOp = Math.max(1, Math.round(seconds * fr)) + DURATION_BUFFER;
+  const delta = newMainOp - oldMainOp;
+  if (isMergedNext(data) && delta !== 0) offsetSecondSegment(data, delta);
+  data.__mainOp = newMainOp;
+  data.op = newMainOp + (data.__nextOp ?? 0);
+}
+
+function syncDurationSlider() {
+  if (!currentData) return;
+  const fr = currentData.fr ?? 60;
+  const mainOp = currentData.__mainOp ?? currentData.op;
+  const dur = ((mainOp ?? 0) - (currentData.ip ?? 0) - DURATION_BUFFER) / fr;
+  const v = Math.min(10, Math.max(1, dur));
+  rngDuration.value = String(v);
+  durationVal.textContent = Number(v.toFixed(2)).toString() + 's';
+}
+
+function applyDuration(seconds: number) {
+  if (!currentData) return;
+  applyMainDuration(currentData, seconds);
+  updateInfo(currentData);
+  reRenderPreservingState();
+}
+
+function syncNextDurationSlider() {
+  if (!currentData || !isMergedNext(currentData)) return;
+  const fr = currentData.fr ?? 60;
+  const nextOp = currentData.__nextOp ?? 0;
+  const dur = (nextOp - DURATION_BUFFER) / fr;
+  const v = Math.min(10, Math.max(1, dur));
+  rngNextDuration.value = String(v);
+  nextDurationVal.textContent = Number(v.toFixed(2)).toString() + 's';
+}
+
+function applyNextDuration(seconds: number) {
+  if (!currentData || !isMergedNext(currentData)) return;
+  const fr = currentData.fr ?? 60;
+  const mainOp = currentData.__mainOp ?? currentData.op;
+  applyDurationToSegment(currentData, seconds, 1);
+  const newNextOp = Math.max(1, Math.round(seconds * fr)) + DURATION_BUFFER;
+  currentData.__nextOp = newNextOp;
+  currentData.op = mainOp + newNextOp;
+  updateInfo(currentData);
+  reRenderPreservingState();
+}
+
+rngDuration.addEventListener('input', () => {
+  const v = parseFloat(rngDuration.value);
+  durationVal.textContent = Number(v.toFixed(2)).toString() + 's';
+  window.clearTimeout(durationTimer);
+  durationTimer = window.setTimeout(() => applyDuration(v), 200);
+});
+
+rngNextDuration.addEventListener('input', () => {
+  const v = parseFloat(rngNextDuration.value);
+  nextDurationVal.textContent = Number(v.toFixed(2)).toString() + 's';
+  window.clearTimeout(durationTimer);
+  durationTimer = window.setTimeout(() => applyNextDuration(v), 200);
+});
+
+/* 二次扫描开关:开启时把第二段并入当前数据,关闭时移除第二段 */
+chkNextScan.addEventListener('change', () => {
+  showNextScan = chkNextScan.checked;
+  nextDurationRow.hidden = !showNextScan;
+  if (!currentData || currentName !== '位置暴露动画') return;
+  if (showNextScan) {
+    if (!isMergedNext(animation2Data)) {
+      animation2Data = mergeNextInto(animation2Data);
+      currentData = animation2Data;
+    }
+    // mergeNextInto 把第二段整体平移到主段末尾,记录的 __nextOp 是"平移后的出点(含主段长度)"。
+    // 这里重算为真实二次扫描时长。不调用 applyNextDuration(其内部会 reRenderPreservingState 重建动画),
+    // 否则与下方 loadData 双重重建会引发 onAnimReady/updateFrameRange 竞态,导致时间轴上限停在旧长度。
+    const fr = currentData.fr ?? 60;
+    const mainOp = currentData.__mainOp ?? currentData.op;
+    currentData.__nextOp = Math.max(1, Math.round(nextDuration * fr)) + DURATION_BUFFER;
+    currentData.op = mainOp + currentData.__nextOp;
+  } else {
+    if (isMergedNext(animation2Data)) {
+      animation2Data = extractMainFrom(animation2Data);
+      currentData = animation2Data;
+    }
+  }
+  loadData(currentData, currentName);
+  // 二次扫描合并/取消后,图片图层列表(百叶窗.png / 百叶窗2.png / 光.png)随之变化,需刷新
+  const hasTintImage = (currentData?.layers ?? []).some(
+    (l: any) => l.ty === 2 && (l.nm === '百叶窗.png' || l.nm === '百叶窗2.png' || l.nm === '光.png')
+  );
+  imageSection.hidden = !hasTintImage;
+  if (hasTintImage) renderImageList(currentData);
+  else imageList.innerHTML = '';
 });
 
 selRenderer.addEventListener('change', () => {
@@ -824,6 +1157,111 @@ function bindColorPicker(colorInput: HTMLInputElement, onChange: (hex: string) =
   }
 }
 
+/* ---------- 图片图层调色(如位置暴露动画的「百叶窗.png」) ----------
+ * 采用「保留原图亮度、替换色相/饱和度」的着色方式,保留百叶窗纹理的明暗质感。 */
+function hexToHsl(hex: string): [number, number, number] {
+  const h = hex.replace('#', '');
+  const r = parseInt(h.slice(0, 2), 16) / 255;
+  const g = parseInt(h.slice(2, 4), 16) / 255;
+  const b = parseInt(h.slice(4, 6), 16) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return [0, 0, l];
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let hue: number;
+  if (max === r) hue = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+  else if (max === g) hue = ((b - r) / d + 2) / 6;
+  else hue = ((r - g) / d + 4) / 6;
+  return [hue, s, l];
+}
+
+function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+  if (s === 0) {
+    const v = Math.round(l * 255);
+    return [v, v, v];
+  }
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  const hue2rgb = (t: number) => {
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
+  };
+  return [
+    Math.round(hue2rgb(h + 1 / 3) * 255),
+    Math.round(hue2rgb(h) * 255),
+    Math.round(hue2rgb(h - 1 / 3) * 255),
+  ];
+}
+
+/* 图片调色缓存:原始图片(百叶窗.png / 百叶窗2.png,约 10544×250)只解码一次,
+ * 后续调色从缓存的 ImageData 复制并快速着色,避免每次拖颜色都重新解码。
+ * 按 data URI 分别缓存,支持多张纹理(主段百叶窗 + 二次扫描百叶窗2)。 */
+const imageTintCaches = new Map<string, { img: HTMLImageElement; data: ImageData }>();
+
+function getImageTintSource(uri: string): Promise<{ img: HTMLImageElement; data: ImageData }> {
+  const cached = imageTintCaches.get(uri);
+  if (cached) return Promise.resolve(cached);
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('无法创建 2D 上下文');
+        ctx.drawImage(img, 0, 0);
+        const src = { img, data: ctx.getImageData(0, 0, canvas.width, canvas.height) };
+        imageTintCaches.set(uri, src);
+        resolve(src);
+      } catch (e) {
+        reject(e);
+      }
+    };
+    img.onerror = reject;
+    img.src = uri;
+  });
+}
+
+/* 快速着色:整数运算,保留每个像素亮度(HSL 的 L),替换为所选颜色的色相/饱和度 */
+function tintImageDataFast(src: ImageData, hexColor: string): ImageData {
+  const out = new ImageData(new Uint8ClampedArray(src.data), src.width, src.height);
+  const d = out.data;
+  const [th, ts] = hexToHsl(hexColor);
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] === 0) continue;
+    const r = d[i], g = d[i + 1], b = d[i + 2];
+    const max = r > g ? (r > b ? r : b) : (g > b ? g : b);
+    const min = r < g ? (r < b ? r : b) : (g < b ? g : b);
+    const l = (max + min) / 2 / 255; // HSL 公式要求 0-1,否则输出溢出钳成白色
+    if (ts === 0) {
+      const v = Math.round(l * 255);
+      d[i] = d[i + 1] = d[i + 2] = v;
+    } else {
+      const q = l < 0.5 ? l * (1 + ts) : l + ts - l * ts;
+      const p = 2 * l - q;
+      const hue2rgb = (t: number) => {
+        if (t < 0) t += 1;
+        if (t > 1) t -= 1;
+        if (t < 1 / 6) return p + (q - p) * 6 * t;
+        if (t < 1 / 2) return q;
+        if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+        return p;
+      };
+      d[i] = Math.round(hue2rgb(th + 1 / 3) * 255);
+      d[i + 1] = Math.round(hue2rgb(th) * 255);
+      d[i + 2] = Math.round(hue2rgb(th - 1 / 3) * 255);
+    }
+  }
+  return out;
+}
+
 /* 记录每个文字图层的原始文字与颜色,供重置使用 */
 const originalTextState = new Map<number, { text: string; fc: number[] }>();
 
@@ -883,6 +1321,7 @@ function updateInfo(data: any) {
         '</div>' +
         '<textarea class="t-input" rows="' + rows + '" data-ind="' + t.ind + '" spellcheck="false"></textarea>' +
         '<label class="t-color-label">颜色 <input type="color" class="t-color" data-ind="' + t.ind + '" value="' + hex + '" /><input type="text" class="hex-input" value="' + hex + '" spellcheck="false" placeholder="#rrggbb" /></label>' +
+        opacitySliderHtml(t.ind, layer) +
         '</li>'
       );
     })
@@ -898,6 +1337,7 @@ function updateInfo(data: any) {
   textList.querySelectorAll<HTMLButtonElement>('.t-reset').forEach((btn) => {
     btn.addEventListener('click', () => onResetText(Number(btn.dataset.ind)));
   });
+  bindOpacitySliders(textList);
 
   renderShapeList(data);
 
@@ -943,6 +1383,7 @@ function onTextEdited(ind: number, newText: string) {
   const layer = findLayerByInd(currentData.layers, ind);
   if (!layer) return;
   setLayerText(layer, newText);
+  adaptDikuangWidth(); // 文字宽度变化 → 底框宽度同步
   // 防抖后重渲染(保留当前帧/播放状态/缩放)
   window.clearTimeout(textEditTimer);
   textEditTimer = window.setTimeout(() => {
@@ -980,6 +1421,8 @@ function onResetText(ind: number) {
   if (!layer) return;
   setLayerText(layer, orig.text);
   setLayerColor(layer, fcToHex(orig.fc));
+  resetLayerOpacity(ind);
+  adaptDikuangWidth(); // 文字恢复原宽 → 底框恢复基准宽
   // 同步 UI
   const ta = textList.querySelector<HTMLTextAreaElement>('.t-input[data-ind="' + ind + '"]');
   if (ta) ta.value = String(orig.text).replace(/\r/g, '\n');
@@ -1010,6 +1453,7 @@ function shapeLayerColorInfo(data: any): { ind: number; nm: string; fill: number
   const out: { ind: number; nm: string; fill: number[] | null; stroke: number[] | null }[] = [];
   for (const l of data.layers ?? []) {
     if (l.ty !== 4) continue;
+    if (l.td === 1) continue; // 轨道蒙版源图层不渲染,无需编辑颜色(如位置暴露动画的「底框」)
     const { fills, strokes } = collectShapeFillsStrokes(l.shapes);
     const fill = fills.length > 0 && fills[0].c?.a === 0 ? fills[0].c.k : null;
     const stroke = strokes.length > 0 && strokes[0].c?.a === 0 ? strokes[0].c.k : null;
@@ -1028,6 +1472,110 @@ function captureOriginalShapeState(data: any) {
       stroke: s.stroke ? [...s.stroke] : null,
     });
   }
+}
+
+/* ---------- 图层透明度自定义 ----------
+ * 记录每个图层的原始不透明度(含动画关键帧),供滑块修改与重置。
+ * 静态不透明度直接改 ks.o.k;动画不透明度按比例缩放关键帧,保留淡入淡出形态。 */
+const originalOpacityState = new Map<number, { a: number; k: any }>();
+
+function captureOpacityState(data: any) {
+  originalOpacityState.clear();
+  const walk = (layers: any[]) => {
+    for (const l of layers ?? []) {
+      if (l.ks?.o) {
+        originalOpacityState.set(l.ind, { a: l.ks.o.a, k: JSON.parse(JSON.stringify(l.ks.o.k)) });
+      }
+      if (Array.isArray(l.layers)) walk(l.layers);
+    }
+  };
+  walk(data.layers);
+}
+
+function getLayerOpacity(layer: any): number {
+  const o = layer?.ks?.o;
+  if (!o) return 100;
+  if (o.a === 0) {
+    const v = Number(o.k);
+    return isFinite(v) ? Math.round(v) : 100;
+  }
+  let max = 0;
+  for (const kf of Array.isArray(o.k) ? o.k : []) {
+    const v = Number(Array.isArray(kf.s) ? kf.s[0] : kf.s);
+    if (isFinite(v) && v > max) max = v;
+  }
+  return Math.round(max);
+}
+
+function setLayerOpacity(layer: any, value: number) {
+  const o = layer?.ks?.o;
+  if (!o) return;
+  const orig = originalOpacityState.get(layer.ind);
+  if (o.a === 0) {
+    o.k = value;
+  } else if (orig && orig.a === 1) {
+    const origArr = Array.isArray(orig.k) ? orig.k : [];
+    let maxOrig = 0;
+    for (const kf of origArr) {
+      const v = Number(Array.isArray(kf.s) ? kf.s[0] : kf.s);
+      if (isFinite(v) && v > maxOrig) maxOrig = v;
+    }
+    const scale = maxOrig > 0 ? value / maxOrig : 1;
+    const arr = Array.isArray(o.k) ? o.k : [];
+    arr.forEach((kf: any, i: number) => {
+      const os = origArr[i]?.s;
+      if (os === undefined) return;
+      const oNum = Number(Array.isArray(os) ? os[0] : os);
+      const nv = isFinite(oNum) ? oNum * scale : oNum;
+      if (Array.isArray(kf.s)) kf.s[0] = nv;
+      else kf.s = nv;
+    });
+  }
+}
+
+function resetLayerOpacity(ind: number) {
+  if (!currentData) return;
+  const layer = findLayerByInd(currentData.layers, ind);
+  if (!layer) return;
+  const orig = originalOpacityState.get(ind);
+  if (!orig) return;
+  const o = layer.ks?.o;
+  if (!o) return;
+  o.a = orig.a;
+  o.k = JSON.parse(JSON.stringify(orig.k));
+  const sl = document.querySelector<HTMLInputElement>('.o-slider[data-ind="' + ind + '"]');
+  if (sl) {
+    const v = getLayerOpacity(layer);
+    sl.value = String(v);
+    const valEl = sl.parentElement?.querySelector('.o-val');
+    if (valEl) valEl.textContent = v + '%';
+  }
+}
+
+function opacitySliderHtml(ind: number, layer: any): string {
+  const v = layer ? getLayerOpacity(layer) : 100;
+  return (
+    '<label class="t-opacity">不透明度 ' +
+    '<input type="range" class="o-slider" data-ind="' + ind + '" min="0" max="100" step="1" value="' + v + '" />' +
+    '<span class="o-val">' + v + '%</span></label>'
+  );
+}
+
+function bindOpacitySliders(root: HTMLElement) {
+  root.querySelectorAll<HTMLInputElement>('.o-slider').forEach((sl) => {
+    sl.addEventListener('input', () => {
+      const ind = Number(sl.dataset.ind);
+      const val = Number(sl.value);
+      const valEl = sl.parentElement?.querySelector('.o-val');
+      if (valEl) valEl.textContent = val + '%';
+      if (!currentData) return;
+      const layer = findLayerByInd(currentData.layers, ind);
+      if (!layer) return;
+      setLayerOpacity(layer, val);
+      window.clearTimeout(textEditTimer);
+      textEditTimer = window.setTimeout(() => reRenderPreservingState(), 250);
+    });
+  });
 }
 
 function setShapeFillColor(layer: any, hex: string) {
@@ -1058,6 +1606,7 @@ function onShapeReset(ind: number) {
   if (!layer) return;
   if (orig.fill) setShapeFillColor(layer, fcToHex(orig.fill));
   if (orig.stroke) setShapeStrokeColor(layer, fcToHex(orig.stroke));
+  resetLayerOpacity(ind);
   const fi = shapeList.querySelector<HTMLInputElement>('.s-fill[data-ind="' + ind + '"]');
   if (fi && orig.fill) setColorPickerValue(fi, fcToHex(orig.fill));
   const si = shapeList.querySelector<HTMLInputElement>('.s-stroke[data-ind="' + ind + '"]');
@@ -1076,6 +1625,10 @@ function renderShapeList(data: any) {
       let colorHtml = '';
       if (fillHex) colorHtml += '<label class="t-color-label">填充 <input type="color" class="s-fill" data-ind="' + s.ind + '" value="' + fillHex + '" /><input type="text" class="hex-input" value="' + fillHex + '" spellcheck="false" placeholder="#rrggbb" /></label>';
       if (strokeHex) colorHtml += '<label class="t-color-label">描边 <input type="color" class="s-stroke" data-ind="' + s.ind + '" value="' + strokeHex + '" /><input type="text" class="hex-input" value="' + strokeHex + '" spellcheck="false" placeholder="#rrggbb" /></label>';
+      const rectOpacityHtml =
+        dikuangVisibleInds.includes(s.ind)
+          ? '<label class="t-opacity">矩形不透明度 <input type="range" class="dr-slider" data-ind="' + s.ind + '" min="0" max="100" step="1" value="' + getDikuangRectOpacity(s.ind) + '" /><span class="o-val">' + getDikuangRectOpacity(s.ind) + '%</span><button class="t-reset dr-reset" data-ind="' + s.ind + '" type="button" title="重置矩形不透明度">↺</button></label>'
+          : '';
       return (
         '<li class="text-item">' +
         '<div class="text-item-head">' +
@@ -1083,6 +1636,8 @@ function renderShapeList(data: any) {
         '<button class="t-reset s-reset" data-ind="' + s.ind + '" type="button" title="重置颜色">↺ 重置</button>' +
         '</div>' +
         '<div class="shape-colors">' + colorHtml + '</div>' +
+        opacitySliderHtml(s.ind, findLayerByInd(data.layers, s.ind)) +
+        rectOpacityHtml +
         '</li>'
       );
     })
@@ -1096,6 +1651,209 @@ function renderShapeList(data: any) {
   shapeList.querySelectorAll<HTMLButtonElement>('.s-reset').forEach((btn) => {
     btn.addEventListener('click', () => onShapeReset(Number(btn.dataset.ind)));
   });
+  bindOpacitySliders(shapeList);
+  // 底框黑色矩形透明度滑块
+  shapeList.querySelectorAll<HTMLInputElement>('.dr-slider').forEach((sl) => {
+    sl.addEventListener('input', () => {
+      const v = Number(sl.value);
+      const ind = Number(sl.dataset.ind);
+      const valEl = sl.parentElement?.querySelector('.o-val');
+      if (valEl) valEl.textContent = v + '%';
+      setDikuangRectOpacity(v, ind);
+    });
+  });
+  shapeList.querySelectorAll<HTMLButtonElement>('.dr-reset').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const ind = Number(btn.dataset.ind);
+      resetDikuangRectOpacity(ind);
+      const sl = shapeList.querySelector<HTMLInputElement>('.dr-slider[data-ind="' + ind + '"]');
+      if (sl) {
+        sl.value = String(getDikuangRectOpacity(ind));
+        const valEl = sl.parentElement?.querySelector('.o-val');
+        if (valEl) valEl.textContent = getDikuangRectOpacity(ind) + '%';
+      }
+    });
+  });
+}
+
+/* ---------- 图片图层调色(百叶窗.png / 百叶窗2.png / 光.png) ---------- */
+function renderImageList(data: any) {
+  // 主段「百叶窗.png」+ 二次扫描段「百叶窗2.png」「光.png」都可调色/调透明度
+  const layers = (data.layers ?? []).filter((l: any) => l.ty === 2 && (l.nm === '百叶窗.png' || l.nm === '百叶窗2.png' || l.nm === '光.png'));
+  imageCount.textContent = '· ' + layers.length + ' 个';
+  imageList.innerHTML = layers
+    .map((l: any) => {
+      const asset = (data.assets ?? []).find((a: any) => a.id === l.refId);
+      // 默认色:百叶窗.png 红色,百叶窗2.png 与 光.png 金色(#ffca5e)
+      const defaultHex = l.nm === '百叶窗.png' ? '#e23b3b' : '#ffca5e';
+      const hex = asset && typeof asset.p === 'string' && asset.p.startsWith('data:image') ? defaultHex : '#ffffff';
+      return (
+        '<li class="text-item">' +
+        '<div class="text-item-head">' +
+        '<span class="t-name">' + esc(l.nm || '(未命名)') + '</span>' +
+        '<button class="t-reset i-reset" data-ref="' + esc(l.refId) + '" type="button" title="重置颜色">↺ 重置</button>' +
+        '</div>' +
+        '<div class="shape-colors">' +
+        '<label class="t-color-label">颜色 <input type="color" class="i-color" data-ref="' + esc(l.refId) + '" value="' + hex + '" /><input type="text" class="hex-input" value="' + hex + '" spellcheck="false" placeholder="#rrggbb" /></label>' +
+        '</div>' +
+        opacitySliderHtml(l.ind, l) +
+        '</li>'
+      );
+    })
+    .join('');
+  imageList.querySelectorAll<HTMLInputElement>('.i-color').forEach((ci) => {
+    bindColorPicker(ci, (hex) => onImageColorChanged(ci.dataset.ref || '', hex));
+  });
+  imageList.querySelectorAll<HTMLButtonElement>('.i-reset').forEach((btn) => {
+    btn.addEventListener('click', () => onImageColorReset(btn.dataset.ref || ''));
+  });
+  bindOpacitySliders(imageList);
+}
+
+function findAssetByRef(data: any, refId: string): any {
+  return (data.assets ?? []).find((a: any) => a.id === refId);
+}
+
+/* 百叶窗调色:拖动颜色时只记录目标色(防抖),停止后一次性着色并重建动画(保留当前帧)。
+ * 从原始图片缓存着色,避免多次调色叠加偏差;着色本身也走缓存+快速循环,不再卡顿。 */
+let imageTintTimer: number | undefined;
+let pendingTintHex: string | null = null;
+
+/* 调色的原始图:image_2_n 为二次扫描段百叶窗2、image_1_n 为二次扫描段光.png(合并后资源),image_1 为主段百叶窗 */
+function baiyechuangOriginalUriOf(refId: string): string | null {
+  if (refId === 'image_2_n') return baiyechuang2OriginalData;
+  if (refId === 'image_1_n') return guangOriginalData;
+  return baiyechuangOriginalData;
+}
+
+function onImageColorChanged(refId: string, hex: string) {
+  const originalUri = baiyechuangOriginalUriOf(refId);
+  if (!currentData || !originalUri) return;
+  const asset = findAssetByRef(currentData, refId);
+  if (!asset) return;
+  pendingTintHex = hex;
+  window.clearTimeout(imageTintTimer);
+  imageTintTimer = window.setTimeout(() => {
+    const h = pendingTintHex;
+    if (!h) return;
+    void getImageTintSource(originalUri)
+      .then((src) => {
+        const tinted = tintImageDataFast(src.data, h);
+        const canvas = document.createElement('canvas');
+        canvas.width = src.img.width;
+        canvas.height = src.img.height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.putImageData(tinted, 0, 0);
+        asset.p = canvas.toDataURL('image/png');
+        // 纹理透明度较低(如百叶窗2 34%、光 40%)时,着色后的颜色会被透明度压暗,
+        // 看起来"选了颜色却看不出颜色"。调色时自动把该图层透明度提升到 100%,
+        // 让所选颜色立即可见;用户随后可在下方透明度滑块手动调整。
+        const layer = (currentData.layers ?? []).find((l: any) => l.ty === 2 && l.refId === refId);
+        if (layer) {
+          const maxV = getLayerOpacity(layer);
+          if (maxV > 0 && maxV < 100) {
+            const o = layer.ks?.o;
+            const scale = 100 / maxV;
+            const arr = Array.isArray(o?.k) ? o.k : [];
+            arr.forEach((kf: any) => {
+              const ov = Array.isArray(kf.s) ? kf.s[0] : kf.s;
+              if (isFinite(Number(ov))) {
+                const nv = Number(ov) * scale;
+                if (Array.isArray(kf.s)) kf.s[0] = nv; else kf.s = nv;
+              }
+            });
+            const sl = imageList.querySelector<HTMLInputElement>('.o-slider[data-ind="' + layer.ind + '"]');
+            if (sl) {
+              sl.value = '100';
+              const valEl = sl.parentElement?.querySelector('.o-val');
+              if (valEl) valEl.textContent = '100%';
+            }
+            setStatus('纹理透明度已自动提升到 100%(使颜色可见),可在下方滑块调整');
+          }
+        }
+        reRenderPreservingState();
+      })
+      .catch((e) => console.error('[百叶窗着色失败]', e));
+  }, 200);
+}
+
+function onImageColorReset(refId: string) {
+  const originalUri = baiyechuangOriginalUriOf(refId);
+  if (!currentData || !originalUri) return;
+  const asset = findAssetByRef(currentData, refId);
+  if (!asset) return;
+  asset.p = originalUri;
+  // 默认色:主段百叶窗红色,百叶窗2/光金色
+  const defaultHex = refId === 'image_1' ? '#e23b3b' : '#ffca5e';
+  const ci = imageList.querySelector<HTMLInputElement>('.i-color[data-ref="' + refId + '"]');
+  if (ci) setColorPickerValue(ci, defaultHex);
+  const layer = (currentData.layers ?? []).find((l: any) => l.ty === 2 && l.refId === refId);
+  if (layer) resetLayerOpacity(layer.ind);
+  reRenderPreservingState();
+}
+
+/* ---------- AE 投影效果(ADBE Drop Shadow)渲染 ----------
+ * lottie-web 不渲染 AE 效果,这里手动解析「投影」参数并渲染:
+ * - SVG 渲染器:对图层 <g> 应用 CSS drop-shadow filter;
+ * - Canvas 渲染器:双次绘制(先带阴影画内容,再清晰覆盖)。 */
+function getDropShadow(layer: any): { color: string; alpha: number; dx: number; dy: number; blur: number } | null {
+  const ef = layer?.ef;
+  if (!Array.isArray(ef)) return null;
+  const ds = ef.find((e: any) => e.ty === 25 && e.mn === 'ADBE Drop Shadow' && e.en !== 0);
+  if (!ds || !Array.isArray(ds.ef)) return null;
+  const getVal = (ix: number) => {
+    const p = ds.ef.find((x: any) => x.ix === ix);
+    return p ? p.v?.k : undefined;
+  };
+  const color = getVal(1);
+  const opacity = getVal(2);
+  const angle = getVal(3);
+  const distance = getVal(4);
+  const softness = getVal(5);
+  if (!Array.isArray(color) || typeof opacity !== 'number' || typeof angle !== 'number' || typeof distance !== 'number') return null;
+  const rad = (angle * Math.PI) / 180;
+  return {
+    color: fcToHex([color[0], color[1], color[2]]),
+    alpha: Math.max(0, Math.min(1, opacity / 255)),
+    dx: distance * Math.cos(rad),
+    dy: -distance * Math.sin(rad),
+    blur: (typeof softness === 'number' ? softness : 0) / 2,
+  };
+}
+
+function dropShadowCss(ds: { color: string; alpha: number; dx: number; dy: number; blur: number }): string {
+  const a = Math.round(ds.alpha * 255).toString(16).padStart(2, '0');
+  return 'drop-shadow(' + ds.dx.toFixed(2) + 'px ' + ds.dy.toFixed(2) + 'px ' + ds.blur.toFixed(2) + 'px ' + ds.color + a + ')';
+}
+
+function dropShadowRgba(ds: { color: string; alpha: number; dx: number; dy: number; blur: number }): string {
+  return 'rgba(' + parseInt(ds.color.slice(1, 3), 16) + ',' + parseInt(ds.color.slice(3, 5), 16) + ',' + parseInt(ds.color.slice(5, 7), 16) + ',' + ds.alpha + ')';
+}
+
+function patchSvgDropShadow(el: any) {
+  const ds = getDropShadow(el.data);
+  if (!ds || !el.layerElement) return;
+  el.layerElement.style.filter = dropShadowCss(ds);
+}
+
+function patchCanvasDropShadow(el: any) {
+  const ds = getDropShadow(el.data);
+  if (!ds) return;
+  const orig = el.renderFrame ? el.renderFrame.bind(el) : null;
+  if (!orig) return;
+  el.renderFrame = function (this: any, forceRender: boolean) {
+    const ctx = this.canvasContext;
+    if (!ctx) return orig(forceRender);
+    ctx.save();
+    ctx.shadowColor = dropShadowRgba(ds);
+    ctx.shadowBlur = ds.blur;
+    ctx.shadowOffsetX = ds.dx;
+    ctx.shadowOffsetY = ds.dy;
+    orig(forceRender);
+    ctx.restore();
+    orig(forceRender);
+  };
 }
 
 /* ---------- 弹窗叠加层(windows_animation) ----------
@@ -1135,7 +1893,7 @@ function rebuildPopupOverlay() {
     popupAnim = lottie.loadAnimation({
       container: popupLayer,
       renderer,
-      loop: true,
+      loop: false,
       autoplay: false,
       animationData: popupData,
       audioFactory,
@@ -1195,9 +1953,10 @@ function measurePopupTextWidth(text: string, doc: any): number {
   const fontDef = (popupData?.fonts?.list ?? []).find((f: any) => f.fName === doc.f || f.fFamily === doc.f);
   const family = (fontDef && fontDef.fFamily) || doc.f || 'sans-serif';
   ctx.font = doc.s + 'px "' + family + '"';
+  const tracking = (doc.tr || 0) * 0.001 * (doc.s || 0); // 每字母字距(与 lottie 渲染一致)
   let maxW = 0;
   for (const line of String(text).split('\r')) {
-    const w = ctx.measureText(line).width;
+    const w = ctx.measureText(line).width + tracking * line.length;
     if (w > maxW) maxW = w;
   }
   return maxW;
@@ -1361,6 +2120,334 @@ function adaptPopupPanelWidth() {
   }
   // 3) 感叹号图标:定位到文字左侧,随文字左缘移动
   positionPopupIcon(deltaComp);
+}
+
+/* ---------- 底框宽度自适应文字(主段 + 二次扫描段) ----------
+ * 位置暴露动画的「底框」「底框(可见)」是文字底下的黑色框(矩形 235.143×56)。
+ * 当文字超过 4 字时,底框 X 缩放按文字宽度增量同比例放大,保持左右留白不变;
+ * ≤4 字时保持原始大小。二次扫描段(ind≥100)采用同样的自适应规则(其底框默认
+ * 缩放基准为 160.164%,适配 8 字「即将扫描移动单位」)。每段独立记录基准几何。 */
+const DIKUANG_NAMES = ['底框', '底框(可见)', '底框 可见']; // 第二段 AE 导出名为「底框 可见」(空格)
+const DIKUANG_RECT_NM = '矩形 1'; // 底框中的黑色主矩形形状组
+
+/* 底框可见副本的图层名:第一段「底框(可见)」、第二段「底框 可见」 */
+function isDikuangVisibleName(nm: string): boolean {
+  return nm === '底框(可见)' || nm === '底框 可见';
+}
+
+interface DikuangSeg {
+  seg: 'main' | 'next';
+  textInd: number;   // 文字图层 ind:4 / 104
+  iconInd: number;   // 图标图层 ind:5 / 105
+  parentInd: number; // 父级空 2 ind:3 / 103
+  inSeg: (ind: number) => boolean; // ind < 100 / >= 100
+  baseScaleKeys: { s: number[] }[];
+  baseShapeW: number;
+  origText: string;
+  textScale: number;   // 文字图层终态缩放(小数)
+  frameScale: number;  // 底框图层终态 X 缩放(小数)
+  parentScale: number; // 父级空 2 终态缩放(小数)
+  parentScaleKeys: { t: number; s0: number; ox: number; oy: number; ix: number; iy: number }[];
+  iconBasePosKeys: { t: number; s: number }[]; // 图标位置 X 关键帧基准(空 2 空间,含时刻 t)
+  visibleInd: number;      // 底框(可见)图层 ind:8 / 108
+  rectBaseOpacity: number; // 「矩形 1」形状组原始不透明度
+}
+let dikuangSegs: DikuangSeg[] = [];
+
+function dikuangSegByVisibleInd(ind: number): DikuangSeg | null {
+  return dikuangSegs.find((s) => s.visibleInd === ind) ?? null;
+}
+
+/* 贝塞尔缓动:lottie 用 getBezierEasing(o.x,o.y,i.x,i.y) 作关键帧间插值,这里用二分求解还原 */
+function bezierEasingValue(x1: number, y1: number, x2: number, y2: number, p: number): number {
+  if (p <= 0) return 0;
+  if (p >= 1) return 1;
+  if (x1 === y1 && x2 === y2) return p; // 线性
+  const X = (t: number) => 3 * (1 - t) * (1 - t) * t * x1 + 3 * (1 - t) * t * t * x2 + t * t * t;
+  let lo = 0, hi = 1;
+  for (let i = 0; i < 24; i++) {
+    const mid = (lo + hi) / 2;
+    if (X(mid) < p) lo = mid; else hi = mid;
+  }
+  const t = (lo + hi) / 2;
+  return 3 * (1 - t) * (1 - t) * t * y1 + 3 * (1 - t) * t * t * y2 + t * t * t;
+}
+
+/* 父级空 2 在指定帧的缩放(小数),按动画关键帧间贝塞尔插值 */
+function getParentScaleAtFrame(seg: DikuangSeg, frame: number): number {
+  const keys = seg.parentScaleKeys;
+  if (keys.length === 0) return seg.parentScale;
+  if (frame <= keys[0].t) return keys[0].s0 / 100;
+  if (frame >= keys[keys.length - 1].t) return keys[keys.length - 1].s0 / 100;
+  for (let i = 0; i < keys.length - 1; i++) {
+    const k0 = keys[i], k1 = keys[i + 1];
+    if (frame >= k0.t && frame <= k1.t) {
+      const p = (frame - k0.t) / (k1.t - k0.t);
+      const e = bezierEasingValue(k0.ox, k0.oy, k1.ix, k1.iy, p);
+      return (k0.s0 + (k1.s0 - k0.s0) * e) / 100;
+    }
+  }
+  return seg.parentScale;
+}
+
+function findDikuangLayers(seg: DikuangSeg): any[] {
+  if (!currentData) return [];
+  const out: any[] = [];
+  const walk = (layers: any[]) => {
+    for (const l of layers ?? []) {
+      if (DIKUANG_NAMES.includes(l.nm) && seg.inSeg(l.ind)) out.push(l);
+      if (Array.isArray(l.layers)) walk(l.layers);
+    }
+  };
+  walk(currentData.layers);
+  return out;
+}
+
+/* 用真实内嵌字体测量文字宽度(文字空间 px,字号 = doc.s)。
+ * 注意:lottie 渲染时每字母 advance = 字形宽 + 字距 tr(公式 tr×0.001×字号),
+ * 居中对齐的总宽也包含全部字母的字距;仅量字形宽会导致适配计算偏小,
+ * 文字变长后底框/图标位移不足。这里把字距一并计入(与 lottie 渲染一致)。 */
+function measureDikuangTextWidth(text: string, doc: any): number {
+  const ctx = getPopupMeasureCtx();
+  if (!ctx || !doc || !doc.s) return 0;
+  const fontDef = (currentData?.fonts?.list ?? []).find((f: any) => f.fName === doc.f || f.fFamily === doc.f);
+  const family = (fontDef && fontDef.fFamily) || doc.f || 'sans-serif';
+  ctx.font = doc.s + 'px "' + family + '"';
+  const tracking = (doc.tr || 0) * 0.001 * (doc.s || 0); // 每字母字距(与 Canvas 文字兜底一致)
+  let maxW = 0;
+  for (const line of String(text).split('\r')) {
+    const w = ctx.measureText(line).width + tracking * line.length;
+    if (w > maxW) maxW = w;
+  }
+  return maxW;
+}
+
+/* 捕获底框基准几何(两段独立):文字原始内容/终态缩放、底框 X 缩放关键帧、矩形基准宽、父级缩放 */
+function captureDikuangBaseState() {
+  dikuangSegs = [];
+  dikuangVisibleInds = [];
+  dikuangRectBaseOpacity = 100;
+  if (!currentData) return;
+  const defs: { seg: 'main' | 'next'; textInd: number; iconInd: number; parentInd: number; inSeg: (ind: number) => boolean }[] = [
+    { seg: 'main', textInd: 4, iconInd: 5, parentInd: 3, inSeg: (ind) => ind < 100 },
+  ];
+  if (isMergedNext(currentData)) {
+    defs.push({ seg: 'next', textInd: 104, iconInd: 105, parentInd: 103, inSeg: (ind) => ind >= 100 });
+  }
+  for (const def of defs) {
+    const seg: DikuangSeg = {
+      seg: def.seg,
+      textInd: def.textInd,
+      iconInd: def.iconInd,
+      parentInd: def.parentInd,
+      inSeg: def.inSeg,
+      baseScaleKeys: [],
+      baseShapeW: 0,
+      origText: '',
+      textScale: 1,
+      frameScale: 1,
+      parentScale: 1,
+      parentScaleKeys: [],
+      iconBasePosKeys: [],
+      visibleInd: -1,
+      rectBaseOpacity: 100,
+    };
+    const textLayer = findLayerByInd(currentData.layers, seg.textInd);
+    const doc = textLayer ? textDocOf(textLayer) : null;
+    if (doc) seg.origText = doc.t ?? '';
+    const ts = textLayer?.ks?.s;
+    if (ts && Array.isArray(ts.k)) {
+      const last = ts.k[ts.k.length - 1];
+      if (Array.isArray(last.s) && last.s[0]) seg.textScale = last.s[0] / 100;
+    }
+    for (const layer of findDikuangLayers(seg)) {
+      const s = layer?.ks?.s;
+      if (!s || !Array.isArray(s.k)) continue;
+      seg.baseScaleKeys = s.k
+        .filter((kf: any) => Array.isArray(kf.s))
+        .map((kf: any) => ({ s: [kf.s[0], kf.s[1], kf.s[2]] }));
+      const walk = (items: any[]) => {
+        for (const it of items ?? []) {
+          if (it.ty === 'rc' && it.s?.a === 0 && Array.isArray(it.s.k) && it.s.k[0] > 0) {
+            seg.baseShapeW = Math.max(seg.baseShapeW, it.s.k[0]);
+          }
+          if (Array.isArray(it.it)) walk(it.it);
+        }
+      };
+      walk(layer.shapes);
+      const last = s.k[s.k.length - 1];
+      if (Array.isArray(last.s) && last.s[0]) seg.frameScale = last.s[0] / 100;
+      break;
+    }
+    const parent = findLayerByInd(currentData.layers, seg.parentInd);
+    const ps = parent?.ks?.s;
+    if (ps && Array.isArray(ps.k)) {
+      for (const kf of ps.k) {
+        if (kf.t === undefined || !Array.isArray(kf.s)) continue;
+        const o = kf.o, i = kf.i;
+        const dim = (v: any, def: number) => {
+          if (Array.isArray(v)) return typeof v[0] === 'number' ? v[0] : def;
+          return typeof v === 'number' ? v : def;
+        };
+        seg.parentScaleKeys.push({
+          t: kf.t,
+          s0: kf.s[0],
+          ox: dim(o && o.x, 0), oy: dim(o && o.y, 1),
+          ix: dim(i && i.x, 1), iy: dim(i && i.y, 1),
+        });
+      }
+      const last = ps.k[ps.k.length - 1];
+      if (Array.isArray(last.s) && last.s[0]) seg.parentScale = last.s[0] / 100;
+    }
+    // 图标位置 X 关键帧基准值(空 2 空间,含时刻 t,随文字左缘移动)
+    const icon = findLayerByInd(currentData.layers, seg.iconInd);
+    const px = icon?.ks?.p?.x;
+    if (px && Array.isArray(px.k)) {
+      seg.iconBasePosKeys = px.k
+        .filter((kf: any) => Array.isArray(kf.s))
+        .map((kf: any) => ({ t: kf.t, s: kf.s[0] }));
+    }
+    // 记录底框(可见)图层的 ind 与「矩形 1」形状组原始不透明度
+    const vis = (() => {
+      const walk = (layers: any[]): any | null => {
+        for (const l of layers ?? []) {
+          if (isDikuangVisibleName(l.nm) && seg.inSeg(l.ind)) return l;
+          if (Array.isArray(l.layers)) {
+            const r = walk(l.layers);
+            if (r) return r;
+          }
+        }
+        return null;
+      };
+      return walk(currentData.layers);
+    })();
+    if (vis) {
+      seg.visibleInd = vis.ind;
+      const rectTr = getDikuangRectTr(vis);
+      const base = rectTr?.o;
+      if (base && isFinite(Number(base.k))) seg.rectBaseOpacity = Number(base.k);
+    }
+    dikuangSegs.push(seg);
+    if (seg.visibleInd >= 0) dikuangVisibleInds.push(seg.visibleInd);
+  }
+  // 底框矩形基准不透明度:取主段(第一段)的值,两段合并时已统一为 55
+  const mainSeg = dikuangSegs.find((s) => s.seg === 'main');
+  if (mainSeg) dikuangRectBaseOpacity = mainSeg.rectBaseOpacity;
+}
+
+/* 文字宽度变化 → 同步调整每段底框 X 缩放(仅宽度,高度不变;≤4 字恢复原始大小)
+ * 图标:文字居中,变长时左缘向左移 deltaComp/2 合成单位,图标同步左移保持固定间距。
+ * 图标位置关键帧落在父级空 2 的缩放动画区间内,必须按每个关键帧时间点的父缩放折算,
+ * 否则动画缩放过程中图标位移不足导致间距逐帧收窄。 */
+function adaptDikuangWidth() {
+  if (!currentData) return;
+  for (const seg of dikuangSegs) {
+    if (seg.baseShapeW <= 0 || seg.baseScaleKeys.length === 0) continue;
+    const textLayer = findLayerByInd(currentData.layers, seg.textInd);
+    const doc = textLayer ? textDocOf(textLayer) : null;
+    if (!doc) continue;
+    const curText = String(doc.t ?? '');
+    const charCount = curText.replace(/\r/g, '').length;
+    // 文字宽度增量始终计算(可正可负),图标距离随文字左缘自适应;
+    // 底框缩放沿用第一段规则:>4 字且变宽才放大,≤4 字或变窄保持当前。
+    const cur = measureDikuangTextWidth(curText, doc);
+    const orig = measureDikuangTextWidth(seg.origText, doc);
+    const deltaComp = (cur - orig) * seg.textScale;
+    let k = 1;
+    if (charCount > 4 && deltaComp > 0) {
+      const frameW = seg.baseShapeW * seg.frameScale * seg.parentScale;
+      if (frameW > 0) k = (frameW + deltaComp) / frameW;
+    }
+    for (const layer of findDikuangLayers(seg)) {
+      const s = layer?.ks?.s;
+      if (!s || !Array.isArray(s.k)) continue;
+      s.k.forEach((kf: any, i: number) => {
+        const base = seg.baseScaleKeys[i];
+        if (base && Array.isArray(kf.s) && base.s) kf.s[0] = base.s[0] * k;
+      });
+    }
+    if (seg.iconBasePosKeys.length > 0) {
+      const icon = findLayerByInd(currentData.layers, seg.iconInd);
+      const px = icon?.ks?.p?.x;
+      if (px && Array.isArray(px.k)) {
+        px.k.forEach((kf: any, i: number) => {
+          const base = seg.iconBasePosKeys[i];
+          if (!base || !Array.isArray(kf.s)) return;
+          const frame = typeof kf.t === 'number' ? kf.t : base.t;
+          const parentScaleAtFrame = getParentScaleAtFrame(seg, frame);
+          if (parentScaleAtFrame > 0.01) kf.s[0] = base.s - (deltaComp / 2) / parentScaleAtFrame;
+        });
+      }
+    }
+  }
+}
+
+
+/* ---------- 底框黑色矩形独立透明度(两段) ----------
+ * 底框(可见) = 两个竖条 + 黑色主矩形(形状组「矩形 1」)。矩形有自己的
+ * 形状组不透明度(tr.o),可被独立于「两个竖条」单独调整。主段与二次扫描段
+ * 各自的「底框(可见)」都可独立调整。 */
+let dikuangVisibleInds: number[] = []; // 各段底框(可见)图层的 ind
+let dikuangRectBaseOpacity = 100; // 「矩形 1」形状组基准不透明度(主段)
+
+/* 按图层名递归查找图层(可选按段过滤) */
+function findLayerByName(layers: any[], nm: string, inSeg?: (ind: number) => boolean): any | null {
+  for (const l of layers ?? []) {
+    if (l.nm === nm && (!inSeg || inSeg(l.ind))) return l;
+    if (Array.isArray(l.layers)) {
+      const r = findLayerByName(l.layers, nm, inSeg);
+      if (r) return r;
+    }
+  }
+  return null;
+}
+
+/* 取某图层内的「矩形 1」形状组 transform(该组的不透明度在 tr.o 上) */
+function getDikuangRectTr(layer: any): any | null {
+  if (!layer?.shapes) return null;
+  const gr = (layer.shapes ?? []).find((g: any) => g.ty === 'gr' && g.nm === DIKUANG_RECT_NM);
+  if (!gr?.it) return null;
+  return gr.it.find((x: any) => x.ty === 'tr') ?? null;
+}
+
+function getDikuangRectOpacity(ind?: number): number {
+  if (!currentData) return 100;
+  if (ind === undefined) {
+    ind = dikuangVisibleInds[0] ?? -1;
+  }
+  const layer = findLayerByInd(currentData.layers, ind);
+  const tr = layer ? getDikuangRectTr(layer) : null;
+  const o = tr?.o;
+  if (!o) return 100;
+  const v = Number(o.k);
+  return isFinite(v) ? Math.round(v) : 100;
+}
+
+function setDikuangRectOpacity(val: number, ind?: number) {
+  if (!currentData) return;
+  if (ind === undefined) {
+    ind = dikuangVisibleInds[0] ?? -1;
+  }
+  const layer = findLayerByInd(currentData.layers, ind);
+  const tr = layer ? getDikuangRectTr(layer) : null;
+  if (!tr?.o || tr.o.a !== 0) return;
+  tr.o.k = Math.round(Math.max(0, Math.min(100, val)));
+  window.clearTimeout(textEditTimer);
+  textEditTimer = window.setTimeout(() => reRenderPreservingState(), 200);
+}
+
+function resetDikuangRectOpacity(ind?: number) {
+  if (!currentData) return;
+  if (ind === undefined) {
+    ind = dikuangVisibleInds[0] ?? -1;
+  }
+  const layer = findLayerByInd(currentData.layers, ind);
+  const tr = layer ? getDikuangRectTr(layer) : null;
+  if (!tr?.o || tr.o.a !== 0) return;
+  const seg = dikuangSegByVisibleInd(ind);
+  tr.o.k = seg ? seg.rectBaseOpacity : dikuangRectBaseOpacity;
+  window.clearTimeout(textEditTimer);
+  textEditTimer = window.setTimeout(() => reRenderPreservingState(), 200);
 }
 
 
@@ -1595,14 +2682,59 @@ chkPopup.addEventListener('change', () => {
   }
 });
 
+/* ---------- 重渲染单飞队列 ----------
+ * 重渲染(重建整段动画)是异步过程(loadAnimation → DOMLoaded → 恢复播放)。若用户
+ * 点击过快,在上一轮还没结束时又发起新重建,lottie 新旧实例会在同一容器上交错构建,
+ * 可能留下“只剩一个图标的半成品”。这里把所有重渲染请求串行化:同一时间只执行一次
+ * 重建,期间的新请求合并为一次,待当前结束再补跑,任意点击速度都安全。 */
+let rerenderBusy = false;
+let rerenderQueued = false;
+
 function reRenderPreservingState() {
-  if (!currentData || !anim) return;
+  if (!currentData || !anim) {
+    rerenderBusy = false;
+    rerenderQueued = false;
+    return;
+  }
+  if (rerenderBusy) {
+    rerenderQueued = true;
+    return;
+  }
+  rerenderBusy = true;
+  const finish = () => {
+    rerenderBusy = false;
+    if (rerenderQueued) {
+      rerenderQueued = false;
+      requestAnimationFrame(() => reRenderPreservingState());
+    }
+  };
+  reRenderPreservingStateCore(finish);
+}
+
+function reRenderPreservingStateCore(onSettled?: () => void) {
+  let settled = false;
+  const settle = () => {
+    if (settled) return;
+    settled = true;
+    onSettled?.();
+  };
+  if (!currentData || !anim) {
+    settle();
+    return;
+  }
   const frame = anim.currentFrame;
   const wasPaused = anim.isPaused;
   const speed = parseFloat(rngSpeed.value);
   const renderer = selRenderer.value;
 
+  // 重建期间隐藏预览区:lottie 新实例就绪前会短暂呈现“半成品帧(只建出图标等)”,造成闪烁。
+  previewInner.style.visibility = 'hidden';
+  const serial = ++buildSerial;
   destroyAnim();
+  // 看门狗:若被 loadData(切换动画等)顶替,实例可能不再触发 DOMLoaded,需放行队列
+  const watchdog = window.setTimeout(() => {
+    if (serial !== buildSerial) settle();
+  }, 900);
   let newAnim: AnimationItem;
   try {
     newAnim = lottie.loadAnimation({
@@ -1614,7 +2746,10 @@ function reRenderPreservingState() {
       audioFactory,
     });
   } catch (e) {
+    window.clearTimeout(watchdog);
+    if (serial === buildSerial) previewInner.style.visibility = 'visible';
     setStatus('载入失败: ' + (e as Error).message, true);
+    settle();
     return;
   }
   anim = newAnim;
@@ -1626,11 +2761,37 @@ function reRenderPreservingState() {
   newAnim.addEventListener('DOMLoaded', onAnimReady);
   newAnim.addEventListener('config_ready', onAnimReady);
   newAnim.setSpeed(speed);
+  scheduleFrameRangeRefresh(); // 调整时长等会重建动画,DOMLoaded 可能已错过,这里兜底刷新时间轴上限
+  // 恢复播放位置/播放状态必须等动画真正就绪(DOMLoaded)后再执行:
+  // lottie 元素在就绪前只完成了创建(变换未应用、文字未排版),此时若 goToAndStop
+  // 且之前处于暂停,画面会停在“只剩一个图标的半成品帧”,必须重新播放才恢复。
+  let restorePlayback = true;
+  const restorePlaybackState = () => {
+    if (!restorePlayback) return;
+    restorePlayback = false;
+    requestAnimationFrame(() => {
+      if (serial !== buildSerial) { settle(); return; } // 已有更新的重建/切换,交给最新实例
+      try { newAnim.goToAndStop(frame, true); } catch { settle(); return; } // 已被销毁则放弃
+      if (!wasPaused) newAnim.play();
+      updateTransport();
+      previewInner.style.visibility = 'visible'; // 就位后才显示,避免半成品帧闪烁
+      window.clearTimeout(watchdog);
+      settle();
+    });
+  };
+  newAnim.addEventListener('DOMLoaded', restorePlaybackState);
+  newAnim.addEventListener('config_ready', restorePlaybackState);
   requestAnimationFrame(() => {
-    newAnim.goToAndStop(frame, true);
-    if (!wasPaused) newAnim.play();
-    updateTransport();
+    // DOMLoaded 可能先于本帧触发(同步数据):已就绪则立即恢复
+    if (newAnim.isLoaded) restorePlaybackState();
   });
+  // 兜底:若极端情况下(如实例被外部销毁且未触发任何事件)未完成,超时后放行队列
+  window.setTimeout(() => {
+    if (restorePlayback) {
+      restorePlayback = false;
+      settle();
+    }
+  }, 1500);
 }
 
 /* ---------- 载入来源 ----------
@@ -1638,7 +2799,20 @@ function reRenderPreservingState() {
  * 音频不使用 JSON 内嵌版本,改用 animation 目录下的音频文件(一并打包进网站)。 */
 import animationDataJson from '../animation/animation_data.json?raw';
 import bundledAudioUrl from '../animation/gunmuchenggong.mp3?url';
+import exposedAudioUrl from '../animation_2/UI_C201_Energy_Scout_Bow_Scout_02.wav?url';
 import windowsAnimationRaw from '../animation/windows animation/windows_animation.json?raw';
+import animation2DataJson from '../animation_2/animation_data.json?raw';
+
+/* 位置暴露动画可选图标:animation_2/icon/*.png 打包进网站,供用户选择替换图标图层 */
+const iconModules = import.meta.glob('../animation_2/icon/*.png', {
+  eager: true,
+  query: '?url',
+  import: 'default',
+}) as Record<string, string>;
+const ICON_OPTIONS = Object.entries(iconModules)
+  .map(([path, url]) => ({ name: path.split('/').pop() ?? '', url }))
+  .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+const DEFAULT_ICON_NAME = 'Hero_Sp_03.png'; // 默认图标
 
 let bootAnimation: any;
 try {
@@ -1665,6 +2839,536 @@ try {
 } catch (e) {
   console.error('[弹窗动画数据解析失败]', e);
   setStatus('弹窗动画数据解析失败: ' + (e as Error).message, true);
+}
+
+/* 位置暴露动画(animation_2/animation_data.json)打包进网站。
+ * 其内嵌音频为 Bodymovin 导出的坏占位符(data:audio/mp3;base64,undefined),
+ * 剥离后注入独立的 WAV 音效资源(音频层 refId=audio_0 指向打包的 WAV 文件)。 */
+let animation2Data: any = null;
+let baiyechuangOriginalData: string | null = null; // 百叶窗原始图片 data URI,供调色重置
+try {
+  const stripped2 = animation2DataJson.replace(/"data:audio[^"]*"/g, '""');
+  animation2Data = JSON.parse(stripped2);
+  // 注入音效资源:音频层 refId=audio_0 使用打包的 WAV 文件(预览播放与导出均使用它)。
+  // 原始 JSON 已存在 audio_0 资源,但其 p 为坏占位符(剥离后为空),需覆盖其路径。
+  animation2Data.assets = animation2Data.assets ?? [];
+  const audioAsset = animation2Data.assets.find((a: any) => a.id === 'audio_0');
+  if (audioAsset) {
+    audioAsset.p = exposedAudioUrl;
+    audioAsset.u = '';
+    audioAsset.e = 1;
+  } else {
+    animation2Data.assets.push({ id: 'audio_0', p: exposedAudioUrl, u: '', e: 1 });
+  }
+  // 修复音频层音量:au.lv 为 [0,0] 会被 lottie 当作静音,改为满音量并按 AUDIO_VOLUME 调低
+  const fixAudioVol = (layers: any[]) => {
+    for (const l of layers ?? []) {
+      if (l.ty === 6 && l.au && l.au.lv) l.au.lv.k = [Math.round(AUDIO_VOLUME * 100)];
+      if (Array.isArray(l.layers)) fixAudioVol(l.layers);
+    }
+  };
+  fixAudioVol(animation2Data.layers);
+  // 记录百叶窗.png 引用的原始图片资源
+  const baiyechuangLayer = (animation2Data.layers ?? []).find((l: any) => l.ty === 2 && l.nm === '百叶窗.png');
+  if (baiyechuangLayer) {
+    const asset = (animation2Data.assets ?? []).find((a: any) => a.id === baiyechuangLayer.refId);
+    if (asset && typeof asset.p === 'string') baiyechuangOriginalData = asset.p;
+  }
+} catch (e) {
+  console.error('[位置暴露动画数据解析失败]', e);
+  setStatus('位置暴露动画数据解析失败: ' + (e as Error).message, true);
+}
+
+// 默认图标:把图标图层(image_0)资源指向 Hero_Sp_03.png,保证默认一致
+{
+  const defIcon = ICON_OPTIONS.find((o) => o.name === DEFAULT_ICON_NAME);
+  const iconAsset = (animation2Data?.assets ?? []).find((a: any) => a.id === 'image_0');
+  if (defIcon && iconAsset) {
+    iconAsset.p = defIcon.url;
+    iconAsset.u = '';
+    iconAsset.e = 1;
+  }
+}
+
+/* ---------- 二次扫描动画(animation_data_next.json)合并 ----------
+ * 开启「显示二次扫描」后,主动画播完紧接着播第二段。实现方式:把第二段图层
+ * 重新编号(ind+100)、资源重命名(id+_n)、关键帧整体平移后并入主动画数据,
+ * 使时间轴连续,导出视频与编辑功能天然支持两段。 */
+import animation2NextRaw from '../animation_2/animation_data_next_fixed.json?raw';
+
+let animation2NextData: any = null;
+let baiyechuang2OriginalData: string | null = null; // 百叶窗2(二次扫描)原始图片 data URI,供调色重置
+let guangOriginalData: string | null = null; // 光.png(二次扫描)原始图片 data URI,供调色重置
+try {
+  animation2NextData = JSON.parse(animation2NextRaw);
+  // 记录百叶窗2.png / 光.png 引用的原始图片资源(合并后资源 id 分别为 image_2_n / image_1_n)
+  const recordOrigImage = (nm: string, setter: (p: string) => void) => {
+    const layer = (animation2NextData?.layers ?? []).find((l: any) => l.ty === 2 && l.nm === nm);
+    if (!layer) return;
+    const asset = (animation2NextData?.assets ?? []).find((a: any) => a.id === layer.refId);
+    if (asset && typeof asset.p === 'string') setter(asset.p);
+  };
+  recordOrigImage('百叶窗2.png', (p) => { baiyechuang2OriginalData = p; });
+  recordOrigImage('光.png', (p) => { guangOriginalData = p; });
+} catch (e) {
+  console.error('[二次扫描动画数据解析失败]', e);
+  setStatus('二次扫描动画数据解析失败: ' + (e as Error).message, true);
+}
+
+/* 递归偏移对象中所有动画属性({a:1, k:[{t,...}]})的关键帧时刻 t */
+function offsetKeyframes(obj: any, delta: number) {
+  if (!obj || typeof obj !== 'object') return;
+  if (Array.isArray(obj)) {
+    for (const x of obj) offsetKeyframes(x, delta);
+    return;
+  }
+  if (obj.a === 1 && Array.isArray(obj.k)) {
+    for (const kf of obj.k) if (kf && typeof kf.t === 'number') kf.t += delta;
+  }
+  for (const key of Object.keys(obj)) {
+    if (key === 'k' && obj.a === 1) continue;
+    offsetKeyframes(obj[key], delta);
+  }
+}
+
+/* 第二段数据:重新编号 ind(+100)并更新 parent 引用、重命名资源(id+_n)并更新
+ * refId、图层 ip/op/st 与全部关键帧整体平移 baseOp 帧。 */
+function prepareNextData(next: any, baseOp: number): any {
+  const d = JSON.parse(JSON.stringify(next));
+  const renumber = (layers: any[]) => {
+    for (const l of layers ?? []) {
+      l.ind += 100;
+      if (typeof l.parent === 'number') l.parent += 100;
+      if (Array.isArray(l.layers)) renumber(l.layers);
+    }
+  };
+  renumber(d.layers);
+  // 第二段的「光.png」「百叶窗2.png」是 tt:1 轨道蒙版目标(装饰效果),蒙版源分别为
+  // 「形状图层 4」(td=1)与「底框」(td=1)。lottie 的 matte 配对默认取数组顺序中前一个
+  // 图层作蒙版源,这两个图层的蒙版源并不紧邻,直接保留会配对失败被完整平铺显示
+  // (百叶窗2 铺满金色斜纹、光.png 盖出光带)。这里保留图层,并用 tp 字段显式指定
+  // 蒙版源(合并后 ind),使轨道蒙版正确生效:
+  //   光.png → tp=101(形状图层 4)
+  //   百叶窗2.png → tp=109(底框)
+  // (此前曾整层移除这两层,导致二次扫描缺少百叶窗纹理;tp 方案已实测渲染正常。)
+  for (const l of d.layers ?? []) {
+    if (l.nm === '光.png') l.tp = 101;
+    else if (l.nm === '百叶窗2.png') l.tp = 109;
+  }
+  // 优先复用新导出文件自带的可见底框副本(如“底框 可见”),它已含金色竖条,仅统一黑矩形
+  // 不透明度为 55%(与第一段一致);旧文件没有可见副本时才自行注入(不改动源 JSON)。
+  const existingVis = (d.layers ?? []).find(
+    (l: any) => l.ind >= 100 && !l.td && /底框/.test(l.nm ?? '') && /可见/.test(l.nm ?? '')
+  );
+  // 统一第二段「底框 可见」为纯黑填充 #000000 + 黑矩形不透明度 55%(与第一段一致)。
+  // 注意:第二段 AE 导出时竖条(形状 3/形状 2)的填充是绿色 [0.31,1,0.18](第一段为黑色),
+  // 侧栏形状图层显示的是第一个填充(绿色),因此必须把所有形状组的填充统一为黑色,
+  // 侧栏才会显示 #000000,渲染也与第一段一致(金/红描边 + 黑填充)。
+  const normalizeDikuangRect = (layer: any) => {
+    for (const g of layer?.shapes ?? []) {
+      if (!g || g.ty !== 'gr' || !Array.isArray(g.it)) continue;
+      const isRect = /矩形/.test(String(g.nm ?? ''));
+      const tr = g.it.find((c: any) => c && c.ty === 'tr');
+      if (tr && tr.o && isRect) tr.o = { a: 0, k: 55, ix: tr.o.ix };
+      const fl = g.it.find((c: any) => c && c.ty === 'fl');
+      if (fl) fl.c = { a: 0, k: [0, 0, 0, 1], ix: (fl.c && fl.c.ix) || 4 };
+    }
+  };
+  if (existingVis) {
+    normalizeDikuangRect(existingVis);
+  } else {
+    const src = (d.layers ?? []).find((l: any) => l.nm === '底框' && l.td === 1);
+    if (src) {
+      const vis = JSON.parse(JSON.stringify(src));
+      vis.nm = '底框(可见)';
+      vis.ind = 900001;
+      delete vis.td;
+      normalizeDikuangRect(vis);
+      d.layers.push(vis);
+    }
+  }
+  /* 路径手柄绝对化(lottie completeData 的复刻):
+   * Bodymovin 导出的形状路径手柄是相对值(如 [0,0] = 无手柄),lottie 加载时通过
+   * convertPathsToAbsoluteValues 就地转换为绝对坐标(顶点 + 手柄)。但二次扫描数据
+   * 从未被 lottie 单独处理过,而 mergeNextInto 深拷贝了已加载(带 __complete 标记)
+   * 的主动画数据,合并数据再加载时 lottie 因 __complete 守卫跳过该转换,第二段路径的
+   * 相对手柄 (0,0) 会被 buildShapeString 直接当作绝对控制点写入 SVG/Canvas,导致竖条
+   * 等形状向形状原点(合成下方中心)弯曲成弧线。这里对第二段所有形状路径执行同样的
+   * 转换,保证与第一段渲染一致。 */
+  const convertPathKeys = (k: any) => {
+    if (!k) return;
+    if (Array.isArray(k)) {
+      for (const kf of k) {
+        if (kf && Array.isArray(kf.s)) for (const s of kf.s) convertPathKeys(s);
+        if (kf && Array.isArray(kf.e)) for (const e of kf.e) convertPathKeys(e);
+      }
+      return;
+    }
+    if (Array.isArray(k.i) && Array.isArray(k.o) && Array.isArray(k.v)) {
+      const len = Math.min(k.i.length, k.o.length, k.v.length);
+      for (let j = 0; j < len; j += 1) {
+        if (!k.i[j] || !k.o[j] || !k.v[j]) continue;
+        k.i[j][0] += k.v[j][0];
+        k.i[j][1] += k.v[j][1];
+        k.o[j][0] += k.v[j][0];
+        k.o[j][1] += k.v[j][1];
+      }
+    }
+  };
+  const convertShapesToAbsolute = (items: any[]) => {
+    for (const it of items ?? []) {
+      if (it.ty === 'sh' && it.ks) {
+        convertPathKeys(it.ks.k);
+      } else if (it.ty === 'gr' && Array.isArray(it.it)) {
+        convertShapesToAbsolute(it.it);
+      }
+    }
+  };
+  for (const l of d.layers ?? []) {
+    if (l.ty === 4 && Array.isArray(l.shapes)) convertShapesToAbsolute(l.shapes);
+  }
+  const idMap = new Map<string, string>();
+  for (const a of d.assets ?? []) {
+    const newId = a.id + '_n';
+    idMap.set(a.id, newId);
+    a.id = newId;
+  }
+  const updateRefs = (layers: any[]) => {
+    for (const l of layers ?? []) {
+      if (l.refId && idMap.has(l.refId)) l.refId = idMap.get(l.refId)!;
+      if (Array.isArray(l.layers)) updateRefs(l.layers);
+    }
+  };
+  updateRefs(d.layers);
+  const offsetLayers = (layers: any[]) => {
+    for (const l of layers ?? []) {
+      l.ip += baseOp;
+      l.op += baseOp;
+      l.st += baseOp;
+      offsetKeyframes(l, baseOp);
+      // 文字图层:偏移 t.d.k 文字关键帧时刻(不在 {a:1,k:[...]} 结构内)
+      const tdk = l?.t?.d?.k;
+      if (Array.isArray(tdk)) for (const kf of tdk) if (kf && typeof kf.t === 'number') kf.t += baseOp;
+      if (Array.isArray(l.layers)) offsetLayers(l.layers);
+    }
+  };
+  offsetLayers(d.layers);
+  d.ip += baseOp;
+  d.op += baseOp;
+  return d;
+}
+
+function isMergedNext(data: any): boolean {
+  return Array.isArray(data?.layers) && data.layers.some((l: any) => l.ind >= 100);
+}
+
+/* 把第二段并入主数据(深拷贝,保留第一段编辑状态) */
+function mergeNextInto(main: any): any {
+  const d = JSON.parse(JSON.stringify(main));
+  const next = prepareNextData(animation2NextData, d.op);
+  d.layers = [...d.layers, ...next.layers];
+  d.assets = [...d.assets, ...next.assets];
+  const fonts = d.fonts?.list ?? [];
+  const famSet = new Set(fonts.map((f: any) => f.fFamily || f.fName));
+  for (const f of next.fonts?.list ?? []) {
+    const fam = f.fFamily || f.fName;
+    if (!famSet.has(fam)) {
+      fonts.push(f);
+      famSet.add(fam);
+    }
+  }
+  d.fonts = d.fonts ?? { list: fonts };
+  d.__mainOp = d.op;
+  d.op = d.op + next.op;
+  d.__nextOp = next.op;
+  return d;
+}
+
+/* 从合并数据提取主数据(移除第二段图层/资源,恢复 op) */
+function extractMainFrom(data: any): any {
+  const d = JSON.parse(JSON.stringify(data));
+  d.layers = d.layers.filter((l: any) => l.ind < 100);
+  d.assets = d.assets.filter((a: any) => !String(a.id).endsWith('_n'));
+  d.op = d.__mainOp ?? d.op;
+  delete d.__mainOp;
+  delete d.__nextOp;
+  return d;
+}
+
+/* 平移第二段所有图层(第一段时长变化时保持两段紧接) */
+function offsetSecondSegment(data: any, delta: number) {
+  const walk = (layers: any[]) => {
+    for (const l of layers ?? []) {
+      if (l.ind >= 100) {
+        l.ip += delta;
+        l.op += delta;
+        l.st += delta;
+        offsetKeyframes(l, delta);
+        const tdk = l?.t?.d?.k;
+        if (Array.isArray(tdk)) for (const kf of tdk) if (kf && typeof kf.t === 'number') kf.t += delta;
+      }
+      if (Array.isArray(l.layers)) walk(l.layers);
+    }
+  };
+  walk(data.layers);
+}
+
+/* 动画注册表:每个动画独立的数据 / 弹窗 / 音频。
+ * 切换动画时 popupData 会随之替换,弹窗相关函数(基于全局 popupData)自动适配。 */
+type AnimDef = { key: string; label: string; data: any; popup: any; audio: string | null };
+const ANIMATIONS: AnimDef[] = [
+  { key: 'extraction', label: '撤离动画', data: bootAnimation, popup: popupData, audio: bundledAudioUrl },
+  { key: 'exposed', label: '位置暴露动画', data: animation2Data, popup: null, audio: exposedAudioUrl },
+];
+let currentAnimKey = 'extraction';
+
+/* ---------- 二次扫描开关状态 ---------- */
+let showNextScan = false; // 是否显示二次扫描(主动画后紧接着播第二段)
+let nextDuration = 2.7; // 第二段时长(秒,默认 2.7s)
+
+/* ---------- 位置暴露动画图标选择 ---------- */
+let currentIconName = DEFAULT_ICON_NAME;
+let customIcons: { name: string; url: string }[] = []; // 用户上传的自定义图标(会话内有效)
+
+/* ---------- 图标显示开关 ----------
+ * 「显示图标」开关(默认勾选):取消后主段与二次扫描段的图标图层透明度动画
+ * 置 0(隐藏),文字 p.x 置 960(画面中心,两段一致);恢复勾选时还原原值。注意:图标隐藏不能只设静态 ks.o=0(lottie 对静态
+ * 透明度不应用,图层仍会渲染),必须用动画关键帧 {a:1,k:[{t:0,s:[0]}]}。
+ * 图标显示状态下加载数据时捕获原值;隐藏状态下重建动画(切换/改文字等)时
+ * 保留上次捕获的原值,保证恢复后与原始一致。 */
+let buildSerial = 0; // 动画重建序号:并发/连发重建时只让最新一次恢复画面与播放状态
+let iconVisible = true; // 「显示图标」开关状态(默认显示)
+const iconOpacityOriginal = new Map<number, { a: number; k: any }>(); // 图标层 ind → 原 ks.o
+const textPosXOriginal = new Map<number, number>(); // 文字层 ind → 原 p.x
+/* 隐藏图标时底框整组随文字回中:文字 p.x 置 960 后,主段的底框/两侧竖条等组件
+ * 仍停留在“图标+文字”布局处(静止帧实测中心 995.5),文字相对底框偏左约 34 合成
+ * 单位。这里把主段父级「空 2」(ind 3)整体左移,使底框中心与文字中心(≈961)
+ * 重合,底框左右留白对称、观感居中;恢复图标时还原。二次扫描段(ind 103)的底框
+ * 本身就以 960 为中心,无需偏移。数值按当前内置动画 JSON 静止帧实测,若更换/重
+ * 导出动画数据导致底框基准位置变化,需要重新标定。 */
+const PLATE_PARENT_X_SHIFT = new Map<number, number>([[3, -34.3]]); // 空 2 ind → 隐藏时左移量(合成单位)
+const plateParentXOriginal = new Map<number, number>(); // 空 2 ind → 原 p.x
+/* 隐藏图标居中微调:不同字体/文字内容的字形存在固有光学偏差(墨迹/笔画分布不
+ * 完全对称),纯数值很难替人眼定“正中”。提供 ±px 手动微调,叠加在 960 上,
+ * 只影响「显示图标」未勾选时的文字与其跟随的底框;SVG/Canvas、预览/导出一致。 */
+let iconCenterNudge = 0; // 合成单位,正值右移;0 = 关闭微调
+let nudgeRebuildTimer: number | undefined; // 连点微调防抖(220ms):一次快速连点只合并成一次重建
+function changeIconNudge(delta: number) {
+  iconCenterNudge = Math.max(-8, Math.min(8, iconCenterNudge + delta));
+  const v = document.getElementById('iconNudgeVal');
+  if (v) v.textContent = (iconCenterNudge > 0 ? '+' : '') + iconCenterNudge + ' px';
+  if (!chkIcon.checked) {
+    // 已隐藏 → 重定位(含整段重渲染)。快速连点统一推迟到停手后再重建一次(配合单飞队列,
+    // 任意点击速度都不会交错重建)。
+    window.clearTimeout(nudgeRebuildTimer);
+    nudgeRebuildTimer = window.setTimeout(() => setIconVisible(false), 220);
+  }
+}
+/* 画面中心取 p.x=960 而不做额外偏移(此前按“锚点偏移 −anchorX×缩放”≈1.18
+ * 与“固定 18.43”均实测偏左):本字体 ProjectD Type 字形墨迹在其字格内略偏左
+ * (约 0.5 字格 ≈ 1.5 合成单位),按字格中心/锚点校正反而让墨迹视觉中心落在
+ * 958.4 附近(观感偏左)。逐字形墨迹实测:p.x=960 时主段「位置暴露」墨迹中心
+ * 959.6、二次扫描「即将扫描移动单位」960.2,观感最居中;SVG 与 Canvas 一致。 */
+function captureIconState() {
+  if (!chkIcon.checked) return; // 仅图标显示时记录原始状态,隐藏时保留上次记录
+  iconOpacityOriginal.clear();
+  textPosXOriginal.clear();
+  plateParentXOriginal.clear();
+  if (!currentData) return;
+  const iconInds = [5];
+  const textInds = [4];
+  if (isMergedNext(currentData)) {
+    iconInds.push(105);
+    textInds.push(104);
+  }
+  for (const ind of iconInds) {
+    const layer = findLayerByInd(currentData.layers, ind);
+    const o = layer?.ks?.o;
+    if (o) iconOpacityOriginal.set(ind, { a: o.a, k: JSON.parse(JSON.stringify(o.k)) });
+  }
+  for (const ind of textInds) {
+    const layer = findLayerByInd(currentData.layers, ind);
+    const p = layer?.ks?.p;
+    if (p && p.a === 0 && Array.isArray(p.k)) textPosXOriginal.set(ind, p.k[0]);
+  }
+  for (const ind of PLATE_PARENT_X_SHIFT.keys()) {
+    const layer = findLayerByInd(currentData.layers, ind);
+    const p = layer?.ks?.p;
+    if (p && p.a === 0 && Array.isArray(p.k)) plateParentXOriginal.set(ind, p.k[0]);
+  }
+}
+
+function setIconVisible(visible: boolean, rerender = true) {
+  iconVisible = visible;
+  if (!currentData) return;
+  const iconInds = [5];
+  const textInds = [4];
+  if (isMergedNext(currentData)) {
+    iconInds.push(105);
+    textInds.push(104);
+  }
+  for (const ind of iconInds) {
+    const layer = findLayerByInd(currentData.layers, ind);
+    const o = layer?.ks?.o;
+    if (!o) continue;
+    if (visible) {
+      const orig = iconOpacityOriginal.get(ind);
+      if (orig) {
+        o.a = orig.a;
+        o.k = JSON.parse(JSON.stringify(orig.k));
+      }
+    } else {
+      o.a = 1;
+      o.k = [{ t: 0, s: [0] }];
+    }
+  }
+  for (const ind of textInds) {
+    const layer = findLayerByInd(currentData.layers, ind);
+    const p = layer?.ks?.p;
+    if (!(p && p.a === 0 && Array.isArray(p.k))) continue;
+    if (visible) {
+      const orig = textPosXOriginal.get(ind);
+      if (orig !== undefined) p.k[0] = orig;
+    } else {
+      // 画面中心:960 + 手动微调(见 iconCenterNudge 注释)。
+      p.k[0] = 960 + iconCenterNudge;
+    }
+  }
+  // 底框整组随文字回中:从捕获的原值按偏移量取绝对值,重复触发(隐藏状态下重建等)
+  // 不会累积偏移。
+  for (const [ind, shift] of PLATE_PARENT_X_SHIFT) {
+    const layer = findLayerByInd(currentData.layers, ind);
+    const p = layer?.ks?.p;
+    if (!(p && p.a === 0 && Array.isArray(p.k))) continue;
+    const orig = plateParentXOriginal.get(ind);
+    if (orig === undefined) continue;
+    p.k[0] = visible ? orig : orig + shift + iconCenterNudge;
+  }
+  if (rerender) reRenderPreservingState();
+}
+
+chkIcon.addEventListener('change', () => setIconVisible(chkIcon.checked));
+
+/* 居中微调按钮:±1px(合成单位),重置归零 */
+document.getElementById('btnNudgeL')?.addEventListener('click', () => changeIconNudge(-1));
+document.getElementById('btnNudgeR')?.addEventListener('click', () => changeIconNudge(1));
+document.getElementById('btnNudgeReset')?.addEventListener('click', () => changeIconNudge(-iconCenterNudge));
+{
+  const v = document.getElementById('iconNudgeVal');
+  if (v) v.textContent = iconCenterNudge + ' px';
+}
+
+function allIconOptions() {
+  return [...customIcons, ...ICON_OPTIONS];
+}
+
+function applyIconByName(name: string) {
+  const opt = allIconOptions().find((o) => o.name === name);
+  if (!opt) return;
+  currentIconName = name;
+  // 同时更新主段(image_0)与二次扫描段(image_0_n)的图标资源,保证两段图标一致
+  let updated = false;
+  for (const id of ['image_0', 'image_0_n']) {
+    const asset = (currentData?.assets ?? []).find((a: any) => a.id === id);
+    if (!asset) continue;
+    asset.p = opt.url;
+    asset.u = '';
+    asset.e = 1;
+    updated = true;
+  }
+  if (!updated) return;
+  renderIconList();
+  reRenderPreservingState();
+}
+
+function renderIconList() {
+  const opts = allIconOptions();
+  iconCount.textContent = '· ' + opts.length + ' 个';
+  iconList.innerHTML = opts
+    .map(
+      (opt) =>
+        '<li class="icon-item' + (opt.name === currentIconName ? ' is-active' : '') + '" data-name="' + esc(opt.name) + '">' +
+        '<img class="icon-thumb" src="' + opt.url + '" alt="' + esc(opt.name) + '" loading="lazy" />' +
+        '<span class="icon-name">' + esc(opt.name.replace(/\.(png|jpe?g|webp|gif)$/i, '')) + '</span>' +
+        '</li>'
+    )
+    .join('');
+  iconList.querySelectorAll<HTMLLIElement>('.icon-item').forEach((li) => {
+    li.addEventListener('click', () => {
+      const name = li.dataset.name;
+      if (!name || name === currentIconName) return;
+      applyIconByName(name);
+    });
+  });
+}
+
+/* 用户上传自定义图标:读取为 data URL,加入列表并立即应用 */
+iconFile.addEventListener('change', () => {
+  const file = iconFile.files?.[0];
+  iconFile.value = ''; // 允许重复选择同一文件
+  if (!file) return;
+  if (file.size > 2 * 1024 * 1024) {
+    setStatus('图标过大:请上传 ≤2MB 的图片', true);
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const url = String(reader.result ?? '');
+    if (!url.startsWith('data:image/')) {
+      setStatus('不支持的文件类型', true);
+      return;
+    }
+    const base = file.name.replace(/\.(png|jpe?g|webp|gif)$/i, '') || '自定义图标';
+    let name = base;
+    let n = 2;
+    while (allIconOptions().some((o) => o.name === name)) name = base + ' (' + n++ + ')';
+    customIcons.unshift({ name, url });
+    applyIconByName(name);
+    setStatus('已应用自定义图标: ' + name);
+  };
+  reader.onerror = () => setStatus('读取图片失败', true);
+  reader.readAsDataURL(file);
+});
+
+function switchAnimation(key: string) {
+  const def = ANIMATIONS.find((a) => a.key === key);
+  if (!def || !def.data) return;
+  currentAnimKey = key;
+  // 弹窗数据随动画切换;切换后默认关闭弹窗
+  popupData = def.popup;
+  popupVisible = false;
+  chkPopup.checked = false;
+  destroyPopupAnim();
+  popupLayer.hidden = true;
+  const popupSection = document.getElementById('popupSection');
+  if (popupSection) popupSection.hidden = !def.popup;
+  if (def.popup) {
+    capturePopupOriginalState();
+    renderPopupLists();
+  } else {
+    popupCount.textContent = '';
+    popupTextCount.textContent = '';
+    popupShapeCount.textContent = '';
+    popupTextList.innerHTML = '';
+    popupShapeList.innerHTML = '';
+  }
+  // 位置暴露动画:数据始终用 animation2Data 当前值(可能已合并二次扫描/含编辑状态)
+  const data = key === 'exposed' ? animation2Data : def.data;
+  // 图片图层区块:仅当前动画含可调色图片(百叶窗.png)时显示
+  const hasBaiyechuang = (data.layers ?? []).some((l: any) => l.ty === 2 && l.nm === '百叶窗.png');
+  imageSection.hidden = !hasBaiyechuang;
+  if (hasBaiyechuang) renderImageList(data);
+  else imageList.innerHTML = '';
+  // 图标选择区块:仅位置暴露动画显示
+  const hasIcon = (data.layers ?? []).some((l: any) => l.ty === 2 && l.nm === '图标_可替换');
+  iconSection.hidden = !hasIcon;
+  if (hasIcon) renderIconList();
+  else iconList.innerHTML = '';
+  // 动画时长区块(时长 + 二次扫描开关 + 二次扫描时长):仅位置暴露动画显示
+  const isExposed = key === 'exposed';
+  timingSection.hidden = !isExposed;
+  if (isExposed) syncNextDurationSlider();
+  void loadData(data, def.label);
 }
 
 /* ---------- 视频导出 ---------- */
@@ -1731,9 +3435,10 @@ const WebAudioEncoder = (window as any).AudioEncoder;
 const WebVideoFrame = (window as any).VideoFrame;
 const WebAudioData = (window as any).AudioData;
 
-/* 音频来源:animation 目录下的音频文件(已打包进网站),不再使用 JSON 内嵌音频 */
+/* 音频来源:按当前动画返回其音频文件(已打包进网站),不再使用 JSON 内嵌音频 */
 function findAudioAsset(): string | null {
-  return bundledAudioUrl || null;
+  const def = ANIMATIONS.find((a) => a.key === currentAnimKey);
+  return (def && def.audio) || null;
 }
 
 async function decodeAudio(dataUrl: string): Promise<{ channels: Float32Array[]; sampleRate: number } | null> {
@@ -1818,7 +3523,10 @@ async function exportVideoMp4(data: any, canvas: HTMLCanvasElement, renderFrame:
     for (let off = 0; off < audioFrames; off += AAC_FRAME) {
       const n = Math.min(AAC_FRAME, audioFrames - off);
       const planar = new Float32Array(n * numCh);
-      for (let c = 0; c < numCh; c++) planar.set(audioChannels![c].subarray(off, off + n), c * n);
+      for (let c = 0; c < numCh; c++) {
+        const src = audioChannels![c].subarray(off, off + n);
+        for (let i = 0; i < n; i++) planar[c * n + i] = src[i] * AUDIO_VOLUME;
+      }
       const audioData = new WebAudioData({
         format: 'f32-planar', sampleRate: 48000, numberOfChannels: numCh,
         numberOfFrames: n, timestamp: Math.round((off / 48000) * 1e6), data: planar,
@@ -2205,7 +3913,7 @@ async function buildPcm16(data: any, totalFrames: number, fr: number): Promise<{
       const ch = audioChannels![c];
       for (let i = 0; i < audioFrames; i++) {
         const s = i < ch.length ? Math.max(-1, Math.min(1, ch[i])) : 0;
-        dv.setInt16((i * numCh + c) * 2, Math.round(s * 32767), true);
+        dv.setInt16((i * numCh + c) * 2, Math.round(s * AUDIO_VOLUME * 32767), true);
       }
     }
   }
@@ -2434,9 +4142,12 @@ async function exportVideo() {
 
 btnExport.addEventListener('click', exportVideo);
 
+/* 动画选择器:切换撤离 / 位置暴露动画 */
+const selAnim = $<HTMLSelectElement>('selAnim');
+selAnim.addEventListener('change', () => switchAnimation(selAnim.value));
 
 if (bootAnimation) {
-  void loadData(bootAnimation, 'animation_data.json');
+  void loadData(bootAnimation, '撤离动画');
 }
 
 /* 弹窗初始化:记录原始状态、渲染编辑列表、定位图标、加载弹窗叠加层(字体就绪后) */

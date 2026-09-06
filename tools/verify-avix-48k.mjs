@@ -3,11 +3,11 @@
 import fs from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 
-const OUT = process.env.AVI_OUT || 'I:/Delta Force custom animation/tools/.avix-big.avi';
+const OUT = process.env.AVI_OUT || 'I:/Delta Force custom animation/tools/.avix-48k.avi';
 const AVI_RATE = parseInt(process.env.AVI_RATE || '44100', 10);
 const W = 1920, H = 1080;
 const FRAME_BYTES = W * H * 4;
-const TOTAL = 500; // 4.1GB > 4.29GB? 500×8.3MB=4.15GB < 4.29GB! 用 520 帧 = 4.31GB
+const TOTAL = 609; // 4.1GB > 4.29GB? 500×8.3MB=4.15GB < 4.29GB! 用 520 帧 = 4.31GB
 // 用 520 帧:520 × 8,294,400 = 4,313,088,000 > 4,294,967,296 ✓ 触发分段
 
 function ascii(s) { const b = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i); return b; }

@@ -1,42 +1,36 @@
-// 分析帧内容分布:页面帧(透明)内容包围盒 vs AVI 帧(非背景色)内容包围盒
-import fs from 'node:fs';
+// 帧内容分析:非透明像素数 + 内容边界框 + 帧间差异区域
+import { execFileSync } from 'node:child_process';
 
-const TMP = 'I:/Delta Force custom animation/tools/.cmp';
-const FRAMES = [0, 304, 608];
+const SRC = 'K:/下载/animation_transparent.avi';
 const W = 1920, H = 1080;
-
-const bg = [0x16, 0x18, 0x1d];
-const distBg = (r, g, b) => Math.abs(r - bg[0]) + Math.abs(g - bg[1]) + Math.abs(b - bg[2]);
-
-for (const f of FRAMES) {
-  const avi = fs.readFileSync(`${TMP}/avi-${f}.raw`);
-  const page = fs.readFileSync(`${TMP}/page-${f}.raw`);
-
-  // 页面帧:非透明像素包围盒
-  let pMinX = W, pMinY = H, pMaxX = -1, pMaxY = -1, pCount = 0;
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      const i = (y * W + x) * 4;
-      if (page[i + 3] > 8) {
-        pCount++;
-        if (x < pMinX) pMinX = x; if (x > pMaxX) pMaxX = x;
-        if (y < pMinY) pMinY = y; if (y > pMaxY) pMaxY = y;
-      }
-    }
+const frames = [];
+for (const f of [0, 20, 40, 100, 300, 600]) {
+  const raw = execFileSync('ffmpeg', ['-v', 'error', '-i', SRC, '-vf', `select='eq(n\\,${f})'`, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgba', '-'], { maxBuffer: 300 * 1024 * 1024 });
+  let minX = 9999, maxX = 0, minY = 9999, maxY = 0, nonZero = 0;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const p = (y * W + x) * 4;
+    if (raw[p + 3] !== 0) { nonZero++; if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; }
   }
-  // AVI 帧:非背景色像素包围盒(JPEG 有损,阈值 40)
-  let aMinX = W, aMinY = H, aMaxX = -1, aMaxY = -1, aCount = 0;
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      const i = (y * W + x) * 4;
-      if (distBg(avi[i], avi[i + 1], avi[i + 2]) > 40) {
-        aCount++;
-        if (x < aMinX) aMinX = x; if (x > aMaxX) aMaxX = x;
-        if (y < aMinY) aMinY = y; if (y > aMaxY) aMaxY = y;
-      }
-    }
+  frames.push({ f, raw, nonZero, box: `x[${minX}-${maxX}] y[${minY}-${maxY}]` });
+  console.log(`帧${f}: 非透明像素 ${nonZero} 内容框 ${frames[frames.length - 1].box}`);
+}
+// 帧0 与帧100 的差异区域(运动发生在哪)
+{
+  const a = frames[0].raw, b = frames[2].raw;
+  let diff = 0, minX = 9999, maxX = 0, minY = 9999, maxY = 0;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const p = (y * W + x) * 4;
+    const da = Math.abs(a[p] - b[p]) + Math.abs(a[p + 1] - b[p + 1]) + Math.abs(a[p + 2] - b[p + 2]) + Math.abs(a[p + 3] - b[p + 3]);
+    if (da > 30) { diff++; if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y; }
   }
-  console.log(`frame ${f}:`);
-  console.log(`  PAGE 内容: ${pCount}px (${((pCount / (W * H)) * 100).toFixed(2)}%) bbox x[${pMinX}..${pMaxX}] y[${pMinY}..${pMaxY}]`);
-  console.log(`  AVI  内容: ${aCount}px (${((aCount / (W * H)) * 100).toFixed(2)}%) bbox x[${aMinX}..${aMaxX}] y[${aMinY}..${aMaxY}]`);
+  console.log(`帧0→帧100 差异像素 ${diff} 区域 x[${minX}-${maxX}] y[${minY}-${maxY}]`);
+}
+// 帧100→帧300 差异(应为 0,验证静止)
+{
+  const a = frames[2].raw, b = frames[4].raw;
+  let diff = 0;
+  for (let p = 0; p < a.length; p += 4) {
+    if (Math.abs(a[p] - b[p]) + Math.abs(a[p + 3] - b[p + 3]) > 30) diff++;
+  }
+  console.log(`帧100→帧300 差异像素 ${diff}`);
 }

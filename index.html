@@ -4,11 +4,43 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>" />
-    <title>三角洲行动撤离动画自定义编辑器</title>
+    <title>三角洲行动动画编辑器</title>
+    <!-- 启动加载界面(内联样式):不依赖外部 CSS,在样式表加载完成前即可显示,避免白屏 -->
+    <style>
+      #app-loading{position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:#0f1115;color:#dbe1ea;transition:opacity .45s ease;font-family:ui-monospace,'Cascadia Code','Consolas','Courier New',monospace}
+      #app-loading.is-hidden{opacity:0;pointer-events:none}
+      .ld-term{width:400px;max-width:88vw;border-left:2px solid rgba(59,130,246,.55);padding-left:20px}
+      .ld-title{display:flex;align-items:center;gap:10px;font-weight:700;font-size:16px;letter-spacing:.5px}
+      .ld-cursor{display:inline-block;width:9px;height:17px;background:#3b82f6;animation:ldBlink 1s steps(1) infinite}
+      .ld-log{margin-top:16px;font-size:12px;line-height:2;color:#8b93a3;font-family:ui-monospace,'Cascadia Code','Consolas',monospace}
+      .ld-log b{color:#dbe1ea;font-weight:600}
+      .ld-log .ok{color:#34d399}
+      .ld-bar{margin-top:22px;display:flex;gap:4px}
+      .ld-bar i{flex:1;height:14px;background:rgba(255,255,255,.07)}
+      .ld-bar i.on{background:#3b82f6}
+      .ld-pct{margin-top:10px;font-size:11px;color:#3b82f6;letter-spacing:1px}
+      @keyframes ldBlink{0%,49%{opacity:1}50%,100%{opacity:0}}
+    </style>
   </head>
   <body>
+    <div id="app-loading" role="status" aria-label="加载中">
+      <div class="ld-term">
+        <div class="ld-title">三角洲行动动画编辑器<span class="ld-cursor"></span></div>
+        <div class="ld-log">&gt; initializing animation engine<b> · </b><span class="ok">ready</span></div>
+        <div class="ld-log">&gt; loading assets<span id="ldStatus"></span></div>
+        <div class="ld-bar" id="ldBar"></div>
+        <div class="ld-pct" id="ldPct">0%</div>
+      </div>
+    </div>
     <header class="topbar">
-      <div class="brand">三角洲行动撤离动画自定义编辑器<span class="tag">编辑 · 预览 · 导出</span></div>
+      <div class="brand">三角洲行动动画编辑器<span class="tag">编辑 · 预览 · 导出</span></div>
+      <label class="anim-switch" title="切换要编辑的动画">
+        <span class="anim-switch-label">动画</span>
+        <select id="selAnim">
+          <option value="extraction">撤离动画</option>
+          <option value="exposed">位置暴露动画</option>
+        </select>
+      </label>
     </header>
 
     <main class="layout">
@@ -25,12 +57,11 @@
           <div class="transport">
           <button id="btnRestart" type="button" title="回到开头">⏮</button>
           <button id="btnPlay" class="play-btn" type="button" title="播放/暂停(空格键)">▶</button>
-          <label class="loop"><input type="checkbox" id="chkLoop" checked /> 循环</label>
+          <label class="loop"><input type="checkbox" id="chkLoop" /> 循环</label>
           <label>速度
             <input type="range" id="rngSpeed" min="0.1" max="3" step="0.1" value="1" />
             <span id="speedVal">1.0×</span>
           </label>
-          
           <span class="frame">缩放 <b id="zoomInfo">100%</b></span>
           <button id="btnResetView" type="button" title="复位视图(也可双击预览区)">复位视图</button>
           <label>导出格式
@@ -63,10 +94,51 @@
       <aside class="side-panel">
         <h3>动画信息</h3>
         <dl id="infoList"></dl>
+        <div id="timingSection" hidden>
+        <h3>动画时长</h3>
+          <div class="timing-row">
+            <label class="timing-item" title="调整主动画持续时间(1s-10s),移动末尾淡出关键帧">
+              <span class="timing-name">时长</span>
+              <input type="range" id="rngDuration" min="1" max="10" step="0.1" value="10" />
+              <span id="durationVal">10.0s</span>
+            </label>
+            <label class="timing-item" title="开启后,主动画播完紧接着播放二次扫描动画">
+              <input type="checkbox" id="chkNextScan" /> 二次扫描
+            </label>
+            <label class="timing-item" id="nextDurationRow" hidden title="调整二次扫描动画持续时间(1s-10s)">
+              <span class="timing-name">二次扫描时长</span>
+              <input type="range" id="rngNextDuration" min="1" max="10" step="0.1" value="2.7" />
+              <span id="nextDurationVal">2.7s</span>
+            </label>
+          </div>
+        </div>
         <h3>文字图层 <span id="textCount"></span></h3>
         <ul id="textList"></ul>
         <h3>形状图层 <span id="shapeCount"></span></h3>
         <ul id="shapeList"></ul>
+        <div id="imageSection" hidden>
+        <h3>图片图层 <span id="imageCount"></span></h3>
+        <ul id="imageList"></ul>
+        </div>
+        <div id="iconSection" hidden>
+        <h3>图标选择 <span id="iconCount"></span></h3>
+        <label class="popup-toggle" title="取消勾选后隐藏图标(主段与二次扫描同步),文字与底框一起回到画面中心">
+          <input type="checkbox" id="chkIcon" checked /> 显示图标
+        </label>
+        <div class="icon-nudge" id="iconNudgeRow" title="隐藏图标后,文字(及底框)的左右微调:某些字体字形存在固有光学偏差,预览时调到观感正中即可(SVG/Canvas、导出均生效)">
+          <span class="timing-name">居中微调</span>
+          <button type="button" id="btnNudgeL" class="nudge-btn" title="向左微调">◀</button>
+          <span id="iconNudgeVal" class="nudge-val">0 px</span>
+          <button type="button" id="btnNudgeR" class="nudge-btn" title="向右微调">▶</button>
+          <button type="button" id="btnNudgeReset" class="nudge-btn" title="重置为 0">重置</button>
+        </div>
+        <label class="icon-upload" title="上传本地图片作为图标(PNG/JPG/WebP,≤2MB)">
+          <input type="file" id="iconFile" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
+          <span>＋ 上传自定义图标</span>
+        </label>
+        <ul id="iconList"></ul>
+        </div>
+        <div id="popupSection">
         <h3>弹窗图层 <span id="popupCount"></span></h3>
         <div class="popup-panel">
           <label class="popup-toggle" title="显示/隐藏 windows_animation.json 弹窗(与主动画同帧号同步)">
@@ -78,6 +150,7 @@
           <h4>弹窗颜色(蒙版除外) <span id="popupShapeCount"></span></h4>
           <ul id="popupShapeList"></ul>
           <p class="popup-note">提示:名称含「蒙版」的图层不可改色;弹窗文字默认居中对齐,编辑文字后仍保持居中。</p>
+        </div>
         </div>
       </aside>
     </main>

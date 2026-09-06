@@ -12,6 +12,9 @@
 
 * { box-sizing: border-box; }
 
+/* 确保 hidden 属性真实生效,不被 .transport label 等 display 覆盖 */
+[hidden] { display: none !important; }
+
 html, body { margin: 0; height: 100%; }
 
 body {
@@ -41,6 +44,22 @@ body {
   padding: 1px 6px;
   margin-left: 8px;
   vertical-align: 1px;
+}
+/* 动画切换选择器 */
+.anim-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  color: var(--dim);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.anim-switch-label { font-size: 12px; }
+.anim-switch select {
+  min-width: 0;
+  width: 150px;
+  flex: none;
 }
 .picker { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 320px; }
 
@@ -144,6 +163,19 @@ label.btn-file:hover { border-color: var(--accent); }
 .export-hint.warn { color: #fbbf24; }
 select:disabled { opacity: 0.55; cursor: not-allowed; }
 input[type="color"] { padding: 0; width: 34px; height: 26px; }
+
+/* 侧边栏「动画时长」区块 */
+.timing-row { display: flex; flex-direction: column; gap: 10px; padding: 2px 0 12px; }
+.timing-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--dim);
+  font-size: 13px;
+}
+.timing-item .timing-name { min-width: 78px; white-space: nowrap; }
+.timing-item input[type="range"] { flex: 1; min-width: 0; accent-color: var(--accent); }
+.timing-item > span:last-child { min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; color: var(--text); }
 
 /* 侧栏 */
 .side-panel {
@@ -252,6 +284,108 @@ input[type="color"] { padding: 0; width: 34px; height: 26px; }
   flex-wrap: wrap;
   gap: 10px;
 }
+.t-opacity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--dim);
+}
+.t-opacity input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  height: 4px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.o-val {
+  width: 38px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+/* 图标选择网格 */
+.icon-upload {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding: 7px 10px;
+  font-size: 12px;
+  color: var(--accent);
+  background: var(--panel-2);
+  border: 1px dashed var(--accent);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.icon-upload:hover { background: rgba(59, 130, 246, 0.1); }
+/* 隐藏图标居中微调 */
+.icon-nudge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+.icon-nudge .nudge-btn {
+  padding: 2px 9px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text, #dbe1ea);
+  background: var(--panel-2, #1c2027);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 5px;
+  cursor: pointer;
+}
+.icon-nudge .nudge-btn:hover { background: rgba(59, 130, 246, 0.18); }
+.icon-nudge .nudge-val {
+  min-width: 52px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent, #60a5fa);
+}
+#iconList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+  gap: 8px;
+}
+.icon-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 4px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.icon-item:hover { border-color: var(--accent); }
+.icon-item.is-active {
+  border-color: var(--accent);
+  background: rgba(59, 130, 246, 0.12);
+}
+.icon-thumb {
+  width: 44px;
+  height: 44px;
+  object-fit: contain;
+  image-rendering: auto;
+}
+.icon-name {
+  font-size: 10px;
+  color: var(--dim);
+  text-align: center;
+  word-break: break-all;
+  line-height: 1.2;
+}
+.icon-item.is-active .icon-name { color: var(--accent); }
 
 /* 弹窗面板 */
 .popup-panel {
