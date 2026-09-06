@@ -623,6 +623,7 @@ const iconList = $<HTMLUListElement>('iconList');
 const iconCount = $<HTMLElement>('iconCount');
 const iconFile = $<HTMLInputElement>('iconFile');
 const chkIcon = $<HTMLInputElement>('chkIcon');
+const iconNudgeRow = $<HTMLDivElement>('iconNudgeRow'); // 居中微调行:仅「显示图标」取消勾选(图标隐藏)后显示
 const chkPopup = $<HTMLInputElement>('chkPopup');
 const popupLayer = $<HTMLDivElement>('popupLayer');
 const popupCount = $<HTMLElement>('popupCount');
@@ -3258,6 +3259,8 @@ function captureIconState() {
 
 function setIconVisible(visible: boolean, rerender = true) {
   iconVisible = visible;
+  // 居中微调组件仅在取消显示图标(图标隐藏)后出现;恢复显示图标时收回
+  iconNudgeRow.hidden = iconVisible;
   if (!currentData) return;
   const iconInds = [5];
   const textInds = [4];
