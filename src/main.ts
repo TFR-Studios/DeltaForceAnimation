@@ -2,6 +2,12 @@ import lottie, { type AnimationItem } from 'lottie-web';
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import './style.css';
 
+/* 音效与共享字体资源:独立小文件(?url 打包为静态资源),不进入大体积动画数据 chunk */
+import bundledAudioUrl from '../animation/gunmuchenggong.mp3?url';
+import exposedAudioUrl from '../animation_2/UI_C201_Energy_Scout_Bow_Scout_02.wav?url';
+import fontMediumUrl from '../animation/fonts/ProjectDType-Medium.ttf?url';
+import fontCurveUrl from '../animation/fonts/ProjectDTypeCurve-Bold.ttf?url';
+
 /* ---------- 启动加载界面 ----------
  * #app-loading 的样式是内联在 index.html 中的(不依赖本文件 import 的 style.css),
  * 因此在样式表加载完成前即可渲染显示;本模块在 import 到 style.css 之后执行,
@@ -120,6 +126,14 @@ const audioFactory = (assetPath: string) => {
   };
 };
 
+/* ④ 声音优先加载:页面启动即预载两套音效(文件很小),音频请求先于大体积
+ * 动画数据包发出;配合「数据按需加载」,用户触发播放时音效已就绪(不再卡顿)。 */
+function prefetchAudios() {
+  audioFactory(bundledAudioUrl);
+  audioFactory(exposedAudioUrl);
+}
+void prefetchAudios();
+
 /* 在 lottie 的 AnimationItem.destroy 中先暂停音频:
  * 动画销毁(切换/重建/导出结束)时 lottie 不会暂停音频层,若不处理,
  * 缓存的音频元素会继续播放,切换到其他动画时会出现声音重叠。 */
@@ -139,15 +153,38 @@ function patchAudioDestroy(animItem: any) {
 }
 
 /* ---------- 字体预加载 ----------
- * Bodymovin 可将 TTF 字体文件以 base64 内嵌在 fonts.list[].fPath 中。
- * 通过 FontFace API 注册到浏览器,使 SVG/Canvas 都能用真实字体渲染文字。
+ * Bodymovin 可将 TTF 字体以 base64 内嵌在 fonts.list[].fPath 中。为减小数据包
+ * 体积,各动画 JSON 内的字体已剥离为仓库唯一的共享字体文件(animation/fonts/),
+ * 按 fFamily/fName 映射到对应资源 URL;同一 URL 的字节只下载一次,多个 family
+ * 名共用,通过 FontFace API 注册到浏览器,使 SVG/Canvas 都能用真实字体渲染文字。
  */
 const loadedFontFamilies = new Set<string>();
+
+/* 外部字体资源:与动画 JSON fonts.list 中被剥离的 fPath 一一对应 */
+const EXTERNAL_FONT_URLS: Record<string, string> = {
+  'ProjectD Type': fontMediumUrl,
+  'ProjectDType-Medium': fontMediumUrl,
+  'ProjectD Type Curve': fontCurveUrl,
+  'ProjectDTypeCurve-Bold': fontCurveUrl,
+};
+
+/* 同一字体二进制只取一次(内存缓存),供多个 family 名注册 FontFace */
+const fontBinaryCache = new Map<string, Promise<ArrayBuffer | null>>();
+function fetchFontBinary(url: string): Promise<ArrayBuffer | null> {
+  let p = fontBinaryCache.get(url);
+  if (!p) {
+    p = fetch(url).then((resp) => (resp.ok ? resp.arrayBuffer() : null)).catch(() => null);
+    fontBinaryCache.set(url, p);
+  }
+  return p;
+}
 
 async function loadEmbeddedFonts(data: any) {
   const list: any[] = data?.fonts?.list ?? [];
   const jobs = list.map(async (f: any) => {
-    if (typeof f.fPath !== 'string' || !f.fPath.length) return;
+    const fPath = typeof f.fPath === 'string' ? f.fPath : '';
+    const extUrl: string = !fPath ? (EXTERNAL_FONT_URLS[f.fFamily ?? ''] ?? EXTERNAL_FONT_URLS[f.fName ?? ''] ?? '') : '';
+    if (!fPath && !extUrl) return;
     const families: string[] = [];
     if (f.fFamily) families.push(f.fFamily);
     if (f.fName && !families.includes(f.fName)) families.push(f.fName);
@@ -158,9 +195,17 @@ async function loadEmbeddedFonts(data: any) {
           loadedFontFamilies.add(fam);
           continue;
         }
-        const ff = new FontFace(fam, 'url("' + f.fPath + '")');
-        await ff.load();
-        document.fonts.add(ff);
+        const face = fPath
+          ? new FontFace(fam, 'url("' + fPath + '")') // 兼容仍内嵌 base64 的旧数据
+          : (() => {
+              const bufPromise = fetchFontBinary(extUrl);
+              return bufPromise.then((buf) => (buf ? new FontFace(fam, buf) : null));
+            })();
+        const loaded = await face;
+        if (loaded) {
+          await loaded.load();
+          document.fonts.add(loaded);
+        }
         loadedFontFamilies.add(fam);
       } catch { /* 字体加载失败时回退系统字体 */ }
     }
@@ -2794,17 +2839,16 @@ function reRenderPreservingStateCore(onSettled?: () => void) {
   }, 1500);
 }
 
-/* ---------- 载入来源 ----------
- * animation_data.json 已打包进网站,启动时直接解析加载,无需服务器接口。
+/* ---------- 载入来源(按需加载) ----------
+ * 两个动画的 JSON 体积很大(撤离动画内嵌 613 帧序列图等)。原先全部静态 import,
+ * 页面一打开浏览器就要下载全部数据包(约 28 MB)主程序才能启动;现改为动态
+ * import 按需加载:进入页面只拉默认动画,切换动画时才下载另一份(浏览器会缓存)。
+ * 声音资源小,已在启动时立即预载(prefetchAudios),先于数据包开始下载。
  * 音频不使用 JSON 内嵌版本,改用 animation 目录下的音频文件(一并打包进网站)。 */
-import animationDataJson from '../animation/animation_data.json?raw';
-import bundledAudioUrl from '../animation/gunmuchenggong.mp3?url';
-import exposedAudioUrl from '../animation_2/UI_C201_Energy_Scout_Bow_Scout_02.wav?url';
-import windowsAnimationRaw from '../animation/windows animation/windows_animation.json?raw';
-import animation2DataJson from '../animation_2/animation_data.json?raw';
 
-/* 位置暴露动画可选图标:animation_2/icon/*.png 打包进网站,供用户选择替换图标图层 */
-const iconModules = import.meta.glob('../animation_2/icon/*.png', {
+/* 位置暴露动画可选图标:animation_2/icon/*.webp(WebP,体积约为原 PNG 的 55%)
+ * 打包进网站,供用户选择替换图标图层 */
+const iconModules = import.meta.glob('../animation_2/icon/*.webp', {
   eager: true,
   query: '?url',
   import: 'default',
@@ -2812,109 +2856,121 @@ const iconModules = import.meta.glob('../animation_2/icon/*.png', {
 const ICON_OPTIONS = Object.entries(iconModules)
   .map(([path, url]) => ({ name: path.split('/').pop() ?? '', url }))
   .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-const DEFAULT_ICON_NAME = 'Hero_Sp_03.png'; // 默认图标
+const DEFAULT_ICON_NAME = 'Hero_Sp_03.webp'; // 默认图标
 
-let bootAnimation: any;
-try {
-  // 剥离 JSON 内嵌的旧音频(base64),确保运行时不再使用
-  const stripped = animationDataJson.replace(/"data:audio[^"]*"/g, '""');
-  bootAnimation = JSON.parse(stripped);
-  // 把音频资源指向打包的音频文件(预览播放与导出均使用它)
-  for (const a of bootAnimation.assets ?? []) {
-    if (typeof a.id === 'string' && a.id.toLowerCase().includes('audio')) {
-      a.p = bundledAudioUrl;
-      a.u = '';
-      a.e = 1;
+let bootAnimation: any = null;
+let bootDataPromise: Promise<void> | null = null;
+
+/* 撤离动画(animation_data.json)+ 弹窗动画(windows_animation.json)数据加载 */
+async function ensureExtractionData(): Promise<void> {
+  if (bootAnimation && popupData) return;
+  if (bootDataPromise) return bootDataPromise;
+  bootDataPromise = (async () => {
+    try {
+      if (!bootAnimation) {
+        // 剥离 JSON 内嵌的旧音频(base64),确保运行时不再使用
+        const { default: animationDataJson } = await import('../animation/animation_data.json?raw');
+        const stripped = animationDataJson.replace(/"data:audio[^"]*"/g, '""');
+        bootAnimation = JSON.parse(stripped);
+        // 把音频资源指向打包的音频文件(预览播放与导出均使用它)
+        for (const a of bootAnimation.assets ?? []) {
+          if (typeof a.id === 'string' && a.id.toLowerCase().includes('audio')) {
+            a.p = bundledAudioUrl;
+            a.u = '';
+            a.e = 1;
+          }
+        }
+      }
+      if (!popupData) {
+        /* 弹窗动画(windows_animation.json):不含音频/图片资源,剥离字体后仅剩图层文本 */
+        const { default: windowsAnimationRaw } = await import('../animation/windows animation/windows_animation.json?raw');
+        popupData = JSON.parse(windowsAnimationRaw);
+      }
+    } catch (e) {
+      console.error('[内置动画数据解析失败]', e);
+      setStatus('内置动画数据解析失败: ' + (e as Error).message, true);
     }
-  }
-} catch (e) {
-  console.error('[内置动画数据解析失败]', e);
-  setStatus('内置动画数据解析失败: ' + (e as Error).message, true);
+    // 若仍有未加载部分,允许下次重试
+    if (!bootAnimation || !popupData) bootDataPromise = null;
+  })();
+  return bootDataPromise;
 }
 
-/* 弹窗动画(windows_animation.json)同样打包进网站,启动时解析。
- * 不含音频/图片资源,仅内嵌字体。 */
-try {
-  popupData = JSON.parse(windowsAnimationRaw);
-} catch (e) {
-  console.error('[弹窗动画数据解析失败]', e);
-  setStatus('弹窗动画数据解析失败: ' + (e as Error).message, true);
-}
-
-/* 位置暴露动画(animation_2/animation_data.json)打包进网站。
- * 其内嵌音频为 Bodymovin 导出的坏占位符(data:audio/mp3;base64,undefined),
- * 剥离后注入独立的 WAV 音效资源(音频层 refId=audio_0 指向打包的 WAV 文件)。 */
 let animation2Data: any = null;
-let baiyechuangOriginalData: string | null = null; // 百叶窗原始图片 data URI,供调色重置
-try {
-  const stripped2 = animation2DataJson.replace(/"data:audio[^"]*"/g, '""');
-  animation2Data = JSON.parse(stripped2);
-  // 注入音效资源:音频层 refId=audio_0 使用打包的 WAV 文件(预览播放与导出均使用它)。
-  // 原始 JSON 已存在 audio_0 资源,但其 p 为坏占位符(剥离后为空),需覆盖其路径。
-  animation2Data.assets = animation2Data.assets ?? [];
-  const audioAsset = animation2Data.assets.find((a: any) => a.id === 'audio_0');
-  if (audioAsset) {
-    audioAsset.p = exposedAudioUrl;
-    audioAsset.u = '';
-    audioAsset.e = 1;
-  } else {
-    animation2Data.assets.push({ id: 'audio_0', p: exposedAudioUrl, u: '', e: 1 });
-  }
-  // 修复音频层音量:au.lv 为 [0,0] 会被 lottie 当作静音,改为满音量并按 AUDIO_VOLUME 调低
-  const fixAudioVol = (layers: any[]) => {
-    for (const l of layers ?? []) {
-      if (l.ty === 6 && l.au && l.au.lv) l.au.lv.k = [Math.round(AUDIO_VOLUME * 100)];
-      if (Array.isArray(l.layers)) fixAudioVol(l.layers);
-    }
-  };
-  fixAudioVol(animation2Data.layers);
-  // 记录百叶窗.png 引用的原始图片资源
-  const baiyechuangLayer = (animation2Data.layers ?? []).find((l: any) => l.ty === 2 && l.nm === '百叶窗.png');
-  if (baiyechuangLayer) {
-    const asset = (animation2Data.assets ?? []).find((a: any) => a.id === baiyechuangLayer.refId);
-    if (asset && typeof asset.p === 'string') baiyechuangOriginalData = asset.p;
-  }
-} catch (e) {
-  console.error('[位置暴露动画数据解析失败]', e);
-  setStatus('位置暴露动画数据解析失败: ' + (e as Error).message, true);
-}
-
-// 默认图标:把图标图层(image_0)资源指向 Hero_Sp_03.png,保证默认一致
-{
-  const defIcon = ICON_OPTIONS.find((o) => o.name === DEFAULT_ICON_NAME);
-  const iconAsset = (animation2Data?.assets ?? []).find((a: any) => a.id === 'image_0');
-  if (defIcon && iconAsset) {
-    iconAsset.p = defIcon.url;
-    iconAsset.u = '';
-    iconAsset.e = 1;
-  }
-}
-
-/* ---------- 二次扫描动画(animation_data_next.json)合并 ----------
- * 开启「显示二次扫描」后,主动画播完紧接着播第二段。实现方式:把第二段图层
- * 重新编号(ind+100)、资源重命名(id+_n)、关键帧整体平移后并入主动画数据,
- * 使时间轴连续,导出视频与编辑功能天然支持两段。 */
-import animation2NextRaw from '../animation_2/animation_data_next_fixed.json?raw';
-
 let animation2NextData: any = null;
+let exposedDataPromise: Promise<void> | null = null;
+let baiyechuangOriginalData: string | null = null; // 百叶窗原始图片 data URI,供调色重置
 let baiyechuang2OriginalData: string | null = null; // 百叶窗2(二次扫描)原始图片 data URI,供调色重置
 let guangOriginalData: string | null = null; // 光.png(二次扫描)原始图片 data URI,供调色重置
-try {
-  animation2NextData = JSON.parse(animation2NextRaw);
-  // 记录百叶窗2.png / 光.png 引用的原始图片资源(合并后资源 id 分别为 image_2_n / image_1_n)
-  const recordOrigImage = (nm: string, setter: (p: string) => void) => {
-    const layer = (animation2NextData?.layers ?? []).find((l: any) => l.ty === 2 && l.nm === nm);
-    if (!layer) return;
-    const asset = (animation2NextData?.assets ?? []).find((a: any) => a.id === layer.refId);
-    if (asset && typeof asset.p === 'string') setter(asset.p);
-  };
-  recordOrigImage('百叶窗2.png', (p) => { baiyechuang2OriginalData = p; });
-  recordOrigImage('光.png', (p) => { guangOriginalData = p; });
-} catch (e) {
-  console.error('[二次扫描动画数据解析失败]', e);
-  setStatus('二次扫描动画数据解析失败: ' + (e as Error).message, true);
-}
 
+/* 位置暴露动画(animation_data.json + 二次扫描 animation_data_next_fixed.json)数据加载。
+ * 其内嵌音频为 Bodymovin 导出的坏占位符(data:audio/mp3;base64,undefined),
+ * 剥离后注入独立的 WAV 音效资源(音频层 refId=audio_0 指向打包的 WAV 文件)。 */
+async function ensureExposedData(): Promise<void> {
+  if (animation2Data && animation2NextData) return;
+  if (exposedDataPromise) return exposedDataPromise;
+  exposedDataPromise = (async () => {
+    try {
+      if (!animation2Data) {
+        const { default: animation2DataJson } = await import('../animation_2/animation_data.json?raw');
+        const stripped2 = animation2DataJson.replace(/"data:audio[^"]*"/g, '""');
+        animation2Data = JSON.parse(stripped2);
+        // 注入音效资源:音频层 refId=audio_0 使用打包的 WAV 文件(预览播放与导出均使用它)。
+        // 原始 JSON 已存在 audio_0 资源,但其 p 为坏占位符(剥离后为空),需覆盖其路径。
+        animation2Data.assets = animation2Data.assets ?? [];
+        const audioAsset = animation2Data.assets.find((a: any) => a.id === 'audio_0');
+        if (audioAsset) {
+          audioAsset.p = exposedAudioUrl;
+          audioAsset.u = '';
+          audioAsset.e = 1;
+        } else {
+          animation2Data.assets.push({ id: 'audio_0', p: exposedAudioUrl, u: '', e: 1 });
+        }
+        // 修复音频层音量:au.lv 为 [0,0] 会被 lottie 当作静音,改为满音量并按 AUDIO_VOLUME 调低
+        const fixAudioVol = (layers: any[]) => {
+          for (const l of layers ?? []) {
+            if (l.ty === 6 && l.au && l.au.lv) l.au.lv.k = [Math.round(AUDIO_VOLUME * 100)];
+            if (Array.isArray(l.layers)) fixAudioVol(l.layers);
+          }
+        };
+        fixAudioVol(animation2Data.layers);
+        // 记录百叶窗.png 引用的原始图片资源
+        const baiyechuangLayer = (animation2Data.layers ?? []).find((l: any) => l.ty === 2 && l.nm === '百叶窗.png');
+        if (baiyechuangLayer) {
+          const asset = (animation2Data.assets ?? []).find((a: any) => a.id === baiyechuangLayer.refId);
+          if (asset && typeof asset.p === 'string') baiyechuangOriginalData = asset.p;
+        }
+        // 默认图标:把图标图层(image_0)资源指向 Hero_Sp_03.webp,保证默认一致
+        const defIcon = ICON_OPTIONS.find((o) => o.name === DEFAULT_ICON_NAME);
+        const iconAsset = (animation2Data?.assets ?? []).find((a: any) => a.id === 'image_0');
+        if (defIcon && iconAsset) {
+          iconAsset.p = defIcon.url;
+          iconAsset.u = '';
+          iconAsset.e = 1;
+        }
+      }
+      if (!animation2NextData) {
+        const { default: animation2NextRaw } = await import('../animation_2/animation_data_next_fixed.json?raw');
+        animation2NextData = JSON.parse(animation2NextRaw);
+        // 记录百叶窗2.png / 光.png 引用的原始图片资源(合并后资源 id 分别为 image_2_n / image_1_n)
+        const recordOrigImage = (nm: string, setter: (p: string) => void) => {
+          const layer = (animation2NextData?.layers ?? []).find((l: any) => l.ty === 2 && l.nm === nm);
+          if (!layer) return;
+          const asset = (animation2NextData?.assets ?? []).find((a: any) => a.id === layer.refId);
+          if (asset && typeof asset.p === 'string') setter(asset.p);
+        };
+        recordOrigImage('百叶窗2.png', (p: string) => { baiyechuang2OriginalData = p; });
+        recordOrigImage('光.png', (p: string) => { guangOriginalData = p; });
+      }
+    } catch (e) {
+      console.error('[位置暴露动画数据解析失败]', e);
+      setStatus('位置暴露动画数据解析失败: ' + (e as Error).message, true);
+    }
+    // 若仍有未加载部分,允许下次重试
+    if (!animation2Data || !animation2NextData) exposedDataPromise = null;
+  })();
+  return exposedDataPromise;
+}
 /* 递归偏移对象中所有动画属性({a:1, k:[{t,...}]})的关键帧时刻 t */
 function offsetKeyframes(obj: any, delta: number) {
   if (!obj || typeof obj !== 'object') return;
@@ -3114,11 +3170,12 @@ function offsetSecondSegment(data: any, delta: number) {
 }
 
 /* 动画注册表:每个动画独立的数据 / 弹窗 / 音频。
- * 切换动画时 popupData 会随之替换,弹窗相关函数(基于全局 popupData)自动适配。 */
-type AnimDef = { key: string; label: string; data: any; popup: any; audio: string | null };
+ * 数据改为按需加载后,bootAnimation/animation2Data 在启动时可能尚未就绪,
+ * 因此以 getter 形式提供;使用前需先 await ensureExtractionData()/ensureExposedData()。 */
+type AnimDef = { key: string; label: string; data: () => any; popup: () => any; audio: string | null };
 const ANIMATIONS: AnimDef[] = [
-  { key: 'extraction', label: '撤离动画', data: bootAnimation, popup: popupData, audio: bundledAudioUrl },
-  { key: 'exposed', label: '位置暴露动画', data: animation2Data, popup: null, audio: exposedAudioUrl },
+  { key: 'extraction', label: '撤离动画', data: () => bootAnimation, popup: () => popupData, audio: bundledAudioUrl },
+  { key: 'exposed', label: '位置暴露动画', data: () => animation2Data, popup: () => null, audio: exposedAudioUrl },
 ];
 let currentAnimKey = 'extraction';
 
@@ -3330,19 +3387,26 @@ iconFile.addEventListener('change', () => {
   reader.readAsDataURL(file);
 });
 
-function switchAnimation(key: string) {
+async function switchAnimation(key: string) {
   const def = ANIMATIONS.find((a) => a.key === key);
-  if (!def || !def.data) return;
+  if (!def) return;
+  // 数据按需加载:仅首次进入该动画时才动态拉取其数据包(已加载则直接复用)
+  if (key === 'exposed') {
+    await ensureExposedData();
+  } else {
+    await ensureExtractionData();
+  }
+  if (!def.data()) return;
   currentAnimKey = key;
   // 弹窗数据随动画切换;切换后默认关闭弹窗
-  popupData = def.popup;
+  popupData = def.popup();
   popupVisible = false;
   chkPopup.checked = false;
   destroyPopupAnim();
   popupLayer.hidden = true;
   const popupSection = document.getElementById('popupSection');
-  if (popupSection) popupSection.hidden = !def.popup;
-  if (def.popup) {
+  if (popupSection) popupSection.hidden = !def.popup();
+  if (def.popup()) {
     capturePopupOriginalState();
     renderPopupLists();
   } else {
@@ -3353,7 +3417,7 @@ function switchAnimation(key: string) {
     popupShapeList.innerHTML = '';
   }
   // 位置暴露动画:数据始终用 animation2Data 当前值(可能已合并二次扫描/含编辑状态)
-  const data = key === 'exposed' ? animation2Data : def.data;
+  const data = key === 'exposed' ? animation2Data : def.data();
   // 图片图层区块:仅当前动画含可调色图片(百叶窗.png)时显示
   const hasBaiyechuang = (data.layers ?? []).some((l: any) => l.ty === 2 && l.nm === '百叶窗.png');
   imageSection.hidden = !hasBaiyechuang;
@@ -3370,7 +3434,6 @@ function switchAnimation(key: string) {
   if (isExposed) syncNextDurationSlider();
   void loadData(data, def.label);
 }
-
 /* ---------- 视频导出 ---------- */
 let exporting = false;
 
@@ -4144,19 +4207,24 @@ btnExport.addEventListener('click', exportVideo);
 
 /* 动画选择器:切换撤离 / 位置暴露动画 */
 const selAnim = $<HTMLSelectElement>('selAnim');
-selAnim.addEventListener('change', () => switchAnimation(selAnim.value));
+selAnim.addEventListener('change', () => void switchAnimation(selAnim.value));
 
-if (bootAnimation) {
-  void loadData(bootAnimation, '撤离动画');
+/* 启动流程:声音已在模块加载时预载(prefetchAudios,先于数据包),
+ * 此处只等待默认动画数据包按需加载完成,再构建动画与弹窗。 */
+async function bootApp() {
+  await ensureExtractionData();
+  // 等待期间用户可能已切换到位置暴露动画:由 switchAnimation 负责加载,跳过默认加载
+  if (currentAnimKey === 'extraction' && bootAnimation) {
+    void loadData(bootAnimation, '撤离动画');
+  }
+  /* 弹窗初始化:记录原始状态、渲染编辑列表、定位图标、加载弹窗叠加层(字体就绪后) */
+  if (currentAnimKey === 'extraction' && popupData) {
+    capturePopupOriginalState();
+    renderPopupLists();
+    void loadEmbeddedFonts(popupData).then(() => {
+      positionPopupIcon(0); // 感叹号图标初始定位到文字图层左侧
+      if (chkPopup.checked) rebuildPopupOverlay();
+    });
+  }
 }
-
-/* 弹窗初始化:记录原始状态、渲染编辑列表、定位图标、加载弹窗叠加层(字体就绪后) */
-if (popupData) {
-  capturePopupOriginalState();
-  renderPopupLists();
-  void loadEmbeddedFonts(popupData).then(() => {
-    positionPopupIcon(0); // 感叹号图标初始定位到文字图层左侧
-    if (chkPopup.checked) rebuildPopupOverlay();
-  });
-}
-
+void bootApp();
