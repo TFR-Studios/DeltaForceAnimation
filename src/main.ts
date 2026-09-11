@@ -2934,17 +2934,32 @@ async function fetchJsonBundle(urls: string[], onProgress?: (p: number | null) =
   return outs;
 }
 
-/* 位置暴露动画可选图标:animation_2/icon/*.webp(WebP,体积约为原 PNG 的 55%)
- * 打包进网站,供用户选择替换图标图层 */
-const iconModules = import.meta.glob('../animation_2/icon/*.webp', {
+/* 位置暴露动画可选图标:animation_2/icon/*.webp(仓库现以 WebP 存放,体积约为 PNG 的 43%;
+ * 用 PNG 存放同样识别)。打包进网站,供用户选择替换图标图层;两种扩展名都收,
+ * 避免素材换格式后列表变空 */
+const iconModules = import.meta.glob('../animation_2/icon/*.{png,webp}', {
   eager: true,
   query: '?url',
   import: 'default',
 }) as Record<string, string>;
-const ICON_OPTIONS = Object.entries(iconModules)
-  .map(([path, url]) => ({ name: path.split('/').pop() ?? '', url }))
-  .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-const DEFAULT_ICON_NAME = 'Hero_Sp_03.webp'; // 默认图标
+const ICON_OPTIONS = (() => {
+  // 同名图标同时存在 PNG 与 WebP 时只保留 WebP(体积约为 PNG 的 40%),避免列表出现重名重复项
+  const byBase = new Map<string, { name: string; url: string }>();
+  for (const [path, url] of Object.entries(iconModules)) {
+    const name = path.split('/').pop() ?? '';
+    const base = name.replace(/\.[^.]+$/, '');
+    const prev = byBase.get(base);
+    const isWebp = /\.webp$/i.test(name);
+    if (prev && !(isWebp && !/\.webp$/i.test(prev.name))) continue;
+    byBase.set(base, { name, url });
+  }
+  return [...byBase.values()].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+})();
+const DEFAULT_ICON_BASE = 'Hero_Sp_03'; // 默认图标(不含扩展名,PNG/WebP 均可)
+const DEFAULT_ICON_NAME =
+  ICON_OPTIONS.find((o) => o.name.replace(/\.[^.]+$/, '') === DEFAULT_ICON_BASE)?.name ??
+  ICON_OPTIONS[0]?.name ??
+  DEFAULT_ICON_BASE + '.png';
 
 let bootAnimation: any = null;
 let bootDataPromise: Promise<void> | null = null;

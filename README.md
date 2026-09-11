@@ -122,7 +122,7 @@ npm run preview  # 本地预览构建产物(与线上一致)
 ```text
 .
 ├── animation/        # 撤离动画(JSON/音频/弹窗/序列图)
-├── animation_2/      # 位置暴露动画(JSON/WAV/可选图标 PNG)
+├── animation_2/      # 位置暴露动画(JSON/WAV/可选图标 WebP)
 ├── src/
 │   ├── main.ts       # 编辑器全部逻辑(入口)
 │   ├── style.css
@@ -142,7 +142,9 @@ npm run preview  # 本地预览构建产物(与线上一致)
 - **新增一套动画**:在 `src/main.ts` 顶部 `import` 新 JSON(含可选弹窗 JSON 与音频),然后在 `ANIMATIONS` 注册表加一项,顶栏下拉会自动出现;
 - **更换音频**:替换对应 `.mp3/.wav`(保持文件名),或改 `src/main.ts` 的导入;
 - **更换字体**:在动画 JSON 的 `fonts.list` 中提供 `fPath`(base64 TTF),编辑器会自动加载;无内嵌字体则回退系统字体;
-- **更换/新增图标**:把 PNG 放进 `animation_2/icon/`,重启 dev 后自动出现在「图标选择」里。
+- **更换/新增图标**:把图片(PNG/WebP)放进 `animation_2/icon/`,重启 dev 后自动出现在「图标选择」里
+  (同名同时存在 PNG 与 WebP 时只显示 WebP)。建议转成 WebP 减小体积:`python tools/png-to-webp.py --delete-png`
+  (q=95,alpha 无损,体积约为 PNG 的 43%)。
 
 ---
 
