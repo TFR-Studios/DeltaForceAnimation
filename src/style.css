@@ -172,7 +172,34 @@ label.btn-file:hover { border-color: var(--accent); }
   flex-wrap: wrap;
   font-size: 13px;
 }
-.play-btn { width: 42px; font-size: 15px; }
+
+/* ---------- 矢量图标(统一用内联 SVG,不使用 emoji / 文字符号) ---------- */
+/* .bi 对齐 13~14px 正文行高;描边和填充都用 currentColor,跟随按钮文字色(含 hover) */
+.bi {
+  width: 14px;
+  height: 14px;
+  display: block;
+  fill: currentColor;
+  flex: none;
+  pointer-events: none; /* 点击穿透到按钮,避免 svg 成为事件目标 */
+}
+.bi-lg { width: 17px; height: 17px; }
+/* 播放/暂停两枚图标叠在同一格,切换时不产生宽度跳动 */
+.ico-stack { display: grid; place-items: center; }
+.ico-stack > .bi { grid-area: 1 / 1; }
+
+/* 播放条上的纯图标按钮(回到开头 / 播放暂停):不要用 :has() 去改全局 button 的 padding,
+ * 否则它们会退化成"图标宽度 + 边框"的细条(实测 16×28,点击区过小)。
+ * 这里显式给同一尺寸,只把内边距归零,默认 button padding 不影响最终宽高。 */
+.transport .icon-btn {
+  width: 38px;
+  height: 28px;
+  padding: 0;
+  display: inline-grid;
+  place-items: center;
+}
+.transport .icon-btn .bi { width: 15px; height: 15px; }
+.transport .icon-btn:hover { border-color: var(--accent); color: #fff; }
 .transport label { display: flex; align-items: center; gap: 6px; color: var(--dim); }
 .transport input[type="range"] { accent-color: var(--accent); }
 .transport input[type="checkbox"] { accent-color: var(--accent); }
@@ -251,6 +278,10 @@ input[type="color"] { padding: 0; width: 34px; height: 26px; }
 }
 .t-reset {
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
   padding: 2px 8px;
   font-size: 11px;
   color: var(--dim);
@@ -345,6 +376,7 @@ input[type="color"] { padding: 0; width: 34px; height: 26px; }
   cursor: pointer;
   transition: background 0.15s ease;
 }
+.icon-upload > span { display: inline-flex; align-items: center; gap: 6px; }
 .icon-upload:hover { background: rgba(59, 130, 246, 0.1); }
 /* 隐藏图标居中微调 */
 .icon-nudge {
@@ -355,9 +387,11 @@ input[type="color"] { padding: 0; width: 34px; height: 26px; }
   font-size: 12px;
 }
 .icon-nudge .nudge-btn {
-  padding: 2px 9px;
+  padding: 3px 7px;
   font-size: 12px;
   line-height: 1.5;
+  display: inline-grid;
+  place-items: center;
   color: var(--text, #dbe1ea);
   background: var(--panel-2, #1c2027);
   border: 1px solid rgba(255, 255, 255, 0.14);
@@ -501,7 +535,14 @@ input[type="color"] { padding: 0; width: 34px; height: 26px; }
   gap: 12px;
   margin-bottom: 14px;
 }
-.export-title { font-size: 17px; font-weight: 700; }
+.export-title {
+  font-size: 17px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.export-title .bi { color: var(--accent); }
 .export-format {
   font-size: 12px;
   color: var(--accent);
@@ -511,6 +552,8 @@ input[type="color"] { padding: 0; width: 34px; height: 26px; }
   white-space: nowrap;
 }
 .export-status { font-size: 13px; color: var(--dim); min-height: 18px; }
+/* 导出完成:矢量对勾(替代 "✓" 字符) */
+.export-status .bi { display: inline-block; vertical-align: -2px; margin-right: 6px; color: #34d399; }
 .export-percent {
   font-size: 52px;
   font-weight: 800;

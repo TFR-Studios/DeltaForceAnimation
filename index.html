@@ -3,7 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>" />
+    <!-- 站点图标:纯矢量(播放三角 + 胶片框),不依赖 emoji 字体 -->
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3.2' fill='%23161a20'/><path d='M4.4 3.5h1.2v9H4.4zm6 0h1.2v9H10.4z' fill='%2360a5fa'/><path d='M6.6 4.6v6.8c0 .5.55.82.98.56l5.3-3.4a.66.66 0 0 0 0-1.12l-5.3-3.4a.66.66 0 0 0-.98.56z' fill='%23dbe1ea'/></svg>" />
     <title>三角洲行动动画编辑器</title>
     <!-- 启动加载界面(内联样式):不依赖外部 CSS,在样式表加载完成前即可显示,避免白屏 -->
     <style>
@@ -55,8 +56,21 @@
             <span class="frame">帧 <b id="frameInfo">0 / 0</b> · <span id="timeInfo">0.00s</span></span>
           </div>
           <div class="transport">
-          <button id="btnRestart" type="button" title="回到开头">⏮</button>
-          <button id="btnPlay" class="play-btn" type="button" title="播放/暂停(空格键)">▶</button>
+          <button id="btnRestart" class="icon-btn" type="button" title="回到开头" aria-label="回到开头">
+            <svg class="bi" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path d="M15 1.6v12.8a.8.8 0 0 1-1.258.65L4.8 8.65v5.75a.8.8 0 0 1-1.6 0V1.6a.8.8 0 0 1 1.6 0v5.75l8.942-6.4A.8.8 0 0 1 15 1.6z"/>
+            </svg>
+          </button>
+          <button id="btnPlay" class="play-btn icon-btn" type="button" title="播放/暂停(空格键)" aria-label="播放">
+            <span class="ico-stack">
+              <svg id="icoPlay" class="bi" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                <path d="M3.2 1.72v12.56c0 .66.72 1.07 1.29.74l10.3-6.28a.86.86 0 0 0 0-1.48L4.49.98a.86.86 0 0 0-1.29.74z"/>
+              </svg>
+              <svg id="icoPause" class="bi" viewBox="0 0 16 16" aria-hidden="true" focusable="false" style="display:none">
+                <path d="M4.2 1.3h2.6a.8.8 0 0 1 .8.8v11.8a.8.8 0 0 1-.8.8H4.2a.8.8 0 0 1-.8-.8V2.1a.8.8 0 0 1 .8-.8zm5 0h2.6a.8.8 0 0 1 .8.8v11.8a.8.8 0 0 1-.8.8H9.2a.8.8 0 0 1-.8-.8V2.1a.8.8 0 0 1 .8-.8z"/>
+              </svg>
+            </span>
+          </button>
           <label class="loop"><input type="checkbox" id="chkLoop" /> 循环</label>
           <label>速度
             <input type="range" id="rngSpeed" min="0.1" max="3" step="0.1" value="1" />
@@ -127,14 +141,27 @@
         </label>
         <div class="icon-nudge" id="iconNudgeRow" hidden title="隐藏图标后,文字(及底框)的左右微调:某些字体字形存在固有光学偏差,预览时调到观感正中即可(SVG/Canvas、导出均生效)">
           <span class="timing-name">居中微调</span>
-          <button type="button" id="btnNudgeL" class="nudge-btn" title="向左微调">◀</button>
+          <button type="button" id="btnNudgeL" class="nudge-btn" title="向左微调" aria-label="向左微调">
+            <svg class="bi" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path d="M10.3 1.4a.85.85 0 0 1 1.4.66v11.88a.85.85 0 0 1-1.4.66L2.6 8.66a.86.86 0 0 1 0-1.32z"/>
+            </svg>
+          </button>
           <span id="iconNudgeVal" class="nudge-val">0 px</span>
-          <button type="button" id="btnNudgeR" class="nudge-btn" title="向右微调">▶</button>
+          <button type="button" id="btnNudgeR" class="nudge-btn" title="向右微调" aria-label="向右微调">
+            <svg class="bi" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path d="M5.7 1.4a.85.85 0 0 0-1.4.66v11.88a.85.85 0 0 0 1.4.66l7.7-5.94a.86.86 0 0 0 0-1.32z"/>
+            </svg>
+          </button>
           <button type="button" id="btnNudgeReset" class="nudge-btn" title="重置为 0">重置</button>
         </div>
         <label class="icon-upload" title="上传本地图片作为图标(PNG/JPG/WebP,≤2MB)">
           <input type="file" id="iconFile" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
-          <span>＋ 上传自定义图标</span>
+          <span>
+            <svg class="bi" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path d="M8 1.4a.9.9 0 0 1 .9.9v4.8h4.8a.9.9 0 0 1 0 1.8H8.9v4.8a.9.9 0 0 1-1.8 0V8.9H2.3a.9.9 0 0 1 0-1.8h4.8V2.3A.9.9 0 0 1 8 1.4z"/>
+            </svg>
+            上传自定义图标
+          </span>
         </label>
         <ul id="iconList"></ul>
         </div>
@@ -167,7 +194,12 @@
     <div class="export-overlay" id="exportOverlay" hidden>
       <div class="export-card">
         <div class="export-head">
-          <span class="export-title">🎬 正在导出视频</span>
+          <span class="export-title">
+            <svg class="bi bi-lg" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path d="M1.6 3.6h12.8a1.6 1.6 0 0 1 1.6 1.6v5.6a1.6 1.6 0 0 1-1.6 1.6H1.6A1.6 1.6 0 0 1 0 10.8V5.2a1.6 1.6 0 0 1 1.6-1.6zm3.7 2.1a.7.7 0 0 0-1.06.6v3.4a.7.7 0 0 0 1.06.6l2.9-1.7a.7.7 0 0 0 0-1.2zM4.5 0h7l-.6 2.4h-7z" opacity=".95"/>
+            </svg>
+            正在导出视频
+          </span>
           <span class="export-format" id="exportFormatTag"></span>
         </div>
         <div class="export-status" id="exportStatus">正在准备…</div>

@@ -587,7 +587,8 @@ async function ensureSeqDecoded(n: number) {
 }
 
 /* ---------- DOM 引用 ---------- */
-const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+/* 元素查询:放宽到 HTMLElement | SVGElement(播放/暂停等内联 SVG 也要用它取引用) */
+const $ = <T extends HTMLElement | SVGElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
 const previewStage = $<HTMLDivElement>('stage');
 const previewInner = $<HTMLDivElement>('previewInner');
@@ -638,6 +639,10 @@ let anim: AnimationItem | null = null;
 let currentData: any = null;
 let currentName = '';
 let scrubWasPlaying = false;
+/* 播放/暂停图标上次同步到的状态:仅用于「变了才写 DOM」,同时便于发现动画状态与图标不一致 */
+let transportShownPlaying: boolean | null = null;
+let transportShownAnim: AnimationItem | null = null;
+let transportWatchdog: number | null = null;
 
 const esc = (s: unknown) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string);
@@ -707,6 +712,12 @@ async function loadData(data: any, name: string) {
     anim.addEventListener('DOMLoaded', onAnimReady);
     anim.addEventListener('config_ready', onAnimReady);
     anim.addEventListener('data_failed', () => { hideAppLoading(); setStatus('动画数据解析失败,无法渲染', true); });
+    // 播到结尾自动暂停 / 循环回绕:同步播放按钮图标,否则会出现图标停在「暂停中」而画面已停的情况
+    anim.addEventListener('complete', syncTransportUI);
+    anim.addEventListener('loopComplete', syncTransportUI);
+    // 兜底看门狗:任何路径改了播放状态都能在 250ms 内把图标纠正回来(syncTransportUI 内部已做变化检测)。
+    // onAnimReady 可能被 DOMLoaded / config_ready 触发多次,这里不会重复注册定时器。
+    if (transportWatchdog === null) transportWatchdog = window.setInterval(syncTransportUI, 250);
     // lottie 实例构造时 totalFrames 即已确定;以 rAF 兜底刷新一次帧范围,
     // 防止 DOMLoaded/config_ready 在监听绑定前就已触发(如二次扫描合并数据),导致时间轴上限停在旧值。
     scheduleFrameRangeRefresh(seq);
@@ -739,10 +750,42 @@ function onAnimReady() {
 }
 
 /* ---------- 播放控制 ---------- */
+/* 动画的首帧 / 末帧:lottie 的 totalFrames 是「帧数」,末帧下标为 totalFrames-1。
+ * 用 0.5 帧容差,避免浮点帧号(如 608.9999)判不出来。 */
+function firstFrameOf(a: AnimationItem): number {
+  return a.firstFrame ?? (currentData?.ip ?? 0);
+}
+
+function isAtLastFrame(a: AnimationItem): boolean {
+  const last = (a.firstFrame ?? 0) + Math.max(0, (a.totalFrames ?? 1) - 1);
+  return a.currentFrame >= last - 0.5;
+}
+
 function updateTransport() {
-  if (!anim) return;
-  btnPlay.textContent = anim.isPaused ? '▶' : '⏸';
-  btnPlay.title = anim.isPaused ? '播放(空格键)' : '暂停(空格键)';
+  const a = anim;
+  if (!a) return;
+  // 播放/暂停用矢量图标切换(两枚图标叠在同一格,切换不产生宽度跳动)
+  const playing = !a.isPaused;
+  const icoPlay = $<SVGElement>('icoPlay');
+  const icoPause = $<SVGElement>('icoPause');
+  icoPlay.style.display = playing ? 'none' : 'block';
+  icoPause.style.display = playing ? 'block' : 'none';
+  btnPlay.title = playing ? '暂停(空格键)' : '播放(空格键)';
+  btnPlay.setAttribute('aria-label', playing ? '暂停' : '播放');
+  btnPlay.setAttribute('aria-pressed', playing ? 'true' : 'false');
+  transportShownPlaying = playing;
+  transportShownAnim = a;
+}
+
+/* 把图标同步到动画的真实状态(仅在状态变化时写 DOM,可安全地高频调用)。
+ * 之所以需要它:lottie 在「播到结尾自动暂停」「循环回绕」「重建后恢复」等路径里会自行改变
+ * isPaused,这些路径不一定经过我们的按钮回调;另外 goToAndStop() 自身也会置暂停,
+ * 若在它之后才读 anim.isPaused,就会把「正在播放」误判成「已暂停」而让图标卡住。 */
+function syncTransportUI(): void {
+  const a = anim;
+  if (!a) return;
+  if (a === transportShownAnim && transportShownPlaying === !a.isPaused) return; // 已一致,不必写 DOM
+  updateTransport();
 }
 
   function updateFrameRange() {
@@ -773,15 +816,24 @@ function updateTransport() {
 
 btnPlay.addEventListener('click', () => {
   if (!anim) return;
-  if (anim.isPaused) anim.play(); else anim.pause();
+  if (anim.isPaused) {
+    // 停在最后一帧时 lottie 认为「没有可播的帧」,play() 不会有任何反应(表现为按钮点了没动静)。
+    // 这种情况按用户预期从头开始播。
+    if (isAtLastFrame(anim)) anim.goToAndStop(firstFrameOf(anim), true);
+    anim.play();
+  } else {
+    anim.pause();
+  }
   updateTransport();
 });
 
 btnRestart.addEventListener('click', () => {
   if (!anim) return;
-  const first = anim.firstFrame ?? (currentData?.ip ?? 0);
-  anim.goToAndStop(first, true);
-  if (!anim.isPaused) anim.play();
+  // 无论之前在播放还是暂停,「回到开头」一律定格到第 0 帧(播放中也暂停)。
+  // 注意:曾用「先存 !isPaused、goToAndStop 后再选择性 play」的写法,但 goToAndStop
+  // 自身会把动画置为暂停,导致播放状态下按钮误判、画面停止而图标仍显示播放中。
+  anim.goToAndStop(firstFrameOf(anim), true);
+  updateTransport(); // 同步图标/标题/aria:定格后一律显示播放三角
 });
 
   rngFrame.addEventListener('input', () => {
@@ -1362,7 +1414,7 @@ function updateInfo(data: any) {
         '<li class="text-item">' +
         '<div class="text-item-head">' +
         '<span class="t-name">' + esc(t.nm) + '</span>' +
-        '<button class="t-reset" data-ind="' + t.ind + '" type="button" title="重置文字与颜色">↺ 重置</button>' +
+        '<button class="t-reset" data-ind="' + t.ind + '" type="button" title="重置文字与颜色">' + ICON_RESET + '重置</button>' +
         '</div>' +
         '<textarea class="t-input" rows="' + rows + '" data-ind="' + t.ind + '" spellcheck="false"></textarea>' +
         '<label class="t-color-label">颜色 <input type="color" class="t-color" data-ind="' + t.ind + '" value="' + hex + '" /><input type="text" class="hex-input" value="' + hex + '" spellcheck="false" placeholder="#rrggbb" /></label>' +
@@ -1672,13 +1724,13 @@ function renderShapeList(data: any) {
       if (strokeHex) colorHtml += '<label class="t-color-label">描边 <input type="color" class="s-stroke" data-ind="' + s.ind + '" value="' + strokeHex + '" /><input type="text" class="hex-input" value="' + strokeHex + '" spellcheck="false" placeholder="#rrggbb" /></label>';
       const rectOpacityHtml =
         dikuangVisibleInds.includes(s.ind)
-          ? '<label class="t-opacity">矩形不透明度 <input type="range" class="dr-slider" data-ind="' + s.ind + '" min="0" max="100" step="1" value="' + getDikuangRectOpacity(s.ind) + '" /><span class="o-val">' + getDikuangRectOpacity(s.ind) + '%</span><button class="t-reset dr-reset" data-ind="' + s.ind + '" type="button" title="重置矩形不透明度">↺</button></label>'
+          ? '<label class="t-opacity">矩形不透明度 <input type="range" class="dr-slider" data-ind="' + s.ind + '" min="0" max="100" step="1" value="' + getDikuangRectOpacity(s.ind) + '" /><span class="o-val">' + getDikuangRectOpacity(s.ind) + '%</span><button class="t-reset dr-reset" data-ind="' + s.ind + '" type="button" title="重置矩形不透明度">' + ICON_RESET + '</button></label>'
           : '';
       return (
         '<li class="text-item">' +
         '<div class="text-item-head">' +
         '<span class="t-name">' + esc(s.nm) + '</span>' +
-        '<button class="t-reset s-reset" data-ind="' + s.ind + '" type="button" title="重置颜色">↺ 重置</button>' +
+        '<button class="t-reset s-reset" data-ind="' + s.ind + '" type="button" title="重置颜色">' + ICON_RESET + '重置</button>' +
         '</div>' +
         '<div class="shape-colors">' + colorHtml + '</div>' +
         opacitySliderHtml(s.ind, findLayerByInd(data.layers, s.ind)) +
@@ -1736,7 +1788,7 @@ function renderImageList(data: any) {
         '<li class="text-item">' +
         '<div class="text-item-head">' +
         '<span class="t-name">' + esc(l.nm || '(未命名)') + '</span>' +
-        '<button class="t-reset i-reset" data-ref="' + esc(l.refId) + '" type="button" title="重置颜色">↺ 重置</button>' +
+        '<button class="t-reset i-reset" data-ref="' + esc(l.refId) + '" type="button" title="重置颜色">' + ICON_RESET + '重置</button>' +
         '</div>' +
         '<div class="shape-colors">' +
         '<label class="t-color-label">颜色 <input type="color" class="i-color" data-ref="' + esc(l.refId) + '" value="' + hex + '" /><input type="text" class="hex-input" value="' + hex + '" spellcheck="false" placeholder="#rrggbb" /></label>' +
@@ -2653,7 +2705,7 @@ function renderPopupLists() {
         '<li class="text-item">' +
         '<div class="text-item-head">' +
         '<span class="t-name">' + esc(t.nm) + '</span>' +
-        '<button class="t-reset pt-reset" data-ind="' + t.ind + '" type="button" title="重置文字与颜色">↺ 重置</button>' +
+        '<button class="t-reset pt-reset" data-ind="' + t.ind + '" type="button" title="重置文字与颜色">' + ICON_RESET + '重置</button>' +
         '</div>' +
         '<textarea class="t-input pt-input" rows="' + rows + '" data-ind="' + t.ind + '" spellcheck="false"></textarea>' +
         '<div class="t-row">' +
@@ -2698,7 +2750,7 @@ function renderPopupLists() {
         '<li class="text-item">' +
         '<div class="text-item-head">' +
         '<span class="t-name">' + esc(s.nm) + '</span>' +
-        '<button class="t-reset pt-reset" data-ind="' + s.ind + '" type="button" title="重置颜色">↺ 重置</button>' +
+        '<button class="t-reset pt-reset" data-ind="' + s.ind + '" type="button" title="重置颜色">' + ICON_RESET + '重置</button>' +
         '</div>' +
         '<div class="shape-colors">' + colorHtml + '</div>' +
         '</li>'
@@ -3605,7 +3657,8 @@ function updateExportProgress(pct: number, status: string, detail = '') {
 
 function finishExportOverlay(kind: 'done' | 'error' | 'cancel', status: string, detail: string, holdMs = 2600) {
   exportPercent.classList.add(kind === 'done' ? 'done' : kind === 'error' ? 'error' : 'cancel');
-  exportStatus.textContent = status;
+  // 成功时把「导出完成 ✓」的字符勾换成矢量对勾
+  exportStatus.innerHTML = kind === 'done' ? ICON_CHECK + esc(status.replace(/\s*✓\s*/g, '')) : esc(status);
   exportDetail.textContent = detail;
   btnExportCancel.disabled = false;
   btnExportCancel.textContent = '关闭';
@@ -3622,10 +3675,168 @@ btnExportCancel.addEventListener('click', () => {
   updateExportProgress(exportLastPct, '正在取消,请稍候…');
 });
 
+/* ---------- 图标(内联 SVG,不使用 emoji / 文字符号当图标) ----------
+ * ICON_RESET / ICON_CHECK 供 innerHTML 拼接复用;'.bi' 控制尺寸与配色(见 style.css)。
+ * SVG 内标 aria-hidden,可读名由按钮的 title / 相邻文字提供。 */
+const ICON_RESET =
+  '<svg class="bi" viewBox="0 0 16 16" aria-hidden="true" focusable="false">' +
+  '<path d="M2.6 8a5.4 5.4 0 1 1 1.7 3.93.8.8 0 0 0-1.1 1.16A7 7 0 1 0 1.2 8z"/>' +
+  '<path d="M1 3.2a.8.8 0 0 1 1.6 0v4.2a.8.8 0 0 1-.8.8H-.2a.8.8 0 0 1 0-1.6H1z"/>' +
+  '</svg>';
+const ICON_CHECK =
+  '<svg class="bi" viewBox="0 0 16 16" aria-hidden="true" focusable="false">' +
+  '<path d="M13.9 3.5a.95.95 0 0 1 .05 1.34l-6.5 7.4a.95.95 0 0 1-1.4.05L2.2 8.6a.95.95 0 1 1 1.33-1.36l3.15 3.08 5.83-6.64a.95.95 0 0 1 1.34-.18z"/>' +
+  '</svg>';
 const WebVideoEncoder = (window as any).VideoEncoder;
 const WebAudioEncoder = (window as any).AudioEncoder;
 const WebVideoFrame = (window as any).VideoFrame;
 const WebAudioData = (window as any).AudioData;
+
+/* ---------- H.264(codec string)自动选级 ----------
+ * WebCodecs 的 codec string 里写死了 AVC Level(原为 4.2 = 0x2A),而 Level 4.2 的
+ * 最大宏块面积只有 8704 宏块(≈1920×1080)。「位置暴露动画」画布是 3840×1080,
+ * 已编码面积 4177920 像素 > Level 4.2 上限 2228224:
+ * Chrome 在 configure() 时并不抛错(状态仍是 configured),而是直接把编码器关掉,
+ * 于是紧接着第一次 encode() 抛出:
+ *   Failed to execute 'encode' on 'VideoEncoder': Cannot call 'encode' on a closed codec.
+ * (真正的原因留在 error 回调里,而旧代码在回调里 throw,根本传不到 UI。)
+ * 这里按分辨率/帧率算出所需的最低 Level 再配置,并在开跑前用 isConfigSupported 校验。 */
+const H264_BITRATE = 30_000_000;
+const AVC_PROFILE_HIGH = '6400'; // High Profile(与原来的 avc1.64002a 一致)
+const AVC_PROFILE_MAIN = '4d00';
+const AVC_PROFILE_BASELINE = '42e0';
+/* [Level 名称, level_idc, 最大宏块数 MaxFS, 最大宏块率 MaxMBPS] —— ITU-T H.264 表 A-1 */
+const AVC_LEVELS: [string, number, number, number][] = [
+  ['3.1', 0x1f, 3600, 108000],
+  ['3.2', 0x20, 5120, 216000],
+  ['4.0', 0x28, 8192, 245760],
+  ['4.1', 0x29, 8192, 245760],
+  ['4.2', 0x2a, 8704, 522240],
+  ['5.0', 0x32, 22080, 589824],
+  ['5.1', 0x33, 36864, 983040],
+  ['5.2', 0x34, 36864, 2073600],
+  ['6.0', 0x3c, 139264, 4177920],
+  ['6.1', 0x3d, 139264, 8355840],
+  ['6.2', 0x3e, 139264, 16711680],
+];
+
+/* 按「已编码尺寸」(宽高各自向上取整到 16 的倍数)算所需的最低 Level:
+ * 3840×1080 → 3840×1088 = 240×68 = 16320 宏块 → Level 5.0(上限 22080);
+ * 1920×1080 → 120×68 = 8160 宏块 → Level 4.0(上限 8192)。 */
+function avcMinLevelIndex(w: number, h: number, fps: number): number {
+  const mbs = Math.ceil(w / 16) * Math.ceil(h / 16);
+  const mbsPerSec = mbs * Math.max(1, Math.round(fps));
+  for (let i = 0; i < AVC_LEVELS.length; i++) {
+    const maxFs = AVC_LEVELS[i][2], maxMbps = AVC_LEVELS[i][3];
+    if (mbs <= maxFs && mbsPerSec <= maxMbps) return i;
+  }
+  return AVC_LEVELS.length - 1;
+}
+
+/* 选本机可用的 codec string:从规格算出的最低 Level 逐级上试(Level 4.0 直接用原来的
+ * 4.2 字符串,避免 1080p 导出的既有行为发生变化),High 不行再退 Main / Baseline。 */
+async function pickH264Codec(w: number, h: number, fps: number): Promise<string | null> {
+  if (!WebVideoEncoder || !window.isSecureContext) return null;
+  let start = avcMinLevelIndex(w, h, fps);
+  if (AVC_LEVELS[start] && AVC_LEVELS[start][0] === '4.0') start = 4; // → 4.2(原行为)
+  const profiles = [AVC_PROFILE_HIGH, AVC_PROFILE_MAIN, AVC_PROFILE_BASELINE];
+  for (let i = start; i < AVC_LEVELS.length; i++) {
+    const idc = AVC_LEVELS[i][1].toString(16).padStart(2, '0');
+    for (const prof of profiles) {
+      const codec = 'avc1.' + prof + idc;
+      try {
+        const r = await WebVideoEncoder.isConfigSupported({ codec, width: w, height: h, bitrate: H264_BITRATE, framerate: fps });
+        if (r && r.supported) return codec;
+      } catch { /* 该组合不被支持,继续试下一档 */ }
+    }
+  }
+  return null;
+}
+
+function avcProfileLevelName(codec: string | null): string {
+  if (!codec) return '未知';
+  const hex = codec.split('.')[1] || '';
+  if (hex.length < 6) return codec;
+  const idc = parseInt(hex.slice(4, 6), 16);
+  const hit = AVC_LEVELS.find((l) => l[1] === idc);
+  const prof = hex.slice(0, 4).toLowerCase();
+  const profName = prof === AVC_PROFILE_HIGH ? 'High' : prof === AVC_PROFILE_MAIN ? 'Main' : prof === AVC_PROFILE_BASELINE ? 'Baseline' : prof;
+  return profName + ' / Level ' + (hit ? hit[0] : '0x' + idc.toString(16));
+}
+
+type MuxerLike = { addVideoChunk: (chunk: any, meta: any) => void; addAudioChunk: (chunk: any, meta: any) => void };
+
+/* 统一的 WebCodecs 编码驱动:
+ * ① 开跑前用 isConfigSupported 校验 codec / 分辨率,失败给出可读原因;
+ * ② 编码器因故关闭时抛出 error 回调里的真实原因,而不是「closed codec」;
+ * ③ 结束/取消时一定 close,不泄漏硬件编码器。 */
+async function runWebCodecsExport(
+  muxer: MuxerLike, w: number, h: number, fr: number, totalFrames: number,
+  onProgress: (p: number, detail?: string) => void,
+  encodeFrame: (enc: any, i: number) => Promise<void>,
+  audio: { numCh: number; frames: number; sample: (planar: Float32Array, off: number, n: number) => void } | null,
+): Promise<void> {
+  const codec = await pickH264Codec(w, h, fr);
+  if (!codec) {
+    throw new Error('当前浏览器/显卡不支持 ' + w + '×' + h + ' @' + fr + 'fps 的 H.264 编码(已试到 Level 6.2),请改用 Chrome/Edge,或降低分辨率/帧率');
+  }
+  let encError: any = null;
+  const fail = (e: any) => { if (!encError) encError = e; };
+  const videoEncoder = new WebVideoEncoder({
+    output: (chunk: any, meta: any) => muxer.addVideoChunk(chunk, meta),
+    error: fail,
+  });
+  let audioEncoder: any = null;
+  const audioSrc = audio && audio.numCh > 0 ? audio : null; // 局部引用,便于在闭包/循环里做非空收窄
+  if (audioSrc && WebAudioEncoder && WebAudioData) {
+    audioEncoder = new WebAudioEncoder({
+      output: (chunk: any, meta: any) => muxer.addAudioChunk(chunk, meta),
+      error: fail,
+    });
+  }
+
+  try {
+    try {
+      const chk = await WebVideoEncoder.isConfigSupported({ codec, width: w, height: h, bitrate: H264_BITRATE, framerate: fr });
+      if (!chk || !chk.supported) throw new Error('编码器拒绝该配置');
+    } catch (e) {
+      throw new Error('H.264 编码配置不受支持(' + avcProfileLevelName(codec) + ', ' + w + '×' + h + '): ' + ((e as Error).message || e));
+    }
+    videoEncoder.configure({ codec, width: w, height: h, bitrate: H264_BITRATE, framerate: fr });
+    if (audioEncoder && audioSrc) audioEncoder.configure({ codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: audioSrc.numCh, bitrate: 192000 });
+
+    if (audioEncoder && audioSrc) {
+      const AAC_FRAME = 1024;
+      const planar = new Float32Array(AAC_FRAME * audioSrc.numCh);
+      for (let off = 0; off < audioSrc.frames; off += AAC_FRAME) {
+        if (encError) throw encError;
+        const n = Math.min(AAC_FRAME, audioSrc.frames - off);
+        audioSrc.sample(planar, off, n); // 尾部不足一帧的部分由 sample 内部补零
+        const audioData = new WebAudioData({
+          format: 'f32-planar', sampleRate: 48000, numberOfChannels: audioSrc.numCh,
+          numberOfFrames: n, timestamp: Math.round((off / 48000) * 1e6), data: planar,
+        });
+        audioEncoder.encode(audioData);
+        audioData.close();
+      }
+    }
+
+    for (let i = 0; i < totalFrames; i++) {
+      if (exportCancelRequested) throw new ExportCancelledError('导出已取消');
+      if (encError) throw encError; // 编码器已因错误关闭:抛出真实原因,而不是 closed codec
+      if (videoEncoder.state !== 'configured') throw encError || new Error('H.264 编码器已关闭(state=' + videoEncoder.state + ')');
+      await encodeFrame(videoEncoder, i);
+      if (i % 12 === 0) { onProgress(Math.round((i / totalFrames) * 100), '正在编码帧 ' + (i + 1) + ' / ' + totalFrames); await new Promise((r) => setTimeout(r, 0)); }
+    }
+
+    if (audioEncoder) { await audioEncoder.flush(); if (encError) throw encError; }
+    await videoEncoder.flush();
+    if (encError) throw encError;
+  } finally {
+    try { videoEncoder.close(); } catch { /* ignore */ }
+    if (audioEncoder) { try { audioEncoder.close(); } catch { /* ignore */ } }
+  }
+}
 
 /* 音频来源:按当前动画返回其音频文件(已打包进网站),不再使用 JSON 内嵌音频 */
 function findAudioAsset(): string | null {
@@ -3698,50 +3909,32 @@ async function exportVideoMp4(data: any, canvas: HTMLCanvasElement, renderFrame:
     fastStart: 'in-memory',
   });
 
-  const videoEncoder = new WebVideoEncoder({
-    output: (chunk: any, meta: any) => muxer.addVideoChunk(chunk, meta),
-    error: (e: any) => { throw e; },
-  });
-  videoEncoder.configure({ codec: 'avc1.64002a', width: w, height: h, bitrate: 30_000_000, framerate: fr });
-
-  let audioEncoder: any = null;
-  if (numCh > 0 && WebAudioEncoder && WebAudioData) {
-    audioEncoder = new WebAudioEncoder({
-      output: (chunk: any, meta: any) => muxer.addAudioChunk(chunk, meta),
-      error: (e: any) => { throw e; },
-    });
-    audioEncoder.configure({ codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: numCh, bitrate: 192000 });
-    const AAC_FRAME = 1024;
-    for (let off = 0; off < audioFrames; off += AAC_FRAME) {
-      const n = Math.min(AAC_FRAME, audioFrames - off);
-      const planar = new Float32Array(n * numCh);
-      for (let c = 0; c < numCh; c++) {
-        const src = audioChannels![c].subarray(off, off + n);
-        for (let i = 0; i < n; i++) planar[c * n + i] = src[i] * AUDIO_VOLUME;
+  /* 音频交给 runWebCodecsExport 统一按 AAC 帧喂给编码器 */
+  const audio = (numCh > 0 && audioChannels && WebAudioEncoder && WebAudioData)
+    ? {
+        numCh,
+        frames: audioFrames,
+        sample: (planar: Float32Array, off: number, n: number) => {
+          for (let c = 0; c < numCh; c++) {
+            const ch = audioChannels[c];
+            for (let i = 0; i < n; i++) {
+              const s = off + i < ch.length ? ch[off + i] : 0;
+              planar[c * n + i] = s * AUDIO_VOLUME; // 超出音频长度补静音
+            }
+          }
+        },
       }
-      const audioData = new WebAudioData({
-        format: 'f32-planar', sampleRate: 48000, numberOfChannels: numCh,
-        numberOfFrames: n, timestamp: Math.round((off / 48000) * 1e6), data: planar,
-      });
-      audioEncoder.encode(audioData);
-      audioData.close();
-    }
-  }
+    : null;
 
-  for (let i = 0; i < totalFrames; i++) {
-    if (exportCancelRequested) throw new ExportCancelledError('导出已取消');
+  await runWebCodecsExport(muxer, w, h, fr, totalFrames, onProgress, async (enc, i) => {
     await ensureSeqDecoded(data.ip + i);
     renderFrame(data.ip + i);
     const frame = new WebVideoFrame(canvas, { timestamp: Math.round((i * 1e6) / fr), duration: Math.round(1e6 / fr) });
-    videoEncoder.encode(frame, { keyFrame: i % 60 === 0 });
+    enc.encode(frame, { keyFrame: i % 60 === 0 });
     frame.close();
-    if (i % 12 === 0) { onProgress(Math.round((i / totalFrames) * 100), '正在编码帧 ' + (i + 1) + ' / ' + totalFrames); await new Promise((r) => setTimeout(r, 0)); }
-  }
+  }, audio);
 
   onProgress(99, '帧编码完成,正在封装音视频…');
-  await videoEncoder.flush();
-  videoEncoder.close();
-  if (audioEncoder) { await audioEncoder.flush(); audioEncoder.close(); }
   muxer.finalize();
   onProgress(100, '封装完成,正在下载…');
   downloadBlob(new Blob([muxer.target.buffer], { type: 'video/mp4' }), 'animation.mp4');
@@ -4157,34 +4350,36 @@ async function exportVideoAviH264(data: any, canvas: HTMLCanvasElement, renderFr
   const w = data.w, h = data.h;
 
   const frames: { data: Uint8Array<ArrayBuffer>; key: boolean }[] = [];
-  let avcC: Uint8Array<ArrayBuffer> | null = null;
-  const encoder = new WebVideoEncoder({
-    output: (chunk: any, meta: any) => {
-      const desc = meta?.decoderConfig?.description;
-      if (desc && !avcC) avcC = new Uint8Array(desc instanceof ArrayBuffer ? desc : desc.buffer);
-      const buf = new Uint8Array(chunk.byteLength);
-      chunk.copyTo(buf);
-      frames.push({ data: buf, key: chunk.type === 'key' });
+  /* 裸 WebCodecs 输出:帧数据收集 + 从首个 chunk 的 decoderConfig 取 avcC(附加到 AVI strf)。
+   * 注意:TS 对闭包内赋值不做窄化,所以这里必须用另一个变量接住再判断,不能先声明成 null 再在闭包里赋值。 */
+  let avcCLocal: Uint8Array<ArrayBuffer> | null = null;
+  const collect = (chunk: any, meta: any) => {
+    const desc = meta?.decoderConfig?.description;
+    if (desc && !avcCLocal) {
+      avcCLocal = desc instanceof ArrayBuffer
+        ? new Uint8Array(desc)
+        : new Uint8Array(desc.buffer, desc.byteOffset, desc.byteLength); // 只取视图范围,避免带上整个底层 buffer
+    }
+    const buf = new Uint8Array(chunk.byteLength);
+    chunk.copyTo(buf);
+    frames.push({ data: buf, key: chunk.type === 'key' });
+  };
+  await runWebCodecsExport(
+    { addVideoChunk: collect, addAudioChunk: () => { /* AVI 音频走 PCM,不用 AAC */ } },
+    w, h, fr, totalFrames, onProgress,
+    async (enc, i) => {
+      await ensureSeqDecoded(data.ip + i);
+      renderFrame(data.ip + i);
+      const frame = new WebVideoFrame(canvas, { timestamp: Math.round((i * 1e6) / fr), duration: Math.round(1e6 / fr) });
+      enc.encode(frame, { keyFrame: i % 60 === 0 });
+      frame.close();
     },
-    error: (e: any) => { throw e; },
-  });
-  encoder.configure({ codec: 'avc1.64002a', width: w, height: h, bitrate: 30_000_000, framerate: fr });
-
-  for (let i = 0; i < totalFrames; i++) {
-    if (exportCancelRequested) throw new ExportCancelledError('导出已取消');
-    await ensureSeqDecoded(data.ip + i);
-    renderFrame(data.ip + i);
-    const frame = new WebVideoFrame(canvas, { timestamp: Math.round((i * 1e6) / fr), duration: Math.round(1e6 / fr) });
-    encoder.encode(frame, { keyFrame: i % 60 === 0 });
-    frame.close();
-    if (i % 12 === 0) { onProgress(Math.round((i / totalFrames) * 100), '正在编码帧 ' + (i + 1) + ' / ' + totalFrames); await new Promise((r) => setTimeout(r, 0)); }
-  }
-  await encoder.flush();
-  encoder.close();
-  if (!avcC) throw new Error('未能获取 H.264 解码配置(avcC)');
+    null,
+  );
+  if (!avcCLocal) throw new Error('未能获取 H.264 解码配置(avcC)');
 
   onProgress(99, '帧编码完成,正在组装 AVI(H.264)…');
-  const blob = buildAvi(w, h, fr, 'H264', h264Strf(w, h, avcC), '00dc', frames.map((f) => f.data), pcm16, numCh, audioRate, frames.map((f) => f.key));
+  const blob = buildAvi(w, h, fr, 'H264', h264Strf(w, h, avcCLocal), '00dc', frames.map((f) => f.data), pcm16, numCh, audioRate, frames.map((f) => f.key));
   onProgress(100, 'AVI 组装完成,正在下载…');
   downloadBlob(blob, 'animation.avi');
 }
@@ -4311,7 +4506,7 @@ async function exportVideo() {
         setStatus('导出 MP4: ' + p + '%');
       });
     }
-    finishExportOverlay('done', '导出完成 ✓', '文件已开始下载');
+    finishExportOverlay('done', '导出完成', '文件已开始下载');
     setStatus('导出完成');
   } catch (e) {
     if (e instanceof ExportCancelledError) {
