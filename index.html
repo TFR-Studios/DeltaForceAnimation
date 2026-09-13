@@ -3,8 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <!-- 站点图标:纯矢量(播放三角 + 胶片框),不依赖 emoji 字体 -->
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3.2' fill='%23161a20'/><path d='M4.4 3.5h1.2v9H4.4zm6 0h1.2v9H10.4z' fill='%2360a5fa'/><path d='M6.6 4.6v6.8c0 .5.55.82.98.56l5.3-3.4a.66.66 0 0 0 0-1.12l-5.3-3.4a.66.66 0 0 0-.98.56z' fill='%23dbe1ea'/></svg>" />
+    <!-- 站点图标:DFAED 矢量标志(public/logo.svg,构建时原样拷贝到站点根目录) -->
+    <link rel="icon" type="image/svg+xml" href="/logo.svg" />
     <title>三角洲行动动画编辑器</title>
     <!-- 启动加载界面(内联样式):不依赖外部 CSS,在样式表加载完成前即可显示,避免白屏 -->
     <style>
@@ -12,6 +12,7 @@
       #app-loading.is-hidden{opacity:0;pointer-events:none}
       .ld-term{width:400px;max-width:88vw;border-left:2px solid rgba(59,130,246,.55);padding-left:20px}
       .ld-title{display:flex;align-items:center;gap:10px;font-weight:700;font-size:16px;letter-spacing:.5px}
+      .ld-logo{width:32px;height:32px;flex:none;display:block}
       .ld-cursor{display:inline-block;width:9px;height:17px;background:#3b82f6;animation:ldBlink 1s steps(1) infinite}
       .ld-log{margin-top:16px;font-size:12px;line-height:2;color:#8b93a3;font-family:ui-monospace,'Cascadia Code','Consolas',monospace}
       .ld-log b{color:#dbe1ea;font-weight:600}
@@ -26,7 +27,7 @@
   <body>
     <div id="app-loading" role="status" aria-label="加载中">
       <div class="ld-term">
-        <div class="ld-title">三角洲行动动画编辑器<span class="ld-cursor"></span></div>
+        <div class="ld-title"><img class="ld-logo" src="/logo.svg" alt="" aria-hidden="true" />三角洲行动动画编辑器<span class="ld-cursor"></span></div>
         <div class="ld-log">&gt; initializing animation engine<b> · </b><span class="ok">ready</span></div>
         <div class="ld-log">&gt; loading assets<span id="ldStatus"></span></div>
         <div class="ld-bar" id="ldBar"></div>
@@ -34,7 +35,10 @@
       </div>
     </div>
     <header class="topbar">
-      <div class="brand">三角洲行动动画编辑器<span class="tag">编辑 · 预览 · 导出</span></div>
+      <div class="brand">
+        <img class="brand-logo" src="/logo.svg" alt="" aria-hidden="true" />
+        <span>三角洲行动动画编辑器<span class="tag">编辑 · 预览 · 导出</span></span>
+      </div>
       <label class="anim-switch" title="切换要编辑的动画">
         <span class="anim-switch-label">动画</span>
         <select id="selAnim">

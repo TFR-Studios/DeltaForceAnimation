@@ -35,7 +35,16 @@ body {
   border-bottom: 1px solid var(--border);
   flex-wrap: wrap;
 }
-.brand { font-weight: 700; font-size: 15px; white-space: nowrap; }
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font-weight: 700;
+  font-size: 15px;
+  white-space: nowrap;
+}
+/* 顶栏品牌标志:DFAED 矢量 logo(深色背景上的黑色描边由 logo 自身提供) */
+.brand-logo { display: block; height: 26px; width: auto; flex: none; user-select: none; }
 .tag {
   font-size: 11px;
   color: var(--accent);
