@@ -4285,7 +4285,7 @@ function downloadBlob(blob: Blob, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
-async function exportVideoMp4(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void) {
+async function exportVideoMp4(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, animFrameOf: (i: number) => number = (i) => data.ip + i) {
   if (!WebVideoEncoder || !WebVideoFrame) throw new Error('当前浏览器不支持 WebCodecs 视频编码(请用 Chrome/Edge)');
   const w = data.w, h = data.h;
   const audioUrl = findAudioAsset();
@@ -4320,8 +4320,9 @@ async function exportVideoMp4(data: any, canvas: HTMLCanvasElement, renderFrame:
     : null;
 
   await runWebCodecsExport(muxer, w, h, fr, totalFrames, onProgress, async (enc, i) => {
-    await ensureSeqDecoded(data.ip + i);
-    renderFrame(data.ip + i);
+    const animFrame = animFrameOf(i);
+    await ensureSeqDecoded(Math.round(animFrame));
+    renderFrame(animFrame);
     const frame = new WebVideoFrame(canvas, { timestamp: Math.round((i * 1e6) / fr), duration: Math.round(1e6 / fr) });
     enc.encode(frame, { keyFrame: i % 60 === 0 });
     frame.close();
@@ -4349,14 +4350,19 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
 
   // 音频按"每帧时长"切片,与视频帧交错写入 movi —— 播放器顺序读取,
   // 无需在文件头尾之间频繁 seek,显著改善大文件(尤其无压缩透明 AVI)的播放流畅度
+  /* 每帧音频切片必须严格铺满 PCM,否则音频流长度和文件头里的 dwRate 对不上,
+   * 播放器重采样/丢样就会「滋啦」。
+   * 用累计取整(第 f 帧 = [round(f*rate/fr), round((f+1)*rate/fr)))而不是
+   * 「每帧固定 round(rate/fr) 个样本」——后者在 48000/fr 不是整数时(如 165fps
+   * → 290.909)每秒会多/少几十个样本,长时间就漂移、出现爆音。 */
   const audioSlices: Uint8Array<ArrayBuffer>[] = [];
   if (hasAudio) {
-    const samplesPerFrame = Math.max(1, Math.round(audioRate / fr));
-    const frameAudioBytes = samplesPerFrame * bytesPerSample;
+    const samplesAt = (f: number) => Math.round((f * audioRate) / fr);
     for (let f = 0; f < totalFrames; f++) {
-      const start = f * frameAudioBytes;
+      const start = samplesAt(f) * bytesPerSample;
       if (start >= pcm16.length) break;
-      const end = Math.min(pcm16.length, start + frameAudioBytes);
+      const end = Math.min(pcm16.length, samplesAt(f + 1) * bytesPerSample);
+      if (end <= start) continue; // 极端高帧率下可能不足一个样本,跳过该帧的音频块
       let slice = pcm16.subarray(start, end);
       if (slice.length % 2) { // 偶字节对齐
         const c = new Uint8Array(slice.length + 1);
@@ -4388,10 +4394,16 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
   const segmentCount = segments.length;
   const multi = segmentCount > 1;
 
-  // 尺寸计算:LIST 块的大小字段 = 内容(四cc + 子块),不含 LIST 自身 8 字节头
+  /* RIFF 规定:块长度为奇数时后面要补 1 个填充字节,且该填充字节计入父容器(LIST/RIFF)的大小。
+   * 此前完全没算填充:H.264 的 strf = 40 + avcC 常常是奇数,于是 hdrl/movi 之后所有偏移
+   * 整体错位 1 字节,播放器/ffmpeg 从错位处读块头 → 「tag IST…」解析失败、
+   * 音频读到帧数据 = 滋啦、画面残影。这里统一按「含填充」计算。 */
+  const pad = (n: number) => n % 2;
+  const PAD_BYTE = new Uint8Array(1);              // 奇数块后的填充字节(内容 0)
+  // 尺寸计算:LIST 块的大小字段 = 内容(四cc + 子块,含子块填充),不含 LIST 自身 8 字节头
   const avihChunkSize = 8 + 56;                    // 'avih' chunk
   const strhChunkSize = 8 + 56;                    // 'strh' chunk
-  const strfVideoChunkSize = 8 + strf.length;      // 'strf' chunk(长度可变:40 或 40+avcC)
+  const strfVideoChunkSize = 8 + strf.length + pad(strf.length);      // 'strf' chunk(40 或 40+avcC,奇数要补)
   const strfAudioChunkSize = 8 + 18;
   const videoStrlContent = 4 + strhChunkSize + strfVideoChunkSize;  // 'strl' + strh + strf
   const audioStrlContent = 4 + strhChunkSize + strfAudioChunkSize;  // 'auds' + strh + strf
@@ -4401,8 +4413,8 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
   const moviContentOf = (start: number, count: number) => {
     let s = 4; // 'movi'
     for (let i = start; i < start + count; i++) {
-      s += 8 + frameChunks[i].length;
-      if (audioSlices[i]) s += 8 + audioSlices[i].length;
+      s += 8 + frameChunks[i].length + pad(frameChunks[i].length);
+      if (audioSlices[i]) s += 8 + audioSlices[i].length + pad(audioSlices[i].length);
     }
     return s;
   };
@@ -4415,11 +4427,13 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
       target.push(ascii(frameFcc), u32(c.length), c);
       idx.push({ fourcc: frameFcc, flags: frameKeyFlags ? (frameKeyFlags[i] ? 0x10 : 0x00) : 0x10, offset: moviOffset, size: c.length });
       moviOffset += 8 + c.length;
+      if (pad(c.length)) { target.push(PAD_BYTE); moviOffset += 1; } // RIFF 填充:奇数块补 1 字节
       const a = audioSlices[i];
       if (a) {
         target.push(ascii('01wb'), u32(a.length), a);
         idx.push({ fourcc: '01wb', flags: 0x10, offset: moviOffset, size: a.length });
         moviOffset += 8 + a.length;
+        if (pad(a.length)) { target.push(PAD_BYTE); moviOffset += 1; }
       }
     }
     return idx;
@@ -4446,10 +4460,10 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
     const idx: { fourcc: string; flags: number; offset: number; size: number }[] = [];
     for (let i = start; i < start + count; i++) {
       idx.push({ fourcc: frameFcc, flags: frameKeyFlags ? (frameKeyFlags[i] ? 0x10 : 0x00) : 0x10, offset: moviOffset, size: frameChunks[i].length });
-      moviOffset += 8 + frameChunks[i].length;
+      moviOffset += 8 + frameChunks[i].length + pad(frameChunks[i].length);
       if (audioSlices[i]) {
         idx.push({ fourcc: '01wb', flags: 0x10, offset: moviOffset, size: audioSlices[i].length });
-        moviOffset += 8 + audioSlices[i].length;
+        moviOffset += 8 + audioSlices[i].length + pad(audioSlices[i].length);
       }
     }
     return idx;
@@ -4532,8 +4546,10 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
       // 无压缩帧若设置帧大小会导致 seek 失败(播放器残影/卡死)
       d.setUint32(44, 0, true);
       parts.push(ascii('strh'), u32(56), strh);
-      // strf (BITMAPINFOHEADER,长度可变:40 或 40+avcC)
+      // strf (BITMAPINFOHEADER,长度可变:40 或 40+avcC);奇数长度必须补 1 字节,
+      // 否则 hdrl 之后所有偏移错位 1 字节(解析失败/音频滋啦的根因)
       parts.push(ascii('strf'), u32(strf.length), strf);
+      if (pad(strf.length)) parts.push(PAD_BYTE);
     }
     // audio strl
     if (hasAudio) {
@@ -4698,7 +4714,7 @@ async function buildPcm16(data: any, totalFrames: number, fr: number): Promise<{
   return { pcm16, numCh, audioRate };
 }
 
-async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, mode: 'dib' | 'mjpeg') {
+async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, mode: 'dib' | 'mjpeg', animFrameOf: (i: number) => number = (i) => data.ip + i) {
   const { pcm16, numCh, audioRate } = await buildPcm16(data, totalFrames, fr);
 
   let blob: Blob;
@@ -4709,8 +4725,9 @@ async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame:
     const bgraFrames: Uint8Array<ArrayBuffer>[] = [];
     for (let i = 0; i < totalFrames; i++) {
       if (exportCancelRequested) throw new ExportCancelledError('导出已取消');
-      await ensureSeqDecoded(data.ip + i);
-      renderFrame(data.ip + i);
+      const animFrame = animFrameOf(i);
+      await ensureSeqDecoded(Math.round(animFrame));
+      renderFrame(animFrame);
       bgraFrames.push(rgbaToBgraBottomUp(ctx.getImageData(0, 0, data.w, data.h), data.w, data.h));
       if (i % 12 === 0) { onProgress(Math.round((i / totalFrames) * 100), '正在处理帧 ' + (i + 1) + ' / ' + totalFrames); await new Promise((r) => setTimeout(r, 0)); }
     }
@@ -4721,8 +4738,9 @@ async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame:
     const jpegFrames: Uint8Array<ArrayBuffer>[] = [];
     for (let i = 0; i < totalFrames; i++) {
       if (exportCancelRequested) throw new ExportCancelledError('导出已取消');
-      await ensureSeqDecoded(data.ip + i);
-      renderFrame(data.ip + i);
+      const animFrame = animFrameOf(i);
+      await ensureSeqDecoded(Math.round(animFrame));
+      renderFrame(animFrame);
       const b = await new Promise<Blob>((res, rej) => canvas.toBlob((x) => (x ? res(x) : rej(new Error('toBlob 失败'))), 'image/jpeg', 0.92));
       jpegFrames.push(new Uint8Array(await b.arrayBuffer()));
       if (i % 12 === 0) { onProgress(Math.round((i / totalFrames) * 100), '正在处理帧 ' + (i + 1) + ' / ' + totalFrames); await new Promise((r) => setTimeout(r, 0)); }
@@ -4737,7 +4755,7 @@ async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame:
 
 /* H.264 编码 AVI(非透明):与 MP4 同款 WebCodecs 编码,PotPlayer/VLC 可硬解,
  * 无 MJPEG 的色度毛边问题。strf 附加 avcC,帧数据为 AVCC 长度前缀格式。 */
-async function exportVideoAviH264(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void) {
+async function exportVideoAviH264(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, animFrameOf: (i: number) => number = (i) => data.ip + i) {
   if (!WebVideoEncoder || !WebVideoFrame) throw new Error('当前浏览器不支持 H.264 编码(请用 Chrome/Edge)');
   const { pcm16, numCh, audioRate } = await buildPcm16(data, totalFrames, fr);
   const w = data.w, h = data.h;
@@ -4761,8 +4779,9 @@ async function exportVideoAviH264(data: any, canvas: HTMLCanvasElement, renderFr
     { addVideoChunk: collect, addAudioChunk: () => { /* AVI 音频走 PCM,不用 AAC */ } },
     w, h, fr, totalFrames, onProgress,
     async (enc, i) => {
-      await ensureSeqDecoded(data.ip + i);
-      renderFrame(data.ip + i);
+      const animFrame = animFrameOf(i);
+      await ensureSeqDecoded(Math.round(animFrame));
+      renderFrame(animFrame);
       const frame = new WebVideoFrame(canvas, { timestamp: Math.round((i * 1e6) / fr), duration: Math.round(1e6 / fr) });
       enc.encode(frame, { keyFrame: i % 60 === 0 });
       frame.close();
@@ -4775,6 +4794,26 @@ async function exportVideoAviH264(data: any, canvas: HTMLCanvasElement, renderFr
   const blob = buildAvi(w, h, fr, 'H264', h264Strf(w, h, avcCLocal), '00dc', frames.map((f) => f.data), pcm16, numCh, audioRate, frames.map((f) => f.key));
   onProgress(100, 'AVI 组装完成,正在下载…');
   downloadBlob(blob, 'animation.avi');
+}
+
+/* 导出实例的「每帧状态同步」:导出直接调 renderer.renderFrame() 逐帧渲染,
+ * 绕过了 lottie 自己的 AnimationItem.renderFrame(),而后者每帧还会做两件事:
+ *   ① expressionsPlugin.resetFrame():清空表达式插件逐帧状态(_lottieGlobal)。
+ *      预览(goToAndStop/play)必经此步,导出此前完全跳过 —— 含 AE 表达式的动画
+ *      因此在导出与预览之间产生差异(表达式里用 _lottieGlobal 暂存/累加的写法尤其明显);
+ *   ② currentFrame / currentRawFrame 同步:任何读取 anim.currentFrame 的代码
+ *      (元素、表达式、序列帧兜底)都能取到当前导出帧,而不是停在 0。
+ * 这里在每次 renderer.renderFrame(n, true) 之前补齐,使导出与预览走同一条帧管线。 */
+function syncAnimFrameForExport(item: AnimationItem | null, frame: number) {
+  if (!item) return;
+  const anyItem = item as any;
+  try {
+    const plugin = anyItem.expressionsPlugin;
+    if (plugin && typeof plugin.resetFrame === 'function') plugin.resetFrame();
+  } catch { /* 表达式插件缺位时忽略 */ }
+  const first = typeof anyItem.firstFrame === 'number' && isFinite(anyItem.firstFrame) ? anyItem.firstFrame : 0;
+  anyItem.currentRawFrame = frame - first;
+  anyItem.currentFrame = frame - first;
 }
 
 /* 导出专用 Canvas 渲染器 patch:文字兜底 + 修复 getElementById 扫描未构建元素报错 */
@@ -4799,13 +4838,23 @@ async function exportVideo() {
   const wantTransparent = chkTransparent.checked;
   const format = wantTransparent ? 'avi' : selFormat.value;
   const w = data.w, h = data.h;
-  const fr = data.fr || 60;
-  const totalFrames = Math.round((data.op ?? 0) - (data.ip ?? 0));
+  /* 输出帧率固定规则(不给用户选项):
+   * 预览是 lottie 的「分数帧」渲染——动画自身只有 30fps 时,浏览器仍按屏幕刷新率
+   * 对关键帧做插值,每秒画出上百个平滑位置,所以预览看着很顺;
+   * 而导出若照搬动画的 30fps,画面就只有 30 个位置/秒:缓动、表达式这类慢速运动
+   * 看着就是「30 帧」卡顿,快速位移的图层则不太明显。
+   * 因此导出帧率取 max(动画帧率, 60):30fps 动画导出 60fps(输出帧映射到小数动画帧,
+   * lottie 线性插值),60fps 动画与原来完全一致,更高帧率的动画不降采样。 */
+  const srcFps = data.fr || 60;
+  const fr = Math.min(240, Math.max(60, Math.round(srcFps)));
+  const srcFrames = Math.max(1, Math.round((data.op ?? 0) - (data.ip ?? 0)));
+  const totalFrames = Math.max(1, Math.round((srcFrames / srcFps) * fr));   // 时长不变,帧数按倍率增加
+  const animFrameOf = (i: number) => (data.ip ?? 0) + (i * srcFps) / fr;    // 可为小数
   const withPopup = popupVisible && !!popupData;
   const popupTag = withPopup ? ' · 含弹窗' : '';
   const formatLabel = (format === 'avi'
     ? (wantTransparent ? 'AVI · 无压缩透明' : 'AVI · H.264')
-    : 'MP4 · H.264') + popupTag;
+    : 'MP4 · H.264') + ' · ' + fr + 'fps' + (fr !== srcFps ? '(插值)' : '') + popupTag;
   const warn = wantTransparent
     ? '透明 AVI 为无压缩编码,预计文件约 ' + fmtSize(w * h * 4 * totalFrames) + ';已采用预乘 alpha(premultiplied),与 PotPlayer/Windows 渲染语义一致,半透明组件可正常显示。导出期间请勿关闭页面。'
     : undefined;
@@ -4816,6 +4865,11 @@ async function exportVideo() {
   let popupExportContainer: HTMLDivElement | null = null;
   let popupExportAnim: AnimationItem | null = null;
   let popupExportCanvas: HTMLCanvasElement | null = null;
+  /* 导出期间暂停预览(含预览音频):预览一边播放一边渲染会和导出抢 CPU/GPU,
+   * 高负载下浏览器音频线程被拖到丢样,听感就是「滋啦」;顺带也让导出更快。 */
+  const previewWasPlaying = !!(anim && anim.isLoaded && !anim.isPaused);
+  if (previewWasPlaying && anim) { try { anim.pause(); } catch { /* ignore */ } }
+  if (popupAnim) { try { popupAnim.pause(); } catch { /* ignore */ } }
   try {
     setStatus(wantTransparent
       ? '导出中: 已选透明背景,自动导出 AVI…'
@@ -4861,9 +4915,31 @@ async function exportVideo() {
     outCanvas.height = h;
     const octx = outCanvas.getContext('2d');
     if (!octx) throw new Error('无法创建导出画布');
+    /* 导出自检:逐帧记录「合成画面」指纹,统计与上一帧完全相同的帧数。
+     * 用途:导出后画面看起来只有 30fps 时,先分清是「渲染侧丢了帧」还是
+     * 「编码器/播放器把同一帧显示了两次」——自检报重复帧 → 渲染侧问题(有确切帧号);
+     * 自检为 0 但播放仍重复 → 编码/播放侧问题(与渲染无关)。 */
+    const checkCanvas = document.createElement('canvas');
+    checkCanvas.width = 240; checkCanvas.height = 135;
+    const checkCtx = checkCanvas.getContext('2d', { willReadFrequently: true });
+    let prevSig = -1, dupFrames = 0, firstDup = -1, checkedFrames = 0;
+    const frameSignature = (): number => {
+      if (!checkCtx) return -1;
+      checkCtx.clearRect(0, 0, 240, 135);
+      checkCtx.drawImage(outCanvas, 0, 0, 240, 135);
+      const d = checkCtx.getImageData(0, 0, 240, 135).data;
+      let h = 2166136261 >>> 0;
+      for (let k = 0; k < d.length; k++) { h ^= d[k]; h = Math.imul(h, 16777619) >>> 0; }
+      return h;
+    };
     const renderFrame = (n: number) => {
+      // 顺序与 lottie 的 AnimationItem.renderFrame 一致:先同步表达式/帧状态,再整帧强制重绘
+      syncAnimFrameForExport(renderAnim, n);
       (renderAnim as any).renderer.renderFrame(n, true);
-      if (popupExportAnim) (popupExportAnim as any).renderer.renderFrame(n, true);
+      if (popupExportAnim) {
+        syncAnimFrameForExport(popupExportAnim, n);
+        (popupExportAnim as any).renderer.renderFrame(n, true);
+      }
       // 每帧先清空合成画布!!!透明模式之前缺失:历史帧全部叠加进当前帧 = 残影(上一帧不消失)
       octx.clearRect(0, 0, w, h);
       // 动画画布保持透明,背景通过合成画布垫在下方,避免破坏轨道遮罩合成
@@ -4873,6 +4949,13 @@ async function exportVideo() {
       }
       octx.drawImage(canvas, 0, 0);
       if (popupExportCanvas) octx.drawImage(popupExportCanvas, 0, 0);
+      // 自检指纹(96×54 缩放哈希,每帧 <1ms)
+      const sig = frameSignature();
+      if (sig !== -1) {
+        if (prevSig === sig) { dupFrames++; if (firstDup < 0) firstDup = checkedFrames; }
+        prevSig = sig;
+        checkedFrames++;
+      }
     };
     const srcCanvas = outCanvas;
 
@@ -4881,26 +4964,33 @@ async function exportVideo() {
         await exportVideoAvi(data, srcCanvas, renderFrame, totalFrames, fr, (p, detail) => {
           updateExportProgress(p, '正在导出透明 AVI(无压缩)', detail ?? '');
           setStatus('导出透明 AVI(无压缩): ' + p + '%');
-        }, 'dib');
+        }, 'dib', animFrameOf);
       } else if (WebVideoEncoder && WebVideoFrame) {
         await exportVideoAviH264(data, srcCanvas, renderFrame, totalFrames, fr, (p, detail) => {
           updateExportProgress(p, '正在导出 AVI(H.264)', detail ?? '');
           setStatus('导出 AVI(H.264): ' + p + '%');
-        });
+        }, animFrameOf);
       } else {
         await exportVideoAvi(data, srcCanvas, renderFrame, totalFrames, fr, (p, detail) => {
           updateExportProgress(p, '正在导出 AVI(MJPEG 回退)', detail ?? '');
           setStatus('导出 AVI(MJPEG): ' + p + '%');
-        }, 'mjpeg');
+        }, 'mjpeg', animFrameOf);
       }
     } else {
       await exportVideoMp4(data, srcCanvas, renderFrame, totalFrames, fr, (p, detail) => {
         updateExportProgress(p, '正在导出 MP4(H.264)', detail ?? '');
         setStatus('导出 MP4: ' + p + '%');
-      });
+      }, animFrameOf);
     }
-    finishExportOverlay('done', '导出完成', '文件已开始下载');
-    setStatus('导出完成');
+    /* 重复帧占比很高(如约一半)时,更可能是「动画内容本身按 30fps 更新」:
+     * 表达式里做时间量化(posterizeTime(30)、Math.floor(time*30)/30 等)、
+     * 或 AE 里按半速/步进打的关键帧,都会让 60fps 视频每隔一帧才换一次画面。 */
+    const dupNote = dupFrames === 0
+      ? ' · 自检:未发现重复帧'
+      : ' · 自检:' + dupFrames + '/' + checkedFrames + ' 帧与上一帧完全相同' + (firstDup >= 0 ? '(首处 #' + firstDup + ')' : '')
+        + '(画面静止段或运动极慢时属正常,不代表导出丢帧)';
+    finishExportOverlay('done', '导出完成', '文件已开始下载' + dupNote);
+    setStatus('导出完成' + dupNote);
   } catch (e) {
     if (e instanceof ExportCancelledError) {
       finishExportOverlay('cancel', '已取消导出', '未生成文件');
@@ -4915,6 +5005,8 @@ async function exportVideo() {
     if (container) container.remove();
     if (popupExportAnim) { try { popupExportAnim.destroy(); } catch { /* ignore */ } }
     if (popupExportContainer) popupExportContainer.remove();
+    // 恢复导出前的预览播放状态(含音频)
+    if (previewWasPlaying && anim) { try { anim.play(); } catch { /* ignore */ } }
     exporting = false;
     btnExport.disabled = false;
   }
