@@ -2,11 +2,24 @@ import lottie, { type AnimationItem } from 'lottie-web';
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import './style.css';
 
-/* 音效与共享字体资源:独立小文件(?url 打包为静态资源),不进入大体积动画数据 chunk */
+/* 音效资源:独立小文件(?url 打包为静态资源),不进入大体积动画数据 chunk */
 import bundledAudioUrl from '../animation/gunmuchenggong.mp3?url';
 import exposedAudioUrl from '../animation_2/UI_C201_Energy_Scout_Bow_Scout_02.wav?url';
-import fontMediumUrl from '../animation/fonts/ProjectDType-Medium.ttf?url';
-import fontCurveUrl from '../animation/fonts/ProjectDTypeCurve-Bold.ttf?url';
+
+/* 共享字体资源的静态地址。
+ * 不要写成 import ... from '*.ttf?url':Vite 7 的 dev server 对「模块请求 + ?url」
+ * 返回的是一段 JS 模块(约 440 字节)而不是字体字节,运行时 fetch 到的内容不对,
+ * FontFace 会抛 "Invalid font data in ArrayBuffer" 并被 catch 吞掉,字体注册静默失败,
+ * 结果只剩「本机装过该字体」的人能看对。
+ *
+ * 这里用 new URL('字面量', import.meta.url):dev 下直接解析为源文件地址,
+ * build 下由 Vite 静态分析后输出带 hash 的静态资源。两个写法上的硬约束:
+ *  1) 路径必须是字符串字面量,且 new URL 的调用要直接写在 new 表达式里 ——
+ *     包进普通函数(如 assetUrl(path))Vite 就无法静态分析,build 阶段不会产出字体
+ *     文件,产物里会残留 '../animation/fonts/*.ttf' 这种源码相对路径,build 后 404;
+ *  2) 用相对路径而非 '/xxx' 绝对路径,部署到子路径时同样可用。 */
+const FONT_MEDIUM_URL = new URL('../animation/fonts/ProjectDType-Medium.ttf', import.meta.url).href;
+const FONT_CURVE_URL = new URL('../animation/fonts/ProjectDTypeCurve-Bold.ttf', import.meta.url).href;
 
 /* ---------- 启动加载界面 ----------
  * #app-loading 的样式是内联在 index.html 中的(不依赖本文件 import 的 style.css),
@@ -153,64 +166,173 @@ function patchAudioDestroy(animItem: any) {
 }
 
 /* ---------- 字体预加载 ----------
- * Bodymovin 可将 TTF 字体以 base64 内嵌在 fonts.list[].fPath 中。为减小数据包
- * 体积,各动画 JSON 内的字体已剥离为仓库唯一的共享字体文件(animation/fonts/),
- * 按 fFamily/fName 映射到对应资源 URL;同一 URL 的字节只下载一次,多个 family
- * 名共用,通过 FontFace API 注册到浏览器,使 SVG/Canvas 都能用真实字体渲染文字。
+ * Bodymovin 可把 TTF 以 base64 内嵌在 fonts.list[].fPath 中;为减小数据包体积,
+ * 各动画 JSON 内的字体已剥离为仓库唯一的共享字体文件(animation/fonts/)。
+ * 因此必须由站点自己把字体注册给浏览器,否则只有「本机装过该字体」的人才能看到
+ * 正确字形,其他人会静默回退到系统默认字体。
+ *
+ * 三条硬性要求(每条都踩过坑):
+ *  1) URL 必须是真正的静态资源地址:用 new URL(..., import.meta.url) 而不是
+ *     '*.ttf?url' 导入 —— Vite 7 dev 下后者返回 JS 模块,见文件顶部 FONT_*_URL 注释;
+ *  2) 不能因为「系统里已有同名 family」就跳过注册:document.fonts.check() 对本机
+ *     安装的字体同样返回 true,早期版本据此提前 return,于是网页实际用的是本机那份
+ *     字体,而没装字体的机器上注册永不发生(这正是「只有作者电脑显示正常」的原因)。
+ *     同名 @font-face 会覆盖系统字体,所以无条件注册才能保证各机器字形一致;
+ *  3) 拿到的字节必须先校验字体魔数:服务器 MIME/中间层返回错误内容时,FontFace 会抛
+ *     "Invalid font data in ArrayBuffer",要尽早发现并说明,而不是静默降级。
  */
 const loadedFontFamilies = new Set<string>();
 
-/* 外部字体资源:与动画 JSON fonts.list 中被剥离的 fPath 一一对应 */
-const EXTERNAL_FONT_URLS: Record<string, string> = {
-  'ProjectD Type': fontMediumUrl,
-  'ProjectDType-Medium': fontMediumUrl,
-  'ProjectD Type Curve': fontCurveUrl,
-  'ProjectDTypeCurve-Bold': fontCurveUrl,
+/* 绑定字体 TTF 资源(与 JSON 中被剥离的 fPath 一一对应) */
+const BUNDLED_FONT_URLS = {
+  medium: FONT_MEDIUM_URL,
+  curve: FONT_CURVE_URL,
 };
+
+/* 动画 JSON 中出现的 name/family → 绑定字体文件。
+ * 中英文名都登记:不同导出模板里 fFamily 可能是 'ProjectD Type'(带空格)、
+ * 'ProjectDType-Medium'(PostScript 名)或 '战术体 Medium'(字体内部中文名)。 */
+const EXTERNAL_FONT_URLS: Record<string, string> = {
+  'ProjectD Type': BUNDLED_FONT_URLS.medium,
+  'ProjectD Type Medium': BUNDLED_FONT_URLS.medium,
+  'ProjectDType-Medium': BUNDLED_FONT_URLS.medium,
+  '战术体': BUNDLED_FONT_URLS.medium,
+  '战术体 Medium': BUNDLED_FONT_URLS.medium,
+  'ProjectD Type Curve': BUNDLED_FONT_URLS.curve,
+  'ProjectD Type Curve Bold': BUNDLED_FONT_URLS.curve,
+  'ProjectDTypeCurve-Bold': BUNDLED_FONT_URLS.curve,
+  '战术粗体': BUNDLED_FONT_URLS.curve,
+  '战术粗体 Bold': BUNDLED_FONT_URLS.curve,
+};
+/* 归一化索引(小写 + 去空格/连字符/下划线),让 'ProjectDType-Medium' 与
+ * 'ProjectD TypeMedium' 之类的写法也能命中,避免只靠硬编码字面量匹配。 */
+const EXTERNAL_FONT_URLS_NORM: Record<string, string> = (() => {
+  const out: Record<string, string> = {};
+  const norm = (s: string) => s.toLowerCase().replace(/[\s\-_]+/g, '');
+  for (const [k, v] of Object.entries(EXTERNAL_FONT_URLS)) out[norm(k)] = v;
+  return out;
+})();
+
+function resolveFontUrl(...names: (string | undefined)[]): string {
+  const norm = (s: string) => s.toLowerCase().replace(/[\s\-_]+/g, '');
+  for (const n of names) {
+    if (!n) continue;
+    const hit = EXTERNAL_FONT_URLS[n] ?? EXTERNAL_FONT_URLS_NORM[norm(n)];
+    if (hit) return hit;
+  }
+  return '';
+}
 
 /* 同一字体二进制只取一次(内存缓存),供多个 family 名注册 FontFace */
 const fontBinaryCache = new Map<string, Promise<ArrayBuffer | null>>();
 function fetchFontBinary(url: string): Promise<ArrayBuffer | null> {
   let p = fontBinaryCache.get(url);
   if (!p) {
-    p = fetch(url).then((resp) => (resp.ok ? resp.arrayBuffer() : null)).catch(() => null);
+    p = fetch(url)
+      .then((resp) => (resp.ok ? resp.arrayBuffer() : null))
+      .catch(() => null);
     fontBinaryCache.set(url, p);
   }
   return p;
 }
 
+/* 常见字体容器魔数:0x00010000 / 'true' / 'OTTO'(CFF) / 'ttcf'(字体集合)。 */
+function looksLikeFontBuffer(buf: ArrayBuffer | null): buf is ArrayBuffer {
+  if (!buf || buf.byteLength < 12) return false;
+  const b = new Uint8Array(buf, 0, 4);
+  const u32 = (b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3];
+  return (
+    u32 === 0x00010000 ||
+    u32 === 0x74727565 || // 'true'
+    u32 === 0x4f54544f || // 'OTTO'
+    u32 === 0x74746366 // 'ttcf'
+  );
+}
+
+/* 字体注册结果:updateInfo 用它给出真实状态,而不是拿 JSON 里有没有 fPath 去猜。 */
+type FontLoadState = 'pending' | 'ready' | 'failed';
+const fontLoadState = new Map<string, FontLoadState>();
+const lastFontWarnings: string[] = [];
+function addFontWarning(msg: string) {
+  if (!lastFontWarnings.includes(msg)) lastFontWarnings.push(msg);
+}
+
+function registerFontFamily(fam: string, source: ArrayBuffer): Promise<boolean> {
+  if (loadedFontFamilies.has(fam)) return Promise.resolve(true);
+  return new FontFace(fam, source).load().then((face) => {
+    document.fonts.add(face); // 同名 @font-face 优先于系统已装字体,保证各机器字形一致
+    loadedFontFamilies.add(fam);
+    fontLoadState.set(fam, 'ready');
+    return true;
+  });
+}
+
 async function loadEmbeddedFonts(data: any) {
   const list: any[] = data?.fonts?.list ?? [];
-  const jobs = list.map(async (f: any) => {
-    const fPath = typeof f.fPath === 'string' ? f.fPath : '';
-    const extUrl: string = !fPath ? (EXTERNAL_FONT_URLS[f.fFamily ?? ''] ?? EXTERNAL_FONT_URLS[f.fName ?? ''] ?? '') : '';
-    if (!fPath && !extUrl) return;
-    const families: string[] = [];
-    if (f.fFamily) families.push(f.fFamily);
-    if (f.fName && !families.includes(f.fName)) families.push(f.fName);
-    for (const fam of families) {
-      if (loadedFontFamilies.has(fam)) continue;
+  lastFontWarnings.length = 0;
+  await Promise.allSettled(
+    list.map(async (f: any) => {
+      const fPath = typeof f.fPath === 'string' ? f.fPath : '';
+      const families: string[] = [];
+      if (f.fFamily) families.push(f.fFamily);
+      if (f.fName && !families.includes(f.fName)) families.push(f.fName);
+      if (!families.length) return;
+      for (const fam of families) {
+        if (!fontLoadState.has(fam)) fontLoadState.set(fam, 'pending');
+      }
+
       try {
-        if (document.fonts.check('16px "' + fam + '"')) {
-          loadedFontFamilies.add(fam);
-          continue;
+        if (fPath) {
+          // 兼容仍把 TTF base64 内嵌在 fPath 里的旧数据
+          const face = await new FontFace(families[0], 'url("' + fPath + '")').load();
+          document.fonts.add(face);
+          for (const fam of families) {
+            loadedFontFamilies.add(fam);
+            fontLoadState.set(fam, 'ready');
+          }
+          return;
         }
-        const face = fPath
-          ? new FontFace(fam, 'url("' + fPath + '")') // 兼容仍内嵌 base64 的旧数据
-          : (() => {
-              const bufPromise = fetchFontBinary(extUrl);
-              return bufPromise.then((buf) => (buf ? new FontFace(fam, buf) : null));
-            })();
-        const loaded = await face;
-        if (loaded) {
-          await loaded.load();
-          document.fonts.add(loaded);
+
+        const url = resolveFontUrl(f.fFamily, f.fName);
+        if (!url) {
+          for (const fam of families) fontLoadState.set(fam, 'failed');
+          addFontWarning('未找到绑定字体文件: ' + families.join(' / '));
+          return;
         }
-        loadedFontFamilies.add(fam);
-      } catch { /* 字体加载失败时回退系统字体 */ }
-    }
-  });
-  await Promise.allSettled(jobs);
+
+        const binary = await fetchFontBinary(url);
+        if (!looksLikeFontBuffer(binary)) {
+          for (const fam of families) fontLoadState.set(fam, 'failed');
+          addFontWarning('字体文件内容不是有效字体: ' + families.join(' / '));
+          return;
+        }
+
+        const results = await Promise.all(
+          families.map((fam) =>
+            registerFontFamily(fam, binary).catch((e) => {
+              fontLoadState.set(fam, 'failed');
+              addFontWarning(fam + ' 注册失败: ' + ((e as Error)?.message ?? String(e)));
+              return false;
+            })
+          )
+        );
+        if (!results.some(Boolean)) return;
+      } catch (e) {
+        // 字体加载失败时回退系统字体,但不再静默:状态栏/信息面板会说明原因
+        for (const fam of families) fontLoadState.set(fam, 'failed');
+        addFontWarning(families.join(' / ') + ' 加载失败: ' + ((e as Error)?.message ?? String(e)));
+      }
+    })
+  );
+  await document.fonts.ready.catch(() => undefined);
+  if (import.meta.env.DEV) {
+    // 自检用:确认这些 family 是「本站注册的」,而不是碰巧命中本机安装的同名字体
+    (window as any).__fontDebug = {
+      bundledOnly: new Set(loadedFontFamilies),
+      states: new Map(fontLoadState),
+      warnings: lastFontWarnings.slice(),
+    };
+  }
 }
 
 /* ---------- Canvas 渲染器文字兜底 ----------
@@ -1387,6 +1509,19 @@ function updateInfo(data: any) {
   const fontDefs: any[] = data.fonts?.list ?? [];
   const fonts: string[] = fontDefs.map((f: any) => f.fName).filter(Boolean);
   const embeddedFontCount = fontDefs.filter((f: any) => typeof f.fPath === 'string' && f.fPath.length > 0).length;
+  /* 字体状态看「注册结果」,而不是「JSON 里有没有 fPath」:
+   * 本仓库字体已按体积考虑从 JSON 剥离成 animation/fonts/*.ttf,旧写法只查 fPath,
+   * 于是永远显示「未内嵌」,与实际渲染能力无关,反而误导排查方向。 */
+  const fontStates: FontLoadState[] = fontDefs.flatMap((f: any) =>
+    [f.fFamily, f.fName].filter(Boolean).map((n: string) => fontLoadState.get(n) ?? 'pending')
+  );
+  const fontStatus = !fonts.length
+    ? '—'
+    : fontStates.includes('failed')
+      ? fonts.join('、') + ' · 加载失败(已回退系统字体)'
+      : fontStates.includes('pending')
+        ? fonts.join('、') + ' · 加载中'
+        : fonts.join('、') + (embeddedFontCount > 0 ? ' · JSON 内嵌字体' : ' · 站点字体文件');
 
   const items: [string, string][] = [
     ['尺寸', data.w + ' × ' + data.h],
@@ -1396,7 +1531,7 @@ function updateInfo(data: any) {
     ['图层数', String(data.layers?.length ?? 0)],
     ['资源数', String(assets.length)],
     ['内嵌资源', String(embedded.length)],
-    ['字体', fonts.length ? fonts.join('、') + (embeddedFontCount > 0 ? ' · 已内嵌' : ' · 未内嵌') : '—'],
+    ['字体', fontStatus],
     ['Bodymovin 版本', data.v ?? '—'],
   ];
   infoList.innerHTML = items.map(([k, v]) => '<dt>' + esc(k) + '</dt><dd>' + esc(v) + '</dd>').join('');
@@ -1439,9 +1574,15 @@ function updateInfo(data: any) {
   renderShapeList(data);
 
   if (fonts.length) {
-    setStatus(embeddedFontCount > 0
-      ? '自定义字体已从 JSON 内嵌文件加载: ' + fonts.join('、')
-      : '注意: 动画使用了自定义字体(' + fonts.join('、') + '),JSON 未内嵌字体,预览文字将回退为系统字体');
+    if (fontStates.includes('failed')) {
+      setStatus('字体加载失败(' + lastFontWarnings.slice(0, 2).join('; ') + '),预览文字已回退系统字体', true);
+    } else if (fontStates.includes('pending')) {
+      setStatus('字体加载中…');
+    } else {
+      setStatus(
+        (embeddedFontCount > 0 ? '自定义字体已从 JSON 内嵌文件加载: ' : '自定义字体已加载(站点字体文件): ') + fonts.join('、')
+      );
+    }
   }
 }
 
