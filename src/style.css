@@ -8,6 +8,17 @@
   --dim: #8b93a3;
   --accent: #3b82f6;
   --danger: #f87171;
+  /* 顶栏「制作声明」动效用的缓动曲线与待机周期:
+   * --craft-ease 两端慢、中段快(easeInOutExpo):蒙版边缘"看得见地"从左推到右。
+   *   之前用的 easeOutExpo 前 1/4 时长就揭开约 7 成,肉眼几乎是瞬间出现,所以看不出移动;
+   * --craft-out  收尾柔和(easeOutCubic),用于下划线拉开;
+   * --craft-back 轻微过冲(easeOutBack),用于图标弹入回正;
+   * --craft-idle-dur / --craft-idle-delay 待机动效的周期与首次出现时间 */
+  --craft-ease: cubic-bezier(0.7, 0, 0.3, 1);
+  --craft-out: cubic-bezier(0.33, 1, 0.68, 1);
+  --craft-back: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --craft-idle-dur: 7s;
+  --craft-idle-delay: 3.2s;
 }
 
 * { box-sizing: border-box; }
@@ -23,6 +34,141 @@ body {
   font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
   background: var(--bg);
   color: var(--text);
+}
+
+/* ---------- 制作声明(顶栏内联徽标,紧随品牌) ---------- */
+/* 单行胶囊:不新增高度,矮于顶栏内容(logo 26px),不挤压顶栏控件。
+ * overflow:hidden 用于裁掉扫光条;position:relative 供两个伪元素铺满胶囊 */
+.craft-note {
+  position: relative;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid rgba(59, 130, 246, 0.38);
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.1);
+  color: #b4c1d4;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.45;
+  white-space: nowrap;
+}
+.craft-note-ico { width: 12px; height: 12px; color: #7fa9f5; transform-origin: 50% 50%; }
+/* 强调:AE 提亮,「未使用AI辅助」最亮,一眼看到结论 */
+.craft-note b { color: #cfe0ff; font-weight: 600; }
+/* 强调句下划线:静态为 0 宽,入场时由 craft-underline 从左往右拉开并常驻 */
+.craft-note em {
+  color: #fff;
+  font-style: normal;
+  font-weight: 600;
+  padding-bottom: 2px;
+  background-image: linear-gradient(90deg, #3b82f6, #8fbaff);
+  background-repeat: no-repeat;
+  background-position: 0 100%;
+  background-size: 0 2px;
+}
+
+/* ---- 扫光条:同一个渐变挂在两个伪元素上,各管一段,互不覆盖 ----
+ * ::after  = 入场时随蒙版一起扫过的那道光;
+ * ::before = 待机时每隔一段时间出现的那道光(入场阶段保持静止)。
+ * 静态 opacity:0,没有动画时完全不可见,也不会挡住文字 */
+.craft-note::before,
+.craft-note::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateX(-130%);
+  background: linear-gradient(100deg, rgba(255, 255, 255, 0) 32%, rgba(255, 255, 255, 0.34) 50%, rgba(255, 255, 255, 0) 68%);
+}
+
+/* ---- 入场动效:由 main.ts 在加载界面淡出时给 <html> 挂 .craft-ready 触发 ----
+ * 时间轴整体后移 0.42s:#app-loading 淡出需要 0.45s,提前播放会被加载层盖住看不到。
+ * 1) 0.42s 起:胶囊被"蒙版"从左往右揭开。时长由 0.8s 拉到 1.15s,缓动换成 easeInOutExpo,
+ *    裁切边会实实在在地从左边推到右边(而不是"啪"地一下全出来);
+ * 2) 收尾叠一次边框蓝光呼吸;3) 之后每隔一段时间来一次待机动效 */
+html.craft-ready .craft-note {
+  animation:
+    craft-wipe 1.15s var(--craft-ease) 0.42s both,
+    craft-glow 0.95s ease-out 1.7s both,
+    craft-idle-glow var(--craft-idle-dur) ease-in-out var(--craft-idle-delay) infinite;
+}
+/* 图标:蒙版推到中段时回正弹入(过冲) */
+html.craft-ready .craft-note-ico { animation: craft-icon-in 0.65s var(--craft-back) 0.72s both; }
+/* 入场的那道光:与蒙版同时起、同时收,观感上像它把内容一路"扫"出来 */
+html.craft-ready .craft-note::after { animation: craft-sheen 1.15s var(--craft-ease) 0.42s both; }
+/* 下划线从左往右拉开并常驻(收尾柔和),之后交给待机曲线重描 */
+html.craft-ready .craft-note em {
+  animation:
+    craft-underline 0.75s var(--craft-out) 1.45s forwards,
+    craft-idle-underline var(--craft-idle-dur) ease-in-out var(--craft-idle-delay) infinite;
+}
+/* 待机那道光(入场阶段静止) */
+html.craft-ready .craft-note::before {
+  animation: craft-idle-sheen var(--craft-idle-dur) ease-in-out var(--craft-idle-delay) infinite;
+}
+
+/* 蒙版从左往右揭开:inset 保持胶囊圆角,右侧裁切边逐步退到 0 */
+@keyframes craft-wipe {
+  from { clip-path: inset(0 100% 0 0 round 999px); }
+  to   { clip-path: inset(0 0 0 0 round 999px); }
+}
+@keyframes craft-icon-in {
+  from { opacity: 0; transform: rotate(-28deg) scale(0.5); }
+  to   { opacity: 1; transform: rotate(0deg) scale(1); }
+}
+@keyframes craft-sheen {
+  0%   { opacity: 0; transform: translateX(-130%); }
+  12%  { opacity: 1; }
+  88%  { opacity: 1; }
+  100% { opacity: 0; transform: translateX(130%); }
+}
+@keyframes craft-underline {
+  from { background-size: 0 2px; }
+  to   { background-size: 100% 2px; }
+}
+@keyframes craft-glow {
+  0%   { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+  38%  { box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2), 0 0 16px rgba(59, 130, 246, 0.38); }
+  100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+}
+/* ---- 待机动效 ----
+ * 三条曲线共用同一周期(--craft-idle-dur)+ 同一延迟(--craft-idle-delay),
+ * 因此每轮都是"光带扫过 + 下划线重描 + 边框微光"同时发生、同时收;
+ * 周期前 2/3 完全静止(0%~68% 保持静息值),只在后 1/3 动一下,避免喧宾夺主。 */
+@keyframes craft-idle-sheen {
+  0%, 68% { opacity: 0; transform: translateX(-130%); }
+  73%     { opacity: 1; }
+  88%     { opacity: 0; transform: translateX(130%); }
+  100%    { opacity: 0; transform: translateX(130%); }
+}
+@keyframes craft-idle-glow {
+  0%, 68% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+  80%     { box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.14), 0 0 12px rgba(59, 130, 246, 0.26); }
+  100%    { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+}
+@keyframes craft-idle-underline {
+  0%, 68% { background-size: 100% 2px; }
+  74%     { background-size: 0 2px; }
+  95%     { background-size: 100% 2px; }
+  100%    { background-size: 100% 2px; }
+}
+
+/* 窄屏(≤480px):放开徽标换行,避免 320px 级别宽度被 nowrap 顶出横向滚动 */
+@media (max-width: 480px) {
+  .craft-note { white-space: normal; padding: 3px 8px; font-size: 11.5px; }
+}
+/* 系统开启「减少动态效果」时:不放动效,直接呈现终态(下划线常驻、不扫光) */
+@media (prefers-reduced-motion: reduce) {
+  html.craft-ready .craft-note,
+  html.craft-ready .craft-note::before,
+  html.craft-ready .craft-note::after,
+  html.craft-ready .craft-note-ico,
+  html.craft-ready .craft-note em { animation: none; }
+  .craft-note em { background-size: 100% 2px; }
 }
 
 /* 顶栏 */
@@ -413,6 +559,64 @@ input[type="color"] { padding: 0; width: 34px; height: 26px; }
   text-align: center;
   font-variant-numeric: tabular-nums;
   color: var(--accent, #60a5fa);
+}
+/* 图标选择:位置暴露 / 二次扫描 分段选项卡(两段可分别指定图标) */
+.icon-scope {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.icon-scope-btn {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--dim);
+  text-align: left;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+.icon-scope-btn:hover { border-color: var(--accent); }
+.icon-scope-btn.is-active {
+  border-color: var(--accent);
+  background: rgba(59, 130, 246, 0.12);
+  color: var(--text);
+}
+.icon-scope-label { font-size: 12px; font-weight: 600; line-height: 1.3; }
+.icon-scope-pick { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.icon-scope-thumb {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  object-fit: contain;
+}
+.icon-scope-name {
+  font-size: 10px;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.icon-scope-btn.is-active .icon-scope-name { color: var(--accent); }
+.icon-follow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+.icon-scope-hint {
+  margin: -2px 0 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--dim);
 }
 #iconList {
   list-style: none;

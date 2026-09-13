@@ -51,6 +51,10 @@ function hideAppLoading(pct = 100) {
   const el = document.getElementById('app-loading');
   if (el) {
     el.classList.add('is-hidden');
+    /* 顶栏「制作声明」徽标的入场动效触发点:加载界面开始淡出的同一刻。
+     * 用 <html> 上的常驻 class(而不是 #app-loading 的兄弟选择器):该节点 500ms 后会被移除,
+     * 挂在它身上的选择器一旦失配,尚未播完的动效会被立刻打断。 */
+    document.documentElement.classList.add('craft-ready');
     window.setTimeout(() => el.remove(), 500);
   }
 }
@@ -747,6 +751,16 @@ const iconCount = $<HTMLElement>('iconCount');
 const iconFile = $<HTMLInputElement>('iconFile');
 const chkIcon = $<HTMLInputElement>('chkIcon');
 const iconNudgeRow = $<HTMLDivElement>('iconNudgeRow'); // 居中微调行:仅「显示图标」取消勾选(图标隐藏)后显示
+/* 图标选择的分段选项卡:位置暴露(主段)/ 二次扫描(第二段)分别自定义图标 */
+const iconScopeMain = $<HTMLButtonElement>('iconScopeMain');
+const iconScopeNext = $<HTMLButtonElement>('iconScopeNext');
+const iconScopeThumbMain = $<HTMLImageElement>('iconScopeThumbMain');
+const iconScopeThumbNext = $<HTMLImageElement>('iconScopeThumbNext');
+const iconScopeNameMain = $<HTMLElement>('iconScopeNameMain');
+const iconScopeNameNext = $<HTMLElement>('iconScopeNameNext');
+const iconScopeHint = $<HTMLElement>('iconScopeHint');
+const iconFollowRow = $<HTMLLabelElement>('iconFollowRow');
+const chkFollowMainIcon = $<HTMLInputElement>('chkFollowMainIcon');
 const chkPopup = $<HTMLInputElement>('chkPopup');
 const popupLayer = $<HTMLDivElement>('popupLayer');
 const popupCount = $<HTMLElement>('popupCount');
@@ -1120,6 +1134,10 @@ chkNextScan.addEventListener('change', () => {
       currentData = animation2Data;
     }
   }
+  // 两段图标资源:合并后第二段资源为 image_0_n,取消合并后回到 image_0;这里再按
+  // 用户选择对齐一次(mergeNextInto 内部也会覆盖),并刷新选项卡提示(二次扫描是否已开启)
+  applyIconsToData();
+  syncIconScopeUI(currentData);
   loadData(currentData, currentName);
   // 二次扫描合并/取消后,图片图层列表(百叶窗.png / 百叶窗2.png / 光.png)随之变化,需刷新
   const hasTintImage = (currentData?.layers ?? []).some(
@@ -2389,6 +2407,11 @@ interface DikuangSeg {
   iconBasePosKeys: { t: number; s: number }[]; // 图标位置 X 关键帧基准(空 2 空间,含时刻 t)
   visibleInd: number;      // 底框(可见)图层 ind:8 / 108
   rectBaseOpacity: number; // 「矩形 1」形状组原始不透明度
+  /* 「光.png」是绝对层(不属于空 2 组),底框加宽时它不会跟着走,必须按同一仿射变换
+   * 手动改写它的位移关键帧,否则光带只扫到加宽前的位置。 */
+  lightInd: number;        // 光.png 图层 ind(该段没有则为 -1)
+  lightBasePosKeys: { t: number; s: number }[]; // 光.png 位移 X 关键帧基准(合成空间,含时刻 t)
+  platePivotX: number | null; // 底框缩放枢轴(合成空间 X):仿射变换的定点
 }
 let dikuangSegs: DikuangSeg[] = [];
 
@@ -2460,6 +2483,54 @@ function measureDikuangTextWidth(text: string, doc: any): number {
   return maxW;
 }
 
+/* 取属性在「静态值」或「首个关键帧」处的分量(用于求底框缩放枢轴) */
+function propBaseValue(prop: any, index = 0): number | null {
+  if (!prop) return null;
+  if (prop.a === 1 && Array.isArray(prop.k)) {
+    const first = prop.k[0];
+    if (first && Array.isArray(first.s) && typeof first.s[index] === 'number') return first.s[index];
+    return null;
+  }
+  if (Array.isArray(prop.k) && typeof prop.k[index] === 'number') return prop.k[index];
+  return null;
+}
+
+/* 图层「位置 X」的关键帧数组。数据里有两种写法,lottie 两种都支持:
+ *   ① 分离维度:ks.p.x.k(图标、空对象等)
+ *   ② 整体位置:ks.p.k[i].s = [x, y, z](光.png 这种没有 split 的写法)
+ * 两者的 X 分量都落在 s[0],因此统一返回关键帧数组、统一读写 s[0] 即可。 */
+function posXKeyframesOf(layer: any): any[] | null {
+  const p = layer?.ks?.p;
+  if (!p) return null;
+  if (p.x && Array.isArray(p.x.k)) return p.x.k;
+  if (Array.isArray(p.k)) return p.k;
+  return null;
+}
+
+/* 图层锚点在合成空间的 X —— 即该图层「自身 X 缩放」的定点(枢轴)。
+ * 沿 parent 链逐级映射:v → p(该级) + s(该级) × (v − a(该级))。
+ * 空对象(空 2 / 空 3)的锚点与其位置重合,父级缩放动画不会移动该点,因此用各级
+ * 基准值求一次即可(实测二次扫描段底框枢轴在整段内恒为 1890)。 */
+function layerAnchorCompX(layer: any): number | null {
+  if (!currentData || !layer) return null;
+  let vx = propBaseValue(layer.ks?.p, 0);
+  if (vx === null) return null;
+  const visited = new Set<number>();
+  let cur: any = layer;
+  while (cur && typeof cur.parent === 'number' && !visited.has(cur.parent)) {
+    visited.add(cur.parent);
+    const parent = findLayerByInd(currentData.layers, cur.parent);
+    if (!parent) break;
+    const px = propBaseValue(parent.ks?.p, 0);
+    const ax = propBaseValue(parent.ks?.a, 0);
+    const sx = propBaseValue(parent.ks?.s, 0);
+    if (px === null || ax === null || sx === null) break;
+    vx = px + (sx / 100) * (vx - ax);
+    cur = parent;
+  }
+  return vx;
+}
+
 /* 捕获底框基准几何(两段独立):文字原始内容/终态缩放、底框 X 缩放关键帧、矩形基准宽、父级缩放 */
 function captureDikuangBaseState() {
   dikuangSegs = [];
@@ -2489,6 +2560,9 @@ function captureDikuangBaseState() {
       iconBasePosKeys: [],
       visibleInd: -1,
       rectBaseOpacity: 100,
+      lightInd: -1,
+      lightBasePosKeys: [],
+      platePivotX: null,
     };
     const textLayer = findLayerByInd(currentData.layers, seg.textInd);
     const doc = textLayer ? textDocOf(textLayer) : null;
@@ -2544,6 +2618,32 @@ function captureDikuangBaseState() {
       seg.iconBasePosKeys = px.k
         .filter((kf: any) => Array.isArray(kf.s))
         .map((kf: any) => ({ t: kf.t, s: kf.s[0] }));
+    }
+    /* 光.png(仅二次扫描段存在):记录位移 X 关键帧基准,以及底框缩放枢轴。
+     * 它是绝对层(不在空 2 组内),底框加宽不会带动它,需按同一仿射变换手动改写。 */
+    const light = (() => {
+      const walk = (layers: any[]): any | null => {
+        for (const l of layers ?? []) {
+          if (l.nm === '光.png' && seg.inSeg(l.ind)) return l;
+          if (Array.isArray(l.layers)) {
+            const hit = walk(l.layers);
+            if (hit) return hit;
+          }
+        }
+        return null;
+      };
+      return walk(currentData.layers);
+    })();
+    if (light) {
+      seg.lightInd = light.ind;
+      const lkeys = posXKeyframesOf(light);
+      if (lkeys) {
+        seg.lightBasePosKeys = lkeys
+          .filter((kf: any) => Array.isArray(kf.s))
+          .map((kf: any) => ({ t: kf.t, s: kf.s[0] }));
+      }
+      const plateLayers = findDikuangLayers(seg);
+      if (plateLayers.length > 0) seg.platePivotX = layerAnchorCompX(plateLayers[0]);
     }
     // 记录底框(可见)图层的 ind 与「矩形 1」形状组原始不透明度
     const vis = (() => {
@@ -2614,6 +2714,23 @@ function adaptDikuangWidth() {
           const frame = typeof kf.t === 'number' ? kf.t : base.t;
           const parentScaleAtFrame = getParentScaleAtFrame(seg, frame);
           if (parentScaleAtFrame > 0.01) kf.s[0] = base.s - (deltaComp / 2) / parentScaleAtFrame;
+        });
+      }
+    }
+    /* 光.png:绝对层(不属于空 2 组),底框加宽不会带动它 —— 不处理的话光带只会扫到
+     * 「加宽前」的位置(关键帧仍是原值)。这里对它的 X 位移关键帧施加与底框完全相同的
+     * 仿射变换(以底框缩放枢轴为定点,倍数即底框的 X 缩放 k):
+     *   x' = pivot + (x − pivot) × k
+     * 文字恢复原宽时 k = 1,关键帧自动回到基准值。 */
+    if (seg.lightBasePosKeys.length > 0 && seg.platePivotX !== null) {
+      const light = findLayerByInd(currentData.layers, seg.lightInd);
+      const lkeys = posXKeyframesOf(light);
+      const pivot = seg.platePivotX;
+      if (lkeys) {
+        lkeys.forEach((kf: any, i: number) => {
+          const base = seg.lightBasePosKeys[i];
+          if (!base || !Array.isArray(kf.s)) return;
+          kf.s[0] = pivot + (base.s - pivot) * k;
         });
       }
     }
@@ -3431,6 +3548,18 @@ function isMergedNext(data: any): boolean {
 function mergeNextInto(main: any): any {
   const d = JSON.parse(JSON.stringify(main));
   const next = prepareNextData(animation2NextData, d.op);
+  // 二次扫描段图标:prepareNextData 把第二段的 image_0 重命名为 image_0_n,并按用户为
+  // 二次扫描单独选定的图标覆盖它的图片资源(未单独指定时即「跟随位置暴露」当前值),
+  // 保证每次开启二次扫描都是用户要的图标,而不是 JSON 内置的那张 PNG。
+  const nextIconUrl = effectiveIconUrl('next');
+  if (nextIconUrl) {
+    const nextIconAsset = (next.assets ?? []).find((a: any) => a.id === 'image_0_n');
+    if (nextIconAsset) {
+      nextIconAsset.p = nextIconUrl;
+      nextIconAsset.u = '';
+      nextIconAsset.e = 1;
+    }
+  }
   d.layers = [...d.layers, ...next.layers];
   d.assets = [...d.assets, ...next.assets];
   const fonts = d.fonts?.list ?? [];
@@ -3492,8 +3621,19 @@ let currentAnimKey = 'extraction';
 let showNextScan = false; // 是否显示二次扫描(主动画后紧接着播第二段)
 let nextDuration = 3.2; // 第二段时长(秒,默认 3.2s)
 
-/* ---------- 位置暴露动画图标选择 ---------- */
-let currentIconName = DEFAULT_ICON_NAME;
+/* ---------- 位置暴露动画图标选择(位置暴露 / 二次扫描 可分别自定义) ----------
+ * 两段的图标各自是一个独立图片资源,因此可以分别指定:
+ *   • 位置暴露(主段):animation2Data 的 image_0(图层 ind 5,恒存在);
+ *   • 二次扫描(第二段):animation2NextData 的 image_0 —— 该段被 mergeNextInto/
+ *     prepareNextData 合并时会整体重命名为 image_0_n(图层 ind 105),所以合并后的
+ *     数据里要写 image_0_n,而原始第二段数据里要写 image_0。
+ * 每段都同时写入「源数据」与「当前(可能已合并)数据」,这样开启/关闭「二次扫描」来回
+ * 切换、以及重新合并时都不会退回内置 PNG。 */
+type IconScope = 'main' | 'next';
+let iconScope: IconScope = 'main'; // 当前选项卡:正在为哪一段挑图标
+let iconMainName = DEFAULT_ICON_NAME; // 位置暴露图标
+let iconNextName = DEFAULT_ICON_NAME; // 二次扫描图标(默认与位置暴露相同)
+let followMainIcon = true; // 二次扫描是否跟随位置暴露(默认跟随,与旧版「两段共用图标」一致)
 let customIcons: { name: string; url: string }[] = []; // 用户上传的自定义图标(会话内有效)
 
 /* ---------- 图标显示开关 ----------
@@ -3632,47 +3772,152 @@ function allIconOptions() {
   return [...customIcons, ...ICON_OPTIONS];
 }
 
-function applyIconByName(name: string) {
-  const opt = allIconOptions().find((o) => o.name === name);
-  if (!opt) return;
-  currentIconName = name;
-  // 同时更新主段(image_0)与二次扫描段(image_0_n)的图标资源,保证两段图标一致
+/* 图标显示名:去掉扩展名(Hero_Sp_03.webp → Hero_Sp_03) */
+function iconDisplayName(name: string) {
+  return name.replace(/\.(png|jpe?g|webp|gif)$/i, '');
+}
+
+function findIconOption(name: string) {
+  return allIconOptions().find((o) => o.name === name);
+}
+
+/* 某段实际生效的图标名:二次扫描在「跟随位置暴露」时取位置暴露的值 */
+function effectiveIconName(scope: IconScope): string {
+  if (scope === 'main') return iconMainName;
+  return followMainIcon ? iconMainName : iconNextName;
+}
+
+function effectiveIconUrl(scope: IconScope) {
+  return findIconOption(effectiveIconName(scope))?.url ?? '';
+}
+
+function setAssetImageUrl(data: any, id: string, url: string): boolean {
+  const asset = (data?.assets ?? []).find((a: any) => a.id === id);
+  if (!asset) return false;
+  asset.p = url;
+  asset.u = '';
+  asset.e = 1;
+  return true;
+}
+
+/* 把某段选定的图标写入该段的所有相关数据对象。
+ * 只认「位置暴露动画」的两个数据对象:切换动画的瞬间 currentData 可能仍是撤离动画,
+ * 而它的资源 id 也叫 image_0,误写会改坏撤离动画的图标。合并后的数据与 animation2Data
+ * 是同一个对象(见 chkNextScan / switchAnimation),因此写它就等于写 currentData。 */
+function applyIconUrlToScope(scope: IconScope, url: string): boolean {
+  if (!url) return false;
   let updated = false;
-  for (const id of ['image_0', 'image_0_n']) {
-    const asset = (currentData?.assets ?? []).find((a: any) => a.id === id);
-    if (!asset) continue;
-    asset.p = opt.url;
-    asset.u = '';
-    asset.e = 1;
-    updated = true;
+  if (scope === 'main') {
+    // 位置暴露(主段):资源恒为 image_0。注意不能顺带写 image_0_n ——那是第二段的资源
+    if (setAssetImageUrl(animation2Data, 'image_0', url)) updated = true;
+  } else {
+    // 二次扫描:源数据(未合并)里叫 image_0,合并后被 prepareNextData 重命名为 image_0_n。
+    // 两者是各自独立的资源,必须分别写;绝不能写 animation2Data.image_0(那是一次的图标)
+    if (setAssetImageUrl(animation2NextData, 'image_0', url)) updated = true;
+    if (setAssetImageUrl(animation2Data, 'image_0_n', url)) updated = true;
   }
-  if (!updated) return;
-  renderIconList();
+  return updated;
+}
+
+/* 按当前状态刷新两段图标资源。两段都写:即便处于「跟随」状态,二次扫描资源也要对齐,
+ * 否则取消跟随、或关闭再开启二次扫描时第二段会退回内置 PNG。 */
+function applyIconsToData(): boolean {
+  let updated = false;
+  if (applyIconUrlToScope('main', effectiveIconUrl('main'))) updated = true;
+  if (applyIconUrlToScope('next', effectiveIconUrl('next'))) updated = true;
+  return updated;
+}
+
+/* 选中某段的图标。在「二次扫描」页点选图标即视为单独指定,自动取消「跟随位置暴露」 */
+function setIconForScope(scope: IconScope, name: string) {
+  if (!findIconOption(name)) return;
+  if (scope === 'main') {
+    iconMainName = name;
+    if (followMainIcon) iconNextName = name; // 跟随中:顺带记录,取消跟随后仍显示同一图标
+  } else {
+    iconNextName = name;
+    if (followMainIcon) {
+      followMainIcon = false; // 为二次扫描单独指定 → 不再跟随
+      chkFollowMainIcon.checked = false;
+    }
+  }
+  applyIconsToData();
+  syncIconScopeUI();
   reRenderPreservingState();
+}
+
+function setIconScope(scope: IconScope) {
+  if (iconScope === scope) return;
+  iconScope = scope;
+  syncIconScopeUI();
+}
+
+/* 同步选项卡 / 缩略图 / 跟随开关 / 二次扫描提示,并重绘图标网格。
+ * data 可显式传入「正在载入的数据」,避免切换动画瞬间用旧数据判断二次扫描是否已开启。 */
+function syncIconScopeUI(data: any = currentData) {
+  const isNext = iconScope === 'next';
+  iconScopeMain.classList.toggle('is-active', !isNext);
+  iconScopeNext.classList.toggle('is-active', isNext);
+  iconScopeMain.setAttribute('aria-selected', String(!isNext));
+  iconScopeNext.setAttribute('aria-selected', String(isNext));
+  iconFollowRow.hidden = !isNext;
+  chkFollowMainIcon.checked = followMainIcon;
+  const setPick = (thumb: HTMLImageElement, label: HTMLElement, name: string) => {
+    const opt = findIconOption(name);
+    if (!opt) return;
+    if (thumb.getAttribute('src') !== opt.url) thumb.src = opt.url;
+    label.textContent = iconDisplayName(opt.name);
+  };
+  setPick(iconScopeThumbMain, iconScopeNameMain, effectiveIconName('main'));
+  setPick(iconScopeThumbNext, iconScopeNameNext, effectiveIconName('next'));
+  // 二次扫描尚未开启(数据未合并)时给出提示:设置会保留,开启后自动生效
+  const nextReady = isMergedNext(data);
+  iconScopeHint.hidden = !(isNext && !nextReady);
+  if (isNext && !nextReady) {
+    iconScopeHint.textContent = '二次扫描尚未开启:这里的选择会保留,在上方「动画时长 → 二次扫描」勾选后自动生效。';
+  }
+  renderIconList();
 }
 
 function renderIconList() {
   const opts = allIconOptions();
-  iconCount.textContent = '· ' + opts.length + ' 个';
+  const activeName = effectiveIconName(iconScope);
+  const following = iconScope === 'next' && followMainIcon;
+  iconCount.textContent = '· ' + opts.length + ' 个' + (following ? ' · 跟随位置暴露' : '');
   iconList.innerHTML = opts
     .map(
       (opt) =>
-        '<li class="icon-item' + (opt.name === currentIconName ? ' is-active' : '') + '" data-name="' + esc(opt.name) + '">' +
+        '<li class="icon-item' + (opt.name === activeName ? ' is-active' : '') + '" data-name="' + esc(opt.name) + '">' +
         '<img class="icon-thumb" src="' + opt.url + '" alt="' + esc(opt.name) + '" loading="lazy" />' +
-        '<span class="icon-name">' + esc(opt.name.replace(/\.(png|jpe?g|webp|gif)$/i, '')) + '</span>' +
+        '<span class="icon-name">' + esc(iconDisplayName(opt.name)) + '</span>' +
         '</li>'
     )
     .join('');
   iconList.querySelectorAll<HTMLLIElement>('.icon-item').forEach((li) => {
     li.addEventListener('click', () => {
       const name = li.dataset.name;
-      if (!name || name === currentIconName) return;
-      applyIconByName(name);
+      if (!name) return;
+      // 二次扫描页在「跟随」状态下点中同一个图标也要落成单独指定(用户意图是固定下来)
+      if (name === effectiveIconName(iconScope) && !(iconScope === 'next' && followMainIcon)) return;
+      setIconForScope(iconScope, name);
     });
   });
 }
 
-/* 用户上传自定义图标:读取为 data URL,加入列表并立即应用 */
+iconScopeMain.addEventListener('click', () => setIconScope('main'));
+iconScopeNext.addEventListener('click', () => setIconScope('next'));
+
+/* 「二次扫描跟随位置暴露」开关:勾选后第二段立即改回与位置暴露相同 */
+chkFollowMainIcon.addEventListener('change', () => {
+  followMainIcon = chkFollowMainIcon.checked;
+  if (followMainIcon) iconNextName = iconMainName;
+  applyIconsToData();
+  syncIconScopeUI();
+  reRenderPreservingState();
+  setStatus(followMainIcon ? '二次扫描图标已改为跟随位置暴露' : '二次扫描图标已独立:可单独选择或上传');
+});
+
+/* 用户上传自定义图标:读取为 data URL,加入列表并应用到当前选项卡对应的段 */
 iconFile.addEventListener('change', () => {
   const file = iconFile.files?.[0];
   iconFile.value = ''; // 允许重复选择同一文件
@@ -3688,13 +3933,15 @@ iconFile.addEventListener('change', () => {
       setStatus('不支持的文件类型', true);
       return;
     }
-    const base = file.name.replace(/\.(png|jpe?g|webp|gif)$/i, '') || '自定义图标';
+    const base = iconDisplayName(file.name) || '自定义图标';
+    // 显示名去重(与内置/已上传图标同名时追加序号),避免列表里出现两个同名项
+    const taken = new Set(allIconOptions().map((o) => iconDisplayName(o.name)));
     let name = base;
     let n = 2;
-    while (allIconOptions().some((o) => o.name === name)) name = base + ' (' + n++ + ')';
+    while (taken.has(iconDisplayName(name))) name = base + ' (' + n++ + ')';
     customIcons.unshift({ name, url });
-    applyIconByName(name);
-    setStatus('已应用自定义图标: ' + name);
+    setIconForScope(iconScope, name);
+    setStatus('已应用自定义图标「' + iconDisplayName(name) + '」到' + (iconScope === 'next' ? '二次扫描' : '位置暴露'));
   };
   reader.onerror = () => setStatus('读取图片失败', true);
   reader.readAsDataURL(file);
@@ -3745,11 +3992,16 @@ async function switchAnimation(key: string) {
   imageSection.hidden = !hasBaiyechuang;
   if (hasBaiyechuang) renderImageList(data);
   else imageList.innerHTML = '';
-  // 图标选择区块:仅位置暴露动画显示
+  // 图标选择区块:仅位置暴露动画显示。载入前先按用户选择(位置暴露 / 二次扫描各自的图标)
+  // 刷新两段资源,保证随后 loadData 构建的动画直接用上正确的图标。
   const hasIcon = (data.layers ?? []).some((l: any) => l.ty === 2 && l.nm === '图标_可替换');
   iconSection.hidden = !hasIcon;
-  if (hasIcon) renderIconList();
-  else iconList.innerHTML = '';
+  if (hasIcon) {
+    applyIconsToData();
+    syncIconScopeUI(data);
+  } else {
+    iconList.innerHTML = '';
+  }
   // 动画时长区块(时长 + 二次扫描开关 + 二次扫描时长):仅位置暴露动画显示
   const isExposed = key === 'exposed';
   timingSection.hidden = !isExposed;

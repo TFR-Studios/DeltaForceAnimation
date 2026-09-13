@@ -39,6 +39,12 @@
         <img class="brand-logo" src="/logo.svg" alt="" aria-hidden="true" />
         <span>三角洲行动动画编辑器<span class="tag">编辑 · 预览 · 导出</span></span>
       </div>
+      <!-- 制作声明:顶栏内联徽标(纯展示元素,不参与任何编辑/导出逻辑) -->
+      <span class="craft-note" role="note" title="网站内动画均由人工使用AE制作，未使用AI辅助">
+        <svg class="bi craft-note-ico" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293zm-9.761 5.175-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325"/>
+        </svg><span class="craft-note-text">网站内动画均由人工使用<b>AE</b>制作，<em>未使用AI辅助</em></span>
+      </span>
       <label class="anim-switch" title="切换要编辑的动画">
         <span class="anim-switch-label">动画</span>
         <select id="selAnim">
@@ -158,7 +164,27 @@
           </button>
           <button type="button" id="btnNudgeReset" class="nudge-btn" title="重置为 0">重置</button>
         </div>
-        <label class="icon-upload" title="上传本地图片作为图标(PNG/JPG/WebP,≤2MB)">
+        <div class="icon-scope" role="tablist" aria-label="选择要自定义图标的扫描段">
+          <button type="button" class="icon-scope-btn is-active" id="iconScopeMain" data-scope="main" role="tab" aria-selected="true" title="自定义位置暴露(第一段)的图标">
+            <span class="icon-scope-label">位置暴露</span>
+            <span class="icon-scope-pick">
+              <img class="icon-scope-thumb" id="iconScopeThumbMain" alt="" />
+              <span class="icon-scope-name" id="iconScopeNameMain"></span>
+            </span>
+          </button>
+          <button type="button" class="icon-scope-btn" id="iconScopeNext" data-scope="next" role="tab" aria-selected="false" title="自定义二次扫描(第二段)的图标">
+            <span class="icon-scope-label">二次扫描</span>
+            <span class="icon-scope-pick">
+              <img class="icon-scope-thumb" id="iconScopeThumbNext" alt="" />
+              <span class="icon-scope-name" id="iconScopeNameNext"></span>
+            </span>
+          </button>
+        </div>
+        <label class="icon-follow" id="iconFollowRow" hidden title="勾选后二次扫描沿用位置暴露的图标;取消勾选即可为二次扫描单独选择或上传图标">
+          <input type="checkbox" id="chkFollowMainIcon" checked /> 二次扫描跟随位置暴露
+        </label>
+        <p class="icon-scope-hint" id="iconScopeHint" hidden></p>
+        <label class="icon-upload" title="上传本地图片作为图标(PNG/JPG/WebP,≤2MB),应用到当前选项卡的扫描段">
           <input type="file" id="iconFile" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
           <span>
             <svg class="bi" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
