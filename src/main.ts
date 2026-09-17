@@ -21,6 +21,11 @@ import exposedAudioUrl from '../animation_2/UI_C201_Energy_Scout_Bow_Scout_02.wa
 const FONT_MEDIUM_URL = new URL('../animation/fonts/ProjectDType-Medium.ttf', import.meta.url).href;
 const FONT_CURVE_URL = new URL('../animation/fonts/ProjectDTypeCurve-Bold.ttf', import.meta.url).href;
 
+/* 同一字体的 WOFF2 版本:仅供「SVG 逐帧光栅化导出」内联使用(体积约为 TTF 的一半,
+ * 每帧都要重新解析一次内联字体,所以这里省下的是实打实的导出时间)。 */
+const FONT_MEDIUM_WOFF2_URL = new URL('../animation/fonts/ProjectDType-Medium.woff2', import.meta.url).href;
+const FONT_CURVE_WOFF2_URL = new URL('../animation/fonts/ProjectDTypeCurve-Bold.woff2', import.meta.url).href;
+
 /* ---------- 启动加载界面 ----------
  * #app-loading 的样式是内联在 index.html 中的(不依赖本文件 import 的 style.css),
  * 因此在样式表加载完成前即可渲染显示;本模块在 import 到 style.css 之后执行,
@@ -217,6 +222,28 @@ const EXTERNAL_FONT_URLS_NORM: Record<string, string> = (() => {
   return out;
 })();
 
+/* 与 EXTERNAL_FONT_URLS 同键,只是指向 WOFF2 版本(键→URL 的映射由下面的表自动生成) */
+const EXTERNAL_FONT_WOFF2: Record<string, string> = {};
+for (const [key, url] of Object.entries(EXTERNAL_FONT_URLS)) {
+  EXTERNAL_FONT_WOFF2[key] = url === FONT_CURVE_URL ? FONT_CURVE_WOFF2_URL : FONT_MEDIUM_WOFF2_URL;
+}
+const EXTERNAL_FONT_WOFF2_NORM: Record<string, string> = (() => {
+  const out: Record<string, string> = {};
+  const norm = (s: string) => s.toLowerCase().replace(/[\s\-_]+/g, '');
+  for (const [k, v] of Object.entries(EXTERNAL_FONT_WOFF2)) out[norm(k)] = v;
+  return out;
+})();
+
+function resolveFontWoff2Url(...names: (string | undefined)[]): string {
+  const norm = (s: string) => s.toLowerCase().replace(/[\s\-_]+/g, '');
+  for (const n of names) {
+    if (!n) continue;
+    const hit = EXTERNAL_FONT_WOFF2[n] ?? EXTERNAL_FONT_WOFF2_NORM[norm(n)];
+    if (hit) return hit;
+  }
+  return '';
+}
+
 function resolveFontUrl(...names: (string | undefined)[]): string {
   const norm = (s: string) => s.toLowerCase().replace(/[\s\-_]+/g, '');
   for (const n of names) {
@@ -240,7 +267,8 @@ function fetchFontBinary(url: string): Promise<ArrayBuffer | null> {
   return p;
 }
 
-/* 常见字体容器魔数:0x00010000 / 'true' / 'OTTO'(CFF) / 'ttcf'(字体集合)。 */
+/* 常见字体容器魔数:0x00010000 / 'true' / 'OTTO'(CFF) / 'ttcf'(字体集合)
+ * / 'wOFF'(WOFF) / 'wOF2'(WOFF2 —— 栅格化导出内联用的是 WOFF2,少认一个就会静默丢失字体)。 */
 function looksLikeFontBuffer(buf: ArrayBuffer | null): buf is ArrayBuffer {
   if (!buf || buf.byteLength < 12) return false;
   const b = new Uint8Array(buf, 0, 4);
@@ -249,7 +277,9 @@ function looksLikeFontBuffer(buf: ArrayBuffer | null): buf is ArrayBuffer {
     u32 === 0x00010000 ||
     u32 === 0x74727565 || // 'true'
     u32 === 0x4f54544f || // 'OTTO'
-    u32 === 0x74746366 // 'ttcf'
+    u32 === 0x74746366 || // 'ttcf'
+    u32 === 0x774f4646 || // 'wOFF'
+    u32 === 0x774f4632 // 'wOF2'
   );
 }
 
@@ -499,9 +529,9 @@ function patchCanvasRendererTree(renderer: any, exportMode = false) {
     if (el && el.data && !el.__lottieFallbackPatched) {
       el.__lottieFallbackPatched = true;
       if (el.data.ty === 5) patchCanvasTextElement(el);
-      else if (el.data.ty === 2 && seqLayerInd >= 0 && el.data.ind === seqLayerInd) {
+      else if (el.data.ty === 2 && seqEntryByInd.get(el.data.ind)) {
         el.__seqUseExport = exportMode;
-        patchSeqCanvasElement(el);
+        patchSeqCanvasElement(el, seqEntryByInd.get(el.data.ind) as SeqEntry);
       } else if (el.data.ty === 0 && typeof el.buildItem === 'function') {
         patchCanvasRendererTree(el, exportMode); // 预合成内
       }
@@ -516,9 +546,9 @@ function patchCanvasRendererTree(renderer: any, exportMode = false) {
     el.__lottieFallbackPatched = true;
     if (el.data && el.data.ty === 5) {
       patchCanvasTextElement(el);
-    } else if (el.data && el.data.ty === 2 && seqLayerInd >= 0 && el.data.ind === seqLayerInd) {
+    } else if (el.data && el.data.ty === 2 && seqEntryByInd.get(el.data.ind)) {
       el.__seqUseExport = exportMode;
-      patchSeqCanvasElement(el);
+      patchSeqCanvasElement(el, seqEntryByInd.get(el.data.ind) as SeqEntry);
     } else if (el.data && el.data.ty === 0 && typeof el.buildItem === 'function') {
       patchCanvasRendererTree(el); // 预合成内的文字层
     }
@@ -532,17 +562,15 @@ function patchCanvasRendererTree(renderer: any, exportMode = false) {
  * - canvas 渲染器:绘制前把元素的 img 切换为当前帧图片(双缓冲预加载);
  * - SVG 渲染器:逐帧切换 <image> 的 href(浏览器图片缓存保证即时显示);
  * - 导出:在渲染帧前 await 解码,保证帧内容完整。 */
-let seqLayerInd = -1;
-let seqFrameUrls: string[] = [];
-let seqImgA: HTMLImageElement | null = null;
-let seqImgB: HTMLImageElement | null = null;
-let seqExportImg: HTMLImageElement | null = null;
+type SeqEntry = { ind: number; nm: string; urls: string[] };
+let seqEntries: SeqEntry[] = [];
+const seqEntryByInd = new Map<number, SeqEntry>();
+const seqExportImages = new Map<number, HTMLImageElement>(); // 序列图层 ind → 导出专用图片
 
 function setupImageSequence(data: any) {
-  seqLayerInd = -1;
-  seqFrameUrls = [];
-  seqImgA = seqImgB = null;
-  seqExportImg = null;
+  seqEntries = [];
+  seqEntryByInd.clear();
+  seqExportImages.clear();
   if (!data) return;
   for (const l of data.layers ?? []) {
     const src = l.ty === 2 && l.ks && l.ks.src;
@@ -554,21 +582,20 @@ function setupImageSequence(data: any) {
       if (a && typeof a.p === 'string') byFrame.set(Math.round(kf.t), a.p);
     }
     if (byFrame.size < 2) continue;
-    seqLayerInd = l.ind;
     const maxF = Math.max(...byFrame.keys());
-    seqFrameUrls = new Array(maxF + 1).fill('');
-    for (const [f, u] of byFrame) seqFrameUrls[f] = u;
-    seqImgA = new Image();
-    seqImgB = new Image();
-    seqExportImg = new Image();
-    break;
+    const urls = new Array(maxF + 1).fill('');
+    for (const [f, u] of byFrame) urls[f] = u;
+    const entry: SeqEntry = { ind: l.ind, nm: String(l.nm ?? ''), urls };
+    seqEntries.push(entry);
+    seqEntryByInd.set(l.ind, entry);
+    seqExportImages.set(l.ind, new Image());
   }
 }
 
-function seqFrameUrl(frame: number): string {
-  if (seqFrameUrls.length === 0) return '';
-  const f = Math.max(0, Math.min(seqFrameUrls.length - 1, Math.round(frame)));
-  return seqFrameUrls[f] || seqFrameUrls[0] || '';
+function seqFrameUrl(entry: SeqEntry | undefined, frame: number): string {
+  if (!entry || entry.urls.length === 0) return '';
+  const f = Math.max(0, Math.min(entry.urls.length - 1, Math.round(frame)));
+  return entry.urls[f] || entry.urls[0] || '';
 }
 
 /* 可靠的当前全局帧号:canvas 渲染器的 globalData.frameNum 可能因
@@ -585,25 +612,31 @@ function seqCurrentFrame(globalData: any): number {
  * 关键:lottie 的 renderFrame 仅在 globalData._mdf 为真时才真正重绘元素——
  * 静态层(变换/透明度不变)画过一次后永不重绘,序列换图不会生效(画面冻结=残影),
  * 所以换图后必须强制 this._mdf / globalData._mdf。 */
-function patchSeqCanvasElement(el: any) {
+function patchSeqCanvasElement(el: any, entry: SeqEntry) {
+  // 每条序列各自持有双缓冲图片(一个动画里可以有多条序列),缓冲挂在元素上互不干扰
+  if (!el.__seqA) {
+    el.__seqA = new Image();
+    el.__seqB = new Image();
+  }
   const origPrepare = el.prepareFrame ? el.prepareFrame.bind(el) : null;
   if (origPrepare) {
     el.prepareFrame = function (this: any, num: number) {
       let changed = false;
       if (this.__seqUseExport) {
-        if (seqExportImg && this.img !== seqExportImg) this.img = seqExportImg;
-        changed = true; // 导出模式:seqExportImg 内容每帧在变,必须每帧强制重绘
+        const exp = seqExportImages.get(this.data?.ind);
+        if (exp && this.img !== exp) this.img = exp;
+        changed = true; // 导出模式:导出图片内容每帧在变,必须每帧强制重绘
       } else {
         const f = typeof num === 'number' && isFinite(num) ? num : seqCurrentFrame(this.globalData);
-        const url = seqFrameUrl(f);
-        if (url && seqImgA && seqImgB) {
-          const mySlot = el.__seqSlot === 1 ? seqImgB : seqImgA;
-          const other = mySlot === seqImgA ? seqImgB : seqImgA;
+        const url = seqFrameUrl(entry, f);
+        if (url && this.__seqA && this.__seqB) {
+          const mySlot = this.__seqSlot === 1 ? this.__seqB : this.__seqA;
+          const other = mySlot === this.__seqA ? this.__seqB : this.__seqA;
           if (mySlot.src !== url) mySlot.src = url;
           if (this.img !== mySlot) { this.img = mySlot; changed = true; }
-          const nextUrl = seqFrameUrl(f + 1);
+          const nextUrl = seqFrameUrl(entry, f + 1);
           if (nextUrl && other.src !== nextUrl) other.src = nextUrl;
-          el.__seqSlot = el.__seqSlot === 1 ? 0 : 1;
+          this.__seqSlot = this.__seqSlot === 1 ? 0 : 1;
           mySlot.onload = () => {
             const anim = (window as any).__anim;
             if (anim && anim.isLoaded && anim.renderer) {
@@ -621,46 +654,47 @@ function patchSeqCanvasElement(el: any) {
       return r;
     };
   }
-  // 兜底:绘制前再次确保图片正确(覆盖 prepareFrame 不可用的路径)
+  // 兜底:绘制前再次确保图片正确(覆盖 prepareFrame 不可用的路径);绘制时套用序列调色滤镜
   const orig = el.renderInnerContent.bind(el);
   el.renderInnerContent = function (this: any) {
     if (this.__seqUseExport) {
-      if (seqExportImg && this.img !== seqExportImg) this.img = seqExportImg;
-      return orig();
+      const exp = seqExportImages.get(this.data?.ind);
+      if (exp && this.img !== exp) this.img = exp;
+      return withSeqTint(this, orig);
     }
     const f = seqCurrentFrame(this.globalData);
-    const url = seqFrameUrl(f);
-    if (url && seqImgA && seqImgB) {
-      const mySlot = el.__seqSlot === 1 ? seqImgB : seqImgA;
+    const url = seqFrameUrl(entry, f);
+    if (url && this.__seqA && this.__seqB) {
+      const mySlot = this.__seqSlot === 1 ? this.__seqB : this.__seqA;
       if (mySlot.src !== url) mySlot.src = url;
       if (this.img !== mySlot) this.img = mySlot;
     }
-    return orig();
+    return withSeqTint(this, orig);
   };
 }
 
 /* SVG 元素:在 prepareFrame(每帧无条件调用,不依赖渲染器 _mdf)中切换 <image> 的 href */
-function patchSeqSvgElement(el: any) {
+function patchSeqSvgElement(el: any, entry: SeqEntry) {
   const origPrepare = el.prepareFrame ? el.prepareFrame.bind(el) : null;
   if (!origPrepare) return;
   el.prepareFrame = function (this: any, num: number) {
-    if (seqLayerInd >= 0 && this.data && this.data.ind === seqLayerInd) {
-      const imgEl = this.innerElem || this.imageElem;
-      if (imgEl) {
-        const f = typeof num === 'number' && isFinite(num) ? num : seqCurrentFrame(this.globalData);
-        const url = seqFrameUrl(f);
-        const NS = 'http://www.w3.org/1999/xlink';
-        if (url && imgEl.getAttributeNS(NS, 'href') !== url) {
-          imgEl.setAttributeNS(NS, 'href', url);
-          // 预加载下一帧(利用浏览器图片缓存,让 SVG 换图即时显示)
-          const nextUrl = seqFrameUrl(f + 1);
-          if (nextUrl && seqImgA && seqImgB) {
-            const pre = seqImgA.src === url ? seqImgB : seqImgA;
-            if (pre.src !== nextUrl) pre.src = nextUrl;
-          }
+    const imgEl = this.innerElem || this.imageElem;
+    if (imgEl) {
+      const f = typeof num === 'number' && isFinite(num) ? num : seqCurrentFrame(this.globalData);
+      const url = seqFrameUrl(entry, f);
+      const NS = 'http://www.w3.org/1999/xlink';
+      if (url && imgEl.getAttributeNS(NS, 'href') !== url) {
+        imgEl.setAttributeNS(NS, 'href', url);
+        // 预加载下一帧(利用浏览器图片缓存,让 SVG 换图即时显示)
+        const nextUrl = seqFrameUrl(entry, f + 1);
+        if (nextUrl) {
+          if (!this.__seqPre) this.__seqPre = new Image();
+          if (this.__seqPre.src !== nextUrl) this.__seqPre.src = nextUrl;
         }
       }
     }
+    // 序列调色:给图层 <g> 挂 CSS filter(SVG 元素无法用 canvas 的 ctx.filter)
+    applySeqTintToSvg(this);
     return origPrepare(num);
   };
 }
@@ -681,7 +715,8 @@ function patchSvgRendererTree(renderer: any) {
   for (const el of renderer.elements ?? []) {
     if (el && el.data && !el.__seqElPatched) {
       el.__seqElPatched = true;
-      if (el.data.ty === 2 && seqLayerInd >= 0 && el.data.ind === seqLayerInd) patchSeqSvgElement(el);
+      const seqEntry = el.data.ty === 2 ? seqEntryByInd.get(el.data.ind) : undefined;
+      if (seqEntry) patchSeqSvgElement(el, seqEntry);
       else if (el.data.ty === 0 && typeof el.buildItem === 'function') patchSvgRendererTree(el);
       if (getDropShadow(el.data)) patchSvgDropShadow(el);
     }
@@ -692,8 +727,9 @@ function patchSvgRendererTree(renderer: any) {
     const el = this.elements[pos];
     if (!el || el.__seqElPatched) return;
     el.__seqElPatched = true;
-    if (el.data && el.data.ty === 2 && seqLayerInd >= 0 && el.data.ind === seqLayerInd) {
-      patchSeqSvgElement(el);
+    const seqEntry = el.data && el.data.ty === 2 ? seqEntryByInd.get(el.data.ind) : undefined;
+    if (seqEntry) {
+      patchSeqSvgElement(el, seqEntry);
     } else if (el.data && el.data.ty === 0 && typeof el.buildItem === 'function') {
       patchSvgRendererTree(el); // 预合成内
     }
@@ -701,15 +737,121 @@ function patchSvgRendererTree(renderer: any) {
   };
 }
 
-/* 导出前确保第 n 帧的序列图片已解码(导出专用图片,与预览隔离) */
+/* 导出前确保第 n 帧的序列图片已解码(每条序列各自的导出专用图片,与预览隔离) */
 async function ensureSeqDecoded(n: number) {
-  if (seqFrameUrls.length === 0 || !seqExportImg) return;
-  const url = seqFrameUrl(n);
-  if (!url) return;
-  if (seqExportImg.src !== url) {
-    seqExportImg.src = url;
-    if (!seqExportImg.complete) await seqExportImg.decode().catch(() => {});
+  if (seqEntries.length === 0) return;
+  await Promise.all(
+    seqEntries.map(async (entry) => {
+      const img = seqExportImages.get(entry.ind);
+      const url = seqFrameUrl(entry, n);
+      if (!img || !url) return;
+      if (img.src !== url) {
+        img.src = url;
+        if (!img.complete) await img.decode().catch(() => {});
+      }
+    })
+  );
+}
+
+/* ---------- 叠加序列调色 ----------
+ * 两条叠加序列(99999 / 百叶窗)是同色调纹理,画面信息几乎全在 alpha 上,所以「改颜色」用
+ * feColorMatrix 把 RGB 换成目标色、保留源 alpha(colorize):目标色取源色时与原图一致,
+ * 换色也不丢纹理。同一个 <filter> 同时服务两条渲染路径:
+ *   • SVG 渲染器:图层 <g> 的 CSS filter = url(#id);
+ *   • Canvas 渲染器:绘制前 ctx.filter = url(#id)(视频导出走同一条 canvas 路径)。
+ * 因此改色是即时的:不需要把 359×2 张 PNG 逐帧重新编码着色(那样拖动取色器会卡死)。
+ * filter 宿主放在 document.body 的隐藏 <svg> 里:切渲染器、重建动画、导出期间都不会丢。 */
+/* 调色按「动画 + 图层 ind」记录:不同动画的序列图层 ind 可能相同,不能只按 ind 存 */
+const seqTints = new Map<string, string>(); // '动画key:ind' → 目标色 #rrggbb
+let seqTintSvg: SVGSVGElement | null = null;
+
+function seqTintKey(ind: number): string {
+  return currentAnimKey + ':' + ind;
+}
+
+/* 叠加序列名单:这些序列默认就挂着调色滤镜(出厂色 #d82f28),而不是「未调色 = 不挂滤镜」。
+ * 判定用函数而不是模块级常量:BLINDS_SEQUENCES 在文件后面的「载入来源」区声明。 */
+function isBlindsSequenceName(nm: string | undefined): boolean {
+  return !!nm && BLINDS_SEQUENCES.some((s) => s.name === nm);
+}
+
+/* 该图层当前生效的调色:用户手动设过的色优先,否则叠加序列用出厂色,其余序列图层不调色 */
+function seqTintHexOfLayer(data: any): string | null {
+  const ind = data?.ind;
+  if (typeof ind !== 'number') return null;
+  const explicit = seqTints.get(seqTintKey(ind));
+  if (explicit) return explicit;
+  return isBlindsSequenceName(data?.nm) ? sequenceDefaultHex(String(data.nm)) : null;
+}
+
+function seqTintFilterId(ind: number): string {
+  return 'df-seq-tint-' + seqTintKey(ind).replace(/[^a-zA-Z0-9_-]+/g, '-');
+}
+
+function seqTintMatrixValues(hex: string): string {
+  const r = parseInt(hex.slice(1, 3), 16) / 255;
+  const g = parseInt(hex.slice(3, 5), 16) / 255;
+  const b = parseInt(hex.slice(5, 7), 16) / 255;
+  // 输出 RGB = 常量目标色,alpha 沿用源图 → 纯色化;color-interpolation-filters 用 sRGB,
+  // 否则 SVG 默认的 linearRGB 会让取色器选的色与画面对不上
+  return '0 0 0 0 ' + r + ' 0 0 0 0 ' + g + ' 0 0 0 0 ' + b + ' 0 0 0 1 0';
+}
+
+/* 重建调色滤镜:每个被调色的序列一个 <filter>;未调色的序列不生成 */
+function syncSeqTintFilters() {
+  const NS = 'http://www.w3.org/2000/svg';
+  if (!seqTintSvg) {
+    seqTintSvg = document.createElementNS(NS, 'svg');
+    seqTintSvg.setAttribute('width', '0');
+    seqTintSvg.setAttribute('height', '0');
+    seqTintSvg.setAttribute('aria-hidden', 'true');
+    seqTintSvg.style.cssText = 'position:absolute;width:0;height:0;overflow:hidden';
+    document.body.appendChild(seqTintSvg);
   }
+  while (seqTintSvg.firstChild) seqTintSvg.removeChild(seqTintSvg.firstChild);
+  const defs = document.createElementNS(NS, 'defs');
+  // 按当前动画的序列图层生成:即使 seqTints 里没有显式记录,叠加序列也会按出厂色生成滤镜
+  for (const entry of seqEntries) {
+    const hex = seqTintHexOfLayer({ ind: entry.ind, nm: entry.nm });
+    if (!hex) continue;
+    const filter = document.createElementNS(NS, 'filter');
+    filter.setAttribute('id', seqTintFilterId(entry.ind));
+    filter.setAttribute('x', '-10%');
+    filter.setAttribute('y', '-10%');
+    filter.setAttribute('width', '120%');
+    filter.setAttribute('height', '120%');
+    filter.setAttribute('color-interpolation-filters', 'sRGB');
+    const m = document.createElementNS(NS, 'feColorMatrix');
+    m.setAttribute('type', 'matrix');
+    m.setAttribute('values', seqTintMatrixValues(hex));
+    filter.appendChild(m);
+    defs.appendChild(filter);
+  }
+  seqTintSvg.appendChild(defs);
+}
+
+/* canvas 渲染路径:绘制序列帧时套用调色滤镜 */
+function withSeqTint(el: any, draw: () => void) {
+  const hex = seqTintHexOfLayer(el?.data);
+  const ctx = el?.canvasContext;
+  if (!hex || !ctx || typeof ctx.filter !== 'string') return draw();
+  const prev = ctx.filter;
+  let applied = false;
+  try {
+    ctx.filter = 'url(#' + seqTintFilterId(el.data.ind) + ')';
+    applied = true;
+  } catch { /* 浏览器不支持时按原色绘制 */ }
+  const r = draw();
+  if (applied) ctx.filter = prev;
+  return r;
+}
+
+/* SVG 渲染路径:把调色滤镜挂到图层 <g> 上(该层若带 AE 投影则让位给投影) */
+function applySeqTintToSvg(el: any) {
+  if (!el || !el.layerElement || getDropShadow(el.data)) return;
+  const hex = seqTintHexOfLayer(el.data);
+  const want = hex ? 'url(#' + seqTintFilterId(el.data.ind) + ')' : '';
+  if (el.layerElement.style.filter !== want) el.layerElement.style.filter = want;
 }
 
 /* ---------- DOM 引用 ---------- */
@@ -745,6 +887,7 @@ const shapeCount = $<HTMLElement>('shapeCount');
 const imageSection = $<HTMLDivElement>('imageSection');
 const imageList = $<HTMLUListElement>('imageList');
 const imageCount = $<HTMLElement>('imageCount');
+
 const iconSection = $<HTMLDivElement>('iconSection');
 const iconList = $<HTMLUListElement>('iconList');
 const iconCount = $<HTMLElement>('iconCount');
@@ -819,6 +962,9 @@ async function loadData(data: any, name: string) {
   captureDikuangBaseState();
   captureIconState();
   setupImageSequence(data);
+  // 按本次载入的序列图层(重新)生成调色滤镜:叠加序列默认就挂出厂色滤镜,
+  // 显式改过色的序列沿用用户颜色;切换动画后按新动画的序列重建
+  syncSeqTintFilters();
   applyFit();
   resetView();
   applyBackground();
@@ -1140,9 +1286,7 @@ chkNextScan.addEventListener('change', () => {
   syncIconScopeUI(currentData);
   loadData(currentData, currentName);
   // 二次扫描合并/取消后,图片图层列表(百叶窗.png / 百叶窗2.png / 光.png)随之变化,需刷新
-  const hasTintImage = (currentData?.layers ?? []).some(
-    (l: any) => l.ty === 2 && (l.nm === '百叶窗.png' || l.nm === '百叶窗2.png' || l.nm === '光.png')
-  );
+  const hasTintImage = tintableImageLayers(currentData).length > 0;
   imageSection.hidden = !hasTintImage;
   if (hasTintImage) renderImageList(currentData);
   else imageList.innerHTML = '';
@@ -1516,6 +1660,12 @@ function captureOriginalState(data: any) {
   }
 }
 
+/* 单字符数字位图层(核电站功率动画的五个数字文字层,改名后为「第 N 位」) */
+const SINGLE_DIGIT_TEXT_NAMES = new Set(['第一位', '第二位', '第三位', '第四位', '第五位']);
+function isSingleDigitTextName(nm: string | undefined): boolean {
+  return !!nm && SINGLE_DIGIT_TEXT_NAMES.has(nm);
+}
+
 function updateInfo(data: any) {
   const ip = data.ip ?? 0;
   const op = data.op ?? 0;
@@ -1555,6 +1705,9 @@ function updateInfo(data: any) {
   infoList.innerHTML = items.map(([k, v]) => '<dt>' + esc(k) + '</dt><dd>' + esc(v) + '</dd>').join('');
 
   textCount.textContent = '· ' + texts.length + ' 个 · 可编辑';
+  /* 五个数字位共用「一个」颜色控件:只有排在最前的那一位带取色器(标注为共用),
+   * 其余四位只显示文字框与透明度 —— 改这一个颜色,五位一起变(见 onColorChanged)。 */
+  let digitColorHostDone = false;
   textList.innerHTML = texts
     .map((t) => {
       const layer = findLayerByInd(data.layers, t.ind);
@@ -1563,23 +1716,56 @@ function updateInfo(data: any) {
       const hex = fcToHex(s.fc);
       const displayText = String(t.text).replace(/\r/g, '\n');
       const rows = Math.max(1, displayText.split('\n').length);
+      // 「第 N 位」是单字符数字位:输入框限一位数字(输入侧过滤 0-9)
+      const digit = isSingleDigitTextName(t.nm);
+      const digitColorHost = digit && !digitColorHostDone;
+      if (digitColorHost) digitColorHostDone = true;
+      const colorHtml = digit && !digitColorHost
+        ? ''
+        : '<label class="t-color-label">' + (digit ? '数字位颜色(五位共用)' : '颜色') +
+          ' <input type="color" class="t-color" data-ind="' + t.ind + '" value="' + hex + '" /><input type="text" class="hex-input" value="' + hex + '" spellcheck="false" placeholder="#rrggbb" /></label>';
       return (
         '<li class="text-item">' +
         '<div class="text-item-head">' +
         '<span class="t-name">' + esc(t.nm) + '</span>' +
         '<button class="t-reset" data-ind="' + t.ind + '" type="button" title="重置文字与颜色">' + ICON_RESET + '重置</button>' +
         '</div>' +
-        '<textarea class="t-input" rows="' + rows + '" data-ind="' + t.ind + '" spellcheck="false"></textarea>' +
-        '<label class="t-color-label">颜色 <input type="color" class="t-color" data-ind="' + t.ind + '" value="' + hex + '" /><input type="text" class="hex-input" value="' + hex + '" spellcheck="false" placeholder="#rrggbb" /></label>' +
+        '<textarea class="t-input' + (digit ? ' t-digit' : '') + '" rows="' + rows + '" data-ind="' + t.ind + '"' +
+        (digit ? ' data-digit="1" maxlength="1" inputmode="numeric"' : '') + ' spellcheck="false"></textarea>' +
+        colorHtml +
         opacitySliderHtml(t.ind, layer) +
         '</li>'
       );
     })
     .join('');
   textList.querySelectorAll<HTMLTextAreaElement>('.t-input').forEach((ta) => {
-    const target = texts.find((t) => t.ind === Number(ta.dataset.ind));
-    if (target) ta.value = String(target.text).replace(/\r/g, '\n');
-    ta.addEventListener('input', () => onTextEdited(Number(ta.dataset.ind), ta.value));
+    const ind = Number(ta.dataset.ind);
+    const target = texts.find((t) => t.ind === ind);
+    const currentText = target ? String(target.text).replace(/\r/g, '\n') : '';
+    if (target) ta.value = currentText;
+    if (ta.dataset.digit === '1') {
+      /* 单字符数字位:只允许一位数字 0-9,并**允许清空**(把数字删掉)。
+       * 非数字字符不接受,回退到上一次有效值;留空则按空文字应用。 */
+      let lastVal = currentText;
+      ta.addEventListener('input', () => {
+        const raw = ta.value;
+        if (raw === '') {
+          lastVal = '';
+          onTextEdited(ind, '');
+          return;
+        }
+        const v = raw.replace(/[^0-9]/g, '').slice(-1);
+        if (!v) {
+          ta.value = lastVal;
+          return;
+        }
+        if (raw !== v) ta.value = v;
+        lastVal = v;
+        onTextEdited(ind, v);
+      });
+      return;
+    }
+    ta.addEventListener('input', () => onTextEdited(ind, ta.value));
   });
   textList.querySelectorAll<HTMLInputElement>('.t-color').forEach((ci) => {
     bindColorPicker(ci, (hex) => onColorChanged(Number(ci.dataset.ind), hex));
@@ -1658,11 +1844,29 @@ function setLayerColor(layer: any, hex: string) {
   }
 }
 
+/* 五个数字位视为同一组:颜色统一(改其中任意一个 = 五个一起改),文字各自独立 */
+function digitTextLayers(data: any): any[] {
+  return (data?.layers ?? []).filter((l: any) => l?.ty === 5 && isSingleDigitTextName(l.nm));
+}
+
+/* 同步侧栏里其它数字位的颜色控件(拖动取色器时保持显示一致) */
+function syncDigitColorInputs(hex: string, exceptInd?: number) {
+  for (const ci of textList.querySelectorAll<HTMLInputElement>('.t-color')) {
+    const ciInd = Number(ci.dataset.ind);
+    if (ciInd === exceptInd) continue;
+    const l = currentData ? findLayerByInd(currentData.layers, ciInd) : null;
+    if (l && isSingleDigitTextName(l.nm)) setColorPickerValue(ci, hex);
+  }
+}
+
 function onColorChanged(ind: number, hex: string) {
   if (!currentData) return;
   const layer = findLayerByInd(currentData.layers, ind);
   if (!layer) return;
-  setLayerColor(layer, hex);
+  // 数字位:一个改色 → 五个一起改(并同步侧栏其它行的取色器)
+  const group = isSingleDigitTextName(layer.nm) ? digitTextLayers(currentData) : [layer];
+  for (const l of group) setLayerColor(l, hex);
+  if (group.length > 1) syncDigitColorInputs(hex, ind);
   window.clearTimeout(textEditTimer);
   textEditTimer = window.setTimeout(() => {
     reRenderPreservingState();
@@ -1676,7 +1880,14 @@ function onResetText(ind: number) {
   const layer = findLayerByInd(currentData.layers, ind);
   if (!layer) return;
   setLayerText(layer, orig.text);
-  setLayerColor(layer, fcToHex(orig.fc));
+  // 数字位同组:颜色也一起还原,避免「重置一个」后五个颜色不一致
+  const resetHex = fcToHex(orig.fc);
+  if (isSingleDigitTextName(layer.nm)) {
+    for (const l of digitTextLayers(currentData)) setLayerColor(l, resetHex);
+    syncDigitColorInputs(resetHex, ind);
+  } else {
+    setLayerColor(layer, resetHex);
+  }
   resetLayerOpacity(ind);
   adaptDikuangWidth(); // 文字恢复原宽 → 底框恢复基准宽
   // 同步 UI
@@ -1871,6 +2082,14 @@ function onShapeReset(ind: number) {
   textEditTimer = window.setTimeout(() => reRenderPreservingState(), 250);
 }
 
+/* 核电站功率动画里这几个形状图层的「填充」不作为可编辑属性展示
+ * (它们只是给描边/纹理垫底的占位色),侧栏只保留描边色,避免误导。名称按去空格比对。 */
+const HIDE_FILL_SHAPE_NAMES = new Set(['形状图层2', '形状图层3', '形状图层8', '形状图层6', '形状图层4']);
+function hideShapeFill(nm: string): boolean {
+  if (currentAnimKey !== 'blinds') return false;
+  return HIDE_FILL_SHAPE_NAMES.has(String(nm || '').replace(/\s+/g, ''));
+}
+
 function renderShapeList(data: any) {
   const shapes = shapeLayerColorInfo(data);
   shapeCount.textContent = '· ' + shapes.length + ' 个';
@@ -1879,7 +2098,7 @@ function renderShapeList(data: any) {
       const fillHex = s.fill ? fcToHex(s.fill) : null;
       const strokeHex = s.stroke ? fcToHex(s.stroke) : null;
       let colorHtml = '';
-      if (fillHex) colorHtml += '<label class="t-color-label">填充 <input type="color" class="s-fill" data-ind="' + s.ind + '" value="' + fillHex + '" /><input type="text" class="hex-input" value="' + fillHex + '" spellcheck="false" placeholder="#rrggbb" /></label>';
+      if (fillHex && !hideShapeFill(s.nm)) colorHtml += '<label class="t-color-label">填充 <input type="color" class="s-fill" data-ind="' + s.ind + '" value="' + fillHex + '" /><input type="text" class="hex-input" value="' + fillHex + '" spellcheck="false" placeholder="#rrggbb" /></label>';
       if (strokeHex) colorHtml += '<label class="t-color-label">描边 <input type="color" class="s-stroke" data-ind="' + s.ind + '" value="' + strokeHex + '" /><input type="text" class="hex-input" value="' + strokeHex + '" spellcheck="false" placeholder="#rrggbb" /></label>';
       const rectOpacityHtml =
         dikuangVisibleInds.includes(s.ind)
@@ -1932,25 +2151,62 @@ function renderShapeList(data: any) {
   });
 }
 
-/* ---------- 图片图层调色(百叶窗.png / 百叶窗2.png / 光.png) ---------- */
+/* ---------- 图片图层调色(百叶窗.png / 百叶窗2.png / 光.png / 叠加序列) ---------- */
+/* 图片序列图层(带 ks.src 逐帧关键帧):核电站功率动画的两条叠加序列属于这一类。
+ * 纹理图按名字识别、叠加序列按 ks.src 识别,两者在侧栏「图片图层」里统一调色/调透明度,
+ * 但调色实现不同:纹理图逐张着色后替换资源 data URI,叠加序列用滤镜即时着色(见 syncSeqTintFilters)。 */
+function isSeqLayer(l: any): boolean {
+  return !!(l && l.ty === 2 && l.ks && l.ks.src && Array.isArray(l.ks.src.k) && l.ks.src.k.length >= 2);
+}
+
+/* 侧栏「图片图层」要列的图层(可调色的纹理图 + 可调色的叠加序列) */
+function tintableImageLayers(data: any): any[] {
+  return (data?.layers ?? []).filter(
+    (l: any) => l.ty === 2 && (l.nm === '百叶窗.png' || l.nm === '百叶窗2.png' || l.nm === '光.png' || isSeqLayer(l)),
+  );
+}
+
+/* 叠加序列在列表里的取色标识:用 'seq:<ind>' 与纹理图的资源 id 区分开 */
+const SEQ_REF_PREFIX = 'seq:';
+/* 叠加序列的出厂色(默认即挂这个颜色的滤镜):BLINDS_SEQUENCES 在文件后面的「载入来源」区声明,
+ * 这里用函数按需查,避免模块初始化顺序问题 */
+function sequenceDefaultHex(nm: string): string {
+  return BLINDS_SEQUENCES.find((s) => s.name === nm)?.defaultHex ?? '#d82f28';
+}
+function seqIndOfRef(ref: string): number | null {
+  if (!ref.startsWith(SEQ_REF_PREFIX)) return null;
+  const n = Number(ref.slice(SEQ_REF_PREFIX.length));
+  return Number.isFinite(n) ? n : null;
+}
+/* 当前渲染器里该序列图层的元素(用于立刻套用/撤销调色滤镜) */
+function seqLayerElementOf(ind: number): any {
+  const els = (anim as any)?.renderer?.elements ?? [];
+  for (const el of els) if (el && el.data && el.data.ind === ind) return el;
+  return null;
+}
+
 function renderImageList(data: any) {
-  // 主段「百叶窗.png」+ 二次扫描段「百叶窗2.png」「光.png」都可调色/调透明度
-  const layers = (data.layers ?? []).filter((l: any) => l.ty === 2 && (l.nm === '百叶窗.png' || l.nm === '百叶窗2.png' || l.nm === '光.png'));
+  // 主段「百叶窗.png」+ 二次扫描段「百叶窗2.png」「光.png」+ 核电站功率动画的两条叠加序列
+  const layers = tintableImageLayers(data);
   imageCount.textContent = '· ' + layers.length + ' 个';
   imageList.innerHTML = layers
     .map((l: any) => {
+      const seq = isSeqLayer(l);
+      const ref = seq ? SEQ_REF_PREFIX + l.ind : String(l.refId);
       const asset = (data.assets ?? []).find((a: any) => a.id === l.refId);
-      // 默认色:百叶窗.png 红色,百叶窗2.png 与 光.png 金色(#ffca5e)
-      const defaultHex = l.nm === '百叶窗.png' ? '#e23b3b' : '#ffca5e';
-      const hex = asset && typeof asset.p === 'string' && asset.p.startsWith('data:image') ? defaultHex : '#ffffff';
+      // 默认色:百叶窗.png 红色,百叶窗2.png 与 光.png 金色(#ffca5e),叠加序列为源纹理色
+      const defaultHex = seq ? sequenceDefaultHex(l.nm) : l.nm === '百叶窗.png' ? '#e23b3b' : '#ffca5e';
+      const hex = seq
+        ? (seqTints.get(seqTintKey(l.ind)) ?? defaultHex)
+        : asset && typeof asset.p === 'string' && asset.p.startsWith('data:image') ? defaultHex : '#ffffff';
       return (
         '<li class="text-item">' +
         '<div class="text-item-head">' +
         '<span class="t-name">' + esc(l.nm || '(未命名)') + '</span>' +
-        '<button class="t-reset i-reset" data-ref="' + esc(l.refId) + '" type="button" title="重置颜色">' + ICON_RESET + '重置</button>' +
+        '<button class="t-reset i-reset" data-ref="' + esc(ref) + '" type="button" title="重置颜色">' + ICON_RESET + '重置</button>' +
         '</div>' +
         '<div class="shape-colors">' +
-        '<label class="t-color-label">颜色 <input type="color" class="i-color" data-ref="' + esc(l.refId) + '" value="' + hex + '" /><input type="text" class="hex-input" value="' + hex + '" spellcheck="false" placeholder="#rrggbb" /></label>' +
+        '<label class="t-color-label">颜色 <input type="color" class="i-color" data-ref="' + esc(ref) + '" value="' + hex + '" /><input type="text" class="hex-input" value="' + hex + '" spellcheck="false" placeholder="#rrggbb" /></label>' +
         '</div>' +
         opacitySliderHtml(l.ind, l) +
         '</li>'
@@ -1983,6 +2239,16 @@ function baiyechuangOriginalUriOf(refId: string): string | null {
 }
 
 function onImageColorChanged(refId: string, hex: string) {
+  // 叠加序列:滤镜着色,立即生效(无需重建动画、无需逐帧重新编码 359×2 张 PNG)
+  const seqInd = seqIndOfRef(refId);
+  if (seqInd !== null) {
+    seqTints.set(seqTintKey(seqInd), hex);
+    syncSeqTintFilters();
+    const el = seqLayerElementOf(seqInd);
+    if (el) applySeqTintToSvg(el);
+    setStatus('叠加序列已着色 ' + hex);
+    return;
+  }
   const originalUri = baiyechuangOriginalUriOf(refId);
   if (!currentData || !originalUri) return;
   const asset = findAssetByRef(currentData, refId);
@@ -2035,6 +2301,20 @@ function onImageColorChanged(refId: string, hex: string) {
 }
 
 function onImageColorReset(refId: string) {
+  // 叠加序列:撤销手动着色,回到出厂色 #d82f28(滤镜仍然挂着),不重建动画
+  const seqInd = seqIndOfRef(refId);
+  if (seqInd !== null) {
+    seqTints.delete(seqTintKey(seqInd));
+    syncSeqTintFilters();
+    const el = seqLayerElementOf(seqInd);
+    if (el) applySeqTintToSvg(el);
+    const layer = (currentData?.layers ?? []).find((l: any) => l.ind === seqInd);
+    if (layer) resetLayerOpacity(layer.ind);
+    const ci = imageList.querySelector<HTMLInputElement>('.i-color[data-ref="' + refId + '"]');
+    if (ci) setColorPickerValue(ci, layer ? sequenceDefaultHex(layer.nm) : '#d82f28');
+    setStatus('叠加序列已恢复默认色 ' + (layer ? sequenceDefaultHex(layer.nm) : '#d82f28'));
+    return;
+  }
   const originalUri = baiyechuangOriginalUriOf(refId);
   if (!currentData || !originalUri) return;
   const asset = findAssetByRef(currentData, refId);
@@ -3158,8 +3438,22 @@ import animationDataUrl from '../animation/animation_data.json?url';
 import windowsAnimationUrl from '../animation/windows animation/windows_animation.json?url';
 import animation2DataUrl from '../animation_2/animation_data.json?url';
 import animation2NextUrl from '../animation_2/animation_data_next_fixed.json?url';
+import animation3DataUrl from '../animation_3/animation_data.json?url';
 
-/* ---------- 按需加载进度浮层 ---------- */
+/* 核电站功率动画的叠加序列:animation_3/png resources/ 下的两个文件夹,各 359 帧 1920×1080 透明 PNG。
+ * (README.txt:两条都是 60fps 图像序列,直接叠加使用,默认开启,且可更改颜色。)
+ * 文件名形如「99999_00000.png」「百叶窗_00000.png」,帧号补零到 5 位,按文件名升序即帧序。
+ * 用 ?url 打包:dev 由站点直接提供,build 时随构建产出静态资源(与 animation_2/icon 同做法)。 */
+const blindsSeqModules: Record<string, string>[] = [
+  import.meta.glob('../animation_3/png resources/99999/*.png', { eager: true, query: '?url', import: 'default' }) as Record<string, string>,
+  import.meta.glob('../animation_3/png resources/百叶窗/*.png', { eager: true, query: '?url', import: 'default' }) as Record<string, string>,
+];
+const seqUrlsOf = (mods: Record<string, string>): string[] => Object.keys(mods).sort().map((k) => mods[k]);
+/* place:'top' = 叠在最上层;'belowDigits' = 紧跟在五个数字位(第一~第五位)之下 */
+const BLINDS_SEQUENCES: { name: string; urls: string[]; defaultHex: string; place: 'top' | 'belowDigits' }[] = [
+  { name: '模糊效果', urls: seqUrlsOf(blindsSeqModules[0]), defaultHex: '#d82f28', place: 'belowDigits' },
+  { name: '百叶窗', urls: seqUrlsOf(blindsSeqModules[1]), defaultHex: '#d82f28', place: 'top' },
+];
 const dataLoadingEl = $<HTMLDivElement>('dataLoading');
 const dataLoadingFill = $<HTMLDivElement>('dataLoadingFill');
 const dataLoadingPct = $<HTMLSpanElement>('dataLoadingPct');
@@ -3318,6 +3612,9 @@ async function ensureExtractionData(onProgress?: (p: number | null) => void): Pr
 let animation2Data: any = null;
 let animation2NextData: any = null;
 let exposedDataPromise: Promise<void> | null = null;
+/* 核电站功率动画(animation_3):底层动画数据 + 两条逐帧 PNG 叠加序列(默认开启,无开关) */
+let blindsData: any = null;
+let blindsDataPromise: Promise<void> | null = null;
 let baiyechuangOriginalData: string | null = null; // 百叶窗原始图片 data URI,供调色重置
 let baiyechuang2OriginalData: string | null = null; // 百叶窗2(二次扫描)原始图片 data URI,供调色重置
 let guangOriginalData: string | null = null; // 光.png(二次扫描)原始图片 data URI,供调色重置
@@ -3397,6 +3694,111 @@ async function ensureExposedData(onProgress?: (p: number | null) => void): Promi
   })();
   return exposedDataPromise;
 }
+/* ---------- 核电站功率动画(animation_3)----------
+ * 数据 = animation_3/animation_data.json(底层 HUD 动画,1920×1080 / 60fps / 359 帧)
+ *      + animation_3/png resources/ 下的两条 359 帧透明 PNG 序列(99999 / 百叶窗),叠在最上层。
+ * 为什么叠加而不是直接渲染 JSON:AE 的「百叶窗(Venetian Blinds)」效果 lottie-web 不支持
+ * (JSON 里只有效果参数 ADBE Venetian Blinds,渲染不出纹理),所以纹理在 AE 里逐帧渲染成
+ * PNG 序列,这里按「图片序列图层」叠回动画之上——底层 JSON 里的百叶窗效果层保持原样
+ * (其描边透明度为 0,不产生可见内容)。
+ * 复用站点既有的「图片序列图层」通路(图层 ks.src 逐帧关键帧 + assets[] 逐帧图片):
+ * 预览(SVG / Canvas)与视频导出(H.264 MP4/AVI、无压缩 AVI)都自动包含叠加层,无需另写合成代码。
+ * 两条序列按 README.txt 默认开启、不设开关;颜色在侧栏「图片图层」里改(见 syncSeqTintFilters)。 */
+function buildBlindsComposite(base: any, seqs: { name: string; urls: string[]; place?: 'top' | 'belowDigits' }[]): any {
+  const data = base;
+  data.assets = data.assets ?? [];
+  data.layers = data.layers ?? [];
+  /* 图层改名(图层名不参与渲染,改名无副作用):
+   *   「图层 1」实际是核辐射标志图形;897/898/899/900/9 是五个纯数字文字图层,按位次显示为「第 N 位」 */
+  const renameMap: Record<string, string> = {
+    '图层 1': '核辐射标志',
+    '897': '第一位',
+    '898': '第二位',
+    '899': '第三位',
+    '900': '第四位',
+    '9': '第五位',
+  };
+  for (const l of data.layers) {
+    if (l && typeof l.nm === 'string' && renameMap[l.nm]) l.nm = renameMap[l.nm];
+  }
+  const taken = new Set<string>(data.assets.map((a: any) => a.id));
+  let maxInd = data.layers.reduce((m: number, l: any) => Math.max(m, l.ind ?? 0), 0);
+  const injectedTop: any[] = [];       // 叠在最上层
+  const injectedBelowDigits: any[] = []; // 紧跟五个数字位之下
+  seqs.forEach((seq, si) => {
+    if (!seq.urls.length) return;
+    const seqIds: string[] = [];
+    seq.urls.forEach((url, i) => {
+      let id = 'seq' + si + '_' + i;
+      while (taken.has(id)) id += '_';
+      taken.add(id);
+      // e:1 让 lottie 直接把 p 当完整地址(不做 u/p 拼接),与站点其它注入资源一致
+      data.assets.push({ id, w: data.w, h: data.h, u: '', p: url, e: 1 });
+      seqIds.push(id);
+    });
+    const srcKeyframes = seqIds.map((id, i) => ({ t: i, s: [id] }));
+    (seq.place === 'belowDigits' ? injectedBelowDigits : injectedTop).push({
+      ddd: 0,
+      ind: ++maxInd,
+      ty: 2,
+      nm: seq.name,
+      refId: seqIds[0],
+      sr: 1,
+      ks: {
+        o: { a: 0, k: 100, ix: 11 },
+        r: { a: 0, k: 0, ix: 10 },
+        // 图片以左上角为原点绘制:位置/锚点归零即与 1920×1080 合成区 1:1 对齐
+        p: { a: 0, k: [0, 0, 0], ix: 2 },
+        a: { a: 0, k: [0, 0, 0], ix: 1 },
+        s: { a: 0, k: [100, 100, 100], ix: 6 },
+        src: { a: 1, k: srcKeyframes },
+      },
+      ao: 0,
+      ip: data.ip ?? 0,
+      op: data.op ?? srcKeyframes.length,
+      st: 0,
+      bm: 0,
+    });
+  });
+  /* lottie 图层数组:下标越小越靠上,数组末尾 = 最下层。
+   * 「模糊效果」(原 99999 叠加序列)要求紧跟五个数字位之下 —— 数字压在它上面,
+   * 但不再压到最底层(它下面还有 HAAVK / MW 等图层);
+   * 「百叶窗」保持叠在最上层。 */
+  let digitEnd = -1;
+  data.layers.forEach((l: any, i: number) => {
+    if (l?.ty === 5 && isSingleDigitTextName(l.nm)) digitEnd = i;
+  });
+  const insertAt = digitEnd >= 0 ? digitEnd + 1 : data.layers.length;
+  data.layers = [
+    ...injectedTop,
+    ...data.layers.slice(0, insertAt),
+    ...injectedBelowDigits,
+    ...data.layers.slice(insertAt),
+  ];
+  return data;
+}
+
+/* 核电站功率动画数据加载(JSON 按需下载,叠加序列帧由打包资源提供) */
+async function ensureBlindsData(onProgress?: (p: number | null) => void): Promise<void> {
+  if (blindsData) return;
+  if (blindsDataPromise) {
+    if (onProgress) onProgress(null); // 已在加载中:以不确定进度显示
+    return blindsDataPromise;
+  }
+  blindsDataPromise = (async () => {
+    try {
+      const [raw] = await fetchJsonBundle([animation3DataUrl], onProgress);
+      blindsData = buildBlindsComposite(JSON.parse(raw), BLINDS_SEQUENCES);
+    } catch (e) {
+      console.error('[核电站功率动画数据解析失败]', e);
+      setStatus('核电站功率动画数据解析失败: ' + (e as Error).message, true);
+    }
+    // 失败时允许下次重试
+    if (!blindsData) blindsDataPromise = null;
+  })();
+  return blindsDataPromise;
+}
+
 /* 递归偏移对象中所有动画属性({a:1, k:[{t,...}]})的关键帧时刻 t */
 function offsetKeyframes(obj: any, delta: number) {
   if (!obj || typeof obj !== 'object') return;
@@ -3614,6 +4016,7 @@ type AnimDef = { key: string; label: string; data: () => any; popup: () => any; 
 const ANIMATIONS: AnimDef[] = [
   { key: 'extraction', label: '撤离动画', data: () => bootAnimation, popup: () => popupData, audio: bundledAudioUrl },
   { key: 'exposed', label: '位置暴露动画', data: () => animation2Data, popup: () => null, audio: exposedAudioUrl },
+  { key: 'blinds', label: '核电站功率动画', data: () => blindsData, popup: () => null, audio: null },
 ];
 let currentAnimKey = 'extraction';
 
@@ -3954,11 +4357,15 @@ async function switchAnimation(key: string) {
   // 需要真正下载时显示加载浮层与实时进度条,完成后关闭。
   const needLoad = key === 'exposed'
     ? (!animation2Data || !animation2NextData)
-    : (!bootAnimation || !popupData);
+    : key === 'blinds'
+      ? !blindsData
+      : (!bootAnimation || !popupData);
   if (needLoad) showDataLoading(def.label);
   try {
     if (key === 'exposed') {
       await ensureExposedData((p) => setDataLoadingProgress(p));
+    } else if (key === 'blinds') {
+      await ensureBlindsData((p) => setDataLoadingProgress(p));
     } else {
       await ensureExtractionData((p) => setDataLoadingProgress(p));
     }
@@ -3987,10 +4394,15 @@ async function switchAnimation(key: string) {
   }
   // 位置暴露动画:数据始终用 animation2Data 当前值(可能已合并二次扫描/含编辑状态)
   const data = key === 'exposed' ? animation2Data : def.data();
-  // 图片图层区块:仅当前动画含可调色图片(百叶窗.png)时显示
-  const hasBaiyechuang = (data.layers ?? []).some((l: any) => l.ty === 2 && l.nm === '百叶窗.png');
-  imageSection.hidden = !hasBaiyechuang;
-  if (hasBaiyechuang) renderImageList(data);
+  // 遮罩源被多个图层共用的动画(tt 层数 > 遮罩源数)在 canvas 渲染器下遮罩合成会偏暗/丢内容,
+  // 导出时自动改走 SVG 逐帧光栅化(见 needsSvgRasterExport / rasterizeSvgFrameToCtx),无需用户干预
+  if (needsSvgRasterExport(data)) {
+    setStatus('该动画含共用轨道遮罩:导出将自动使用 SVG 逐帧光栅化,画面与预览一致');
+  }
+  // 图片图层区块:含可调色纹理(百叶窗.png 等)或叠加序列时显示
+  const hasTintable = tintableImageLayers(data).length > 0;
+  imageSection.hidden = !hasTintable;
+  if (hasTintable) renderImageList(data);
   else imageList.innerHTML = '';
   // 图标选择区块:仅位置暴露动画显示。载入前先按用户选择(位置暴露 / 二次扫描各自的图标)
   // 刷新两段资源,保证随后 loadData 构建的动画直接用上正确的图标。
@@ -4285,7 +4697,7 @@ function downloadBlob(blob: Blob, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
-async function exportVideoMp4(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, animFrameOf: (i: number) => number = (i) => data.ip + i) {
+async function exportVideoMp4(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void | Promise<void>, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, animFrameOf: (i: number) => number = (i) => data.ip + i) {
   if (!WebVideoEncoder || !WebVideoFrame) throw new Error('当前浏览器不支持 WebCodecs 视频编码(请用 Chrome/Edge)');
   const w = data.w, h = data.h;
   const audioUrl = findAudioAsset();
@@ -4322,7 +4734,7 @@ async function exportVideoMp4(data: any, canvas: HTMLCanvasElement, renderFrame:
   await runWebCodecsExport(muxer, w, h, fr, totalFrames, onProgress, async (enc, i) => {
     const animFrame = animFrameOf(i);
     await ensureSeqDecoded(Math.round(animFrame));
-    renderFrame(animFrame);
+    await renderFrame(animFrame);
     const frame = new WebVideoFrame(canvas, { timestamp: Math.round((i * 1e6) / fr), duration: Math.round(1e6 / fr) });
     enc.encode(frame, { keyFrame: i % 60 === 0 });
     frame.close();
@@ -4714,7 +5126,7 @@ async function buildPcm16(data: any, totalFrames: number, fr: number): Promise<{
   return { pcm16, numCh, audioRate };
 }
 
-async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, mode: 'dib' | 'mjpeg', animFrameOf: (i: number) => number = (i) => data.ip + i) {
+async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void | Promise<void>, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, mode: 'dib' | 'mjpeg', animFrameOf: (i: number) => number = (i) => data.ip + i) {
   const { pcm16, numCh, audioRate } = await buildPcm16(data, totalFrames, fr);
 
   let blob: Blob;
@@ -4727,7 +5139,7 @@ async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame:
       if (exportCancelRequested) throw new ExportCancelledError('导出已取消');
       const animFrame = animFrameOf(i);
       await ensureSeqDecoded(Math.round(animFrame));
-      renderFrame(animFrame);
+      await renderFrame(animFrame);
       bgraFrames.push(rgbaToBgraBottomUp(ctx.getImageData(0, 0, data.w, data.h), data.w, data.h));
       if (i % 12 === 0) { onProgress(Math.round((i / totalFrames) * 100), '正在处理帧 ' + (i + 1) + ' / ' + totalFrames); await new Promise((r) => setTimeout(r, 0)); }
     }
@@ -4740,7 +5152,7 @@ async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame:
       if (exportCancelRequested) throw new ExportCancelledError('导出已取消');
       const animFrame = animFrameOf(i);
       await ensureSeqDecoded(Math.round(animFrame));
-      renderFrame(animFrame);
+      await renderFrame(animFrame);
       const b = await new Promise<Blob>((res, rej) => canvas.toBlob((x) => (x ? res(x) : rej(new Error('toBlob 失败'))), 'image/jpeg', 0.92));
       jpegFrames.push(new Uint8Array(await b.arrayBuffer()));
       if (i % 12 === 0) { onProgress(Math.round((i / totalFrames) * 100), '正在处理帧 ' + (i + 1) + ' / ' + totalFrames); await new Promise((r) => setTimeout(r, 0)); }
@@ -4755,7 +5167,7 @@ async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame:
 
 /* H.264 编码 AVI(非透明):与 MP4 同款 WebCodecs 编码,PotPlayer/VLC 可硬解,
  * 无 MJPEG 的色度毛边问题。strf 附加 avcC,帧数据为 AVCC 长度前缀格式。 */
-async function exportVideoAviH264(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, animFrameOf: (i: number) => number = (i) => data.ip + i) {
+async function exportVideoAviH264(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void | Promise<void>, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, animFrameOf: (i: number) => number = (i) => data.ip + i) {
   if (!WebVideoEncoder || !WebVideoFrame) throw new Error('当前浏览器不支持 H.264 编码(请用 Chrome/Edge)');
   const { pcm16, numCh, audioRate } = await buildPcm16(data, totalFrames, fr);
   const w = data.w, h = data.h;
@@ -4781,7 +5193,7 @@ async function exportVideoAviH264(data: any, canvas: HTMLCanvasElement, renderFr
     async (enc, i) => {
       const animFrame = animFrameOf(i);
       await ensureSeqDecoded(Math.round(animFrame));
-      renderFrame(animFrame);
+      await renderFrame(animFrame);
       const frame = new WebVideoFrame(canvas, { timestamp: Math.round((i * 1e6) / fr), duration: Math.round(1e6 / fr) });
       enc.encode(frame, { keyFrame: i % 60 === 0 });
       frame.close();
@@ -4829,6 +5241,194 @@ function patchExportCanvasRenderer(renderer: any) {
   };
 }
 
+/* ---------- 兼容导出:用 SVG 渲染器逐帧光栅化 ----------
+ * 背景:lottie-web 的 canvas 渲染器用「整画布缓冲 + source-in/destination-over」实现轨道遮罩。
+ * 当一份遮罩源被多个图层共用时(核电站功率动画:10 个 tt 层共用 2 个遮罩源,其中还夹着文字层),
+ * 这套合成会逐层把内容乘暗甚至抹掉(实测同帧:亮红 (216,47,40) → (78,17,14),白字 → 灰),
+ * 而 SVG 渲染器(<mask>/<text> DOM)是正确的。
+ * 站点部署在 Cloudflare Pages(纯静态、必须跑在访客浏览器里),既没有服务端也不能用离线脚本,
+ * 所以在浏览器内把 SVG 渲染器的每一帧栅格化:
+ *   克隆 <svg> → 剔除预载图片 → 内联外链图片与字体(SVG 以 <img> 加载时禁止外部资源)
+ *   → Blob URL → <img> → drawImage 到合成画布。
+ * 编码、音频、进度、取消全部沿用原导出管线,只把「取帧」这一步换掉。 */
+function countMatteLayers(data: any): { tt: number; td: number; text: number } {
+  let tt = 0;
+  let td = 0;
+  let text = 0;
+  const walk = (layers: any[]) => {
+    for (const l of layers ?? []) {
+      if (l?.tt >= 1) tt += 1;
+      if (l?.td) td += 1;
+      if (l?.ty === 5) text += 1;
+      if (Array.isArray(l?.layers)) walk(l.layers);
+    }
+  };
+  walk(data?.layers);
+  for (const a of data?.assets ?? []) if (Array.isArray(a?.layers)) walk(a.layers);
+  return { tt, td, text };
+}
+
+/* 需要兼容导出吗:被遮罩层(tt)多于遮罩源(td)说明遮罩源被共用,canvas 合成不可靠 */
+function needsSvgRasterExport(data: any): boolean {
+  const { tt, td } = countMatteLayers(data);
+  return tt > td;
+}
+
+/* 字体二进制 → 可复用的 blob URL。
+ * 关键:栅格化每帧都会新建一份 SVG 文档,字体若用 data URI 内联,浏览器每帧都要重新 base64 解码
+ * 并解析整份字体(实测 2.7MB WOFF2 ≈ 44ms/帧,占导出时间近一半);改用 blob URL 后浏览器按 URL
+ * 复用已解析字体,同样的画面只要 3~9ms/帧。图片不能照搬:SVG 作为 <img> 时 blob:/外部图片会被拦掉。 */
+const svgRasterFontBlobUrls: string[] = [];
+function fontBytesToBlobUrl(buf: ArrayBuffer, mime: string): string {
+  const url = URL.createObjectURL(new Blob([buf], { type: mime }));
+  svgRasterFontBlobUrls.push(url);
+  return url;
+}
+function releaseSvgRasterFontBlobUrls() {
+  while (svgRasterFontBlobUrls.length) {
+    const u = svgRasterFontBlobUrls.pop();
+    if (u) URL.revokeObjectURL(u);
+  }
+}
+function base64ToBytes(b64: string): Uint8Array | null {
+  try {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/* 光栅化用字体 CSS:全部用 blob URL 引用(见上)。每次导出只构建一次,导出结束统一释放。 */
+async function buildSvgRasterFontCss(list: any[]): Promise<string> {
+  let css = '';
+  const seen = new Set<string>();
+  for (const fdef of list ?? []) {
+    const fam = fdef?.fFamily || fdef?.fName;
+    if (!fam || seen.has(fam)) continue;
+    seen.add(fam);
+    let uri = '';
+    const fPath = typeof fdef?.fPath === 'string' ? fdef.fPath : '';
+    if (fPath.startsWith('data:')) {
+      const comma = fPath.indexOf(',');
+      const meta = comma > 0 ? fPath.slice(0, comma) : '';
+      const bytes = comma > 0 ? base64ToBytes(fPath.slice(comma + 1)) : null;
+      if (!bytes) continue;
+      const mime = /woff2/.test(meta) ? 'font/woff2' : /woff/.test(meta) ? 'font/woff' : 'font/ttf';
+      uri = fontBytesToBlobUrl(bytes.buffer as ArrayBuffer, mime);
+    } else {
+      // 优先 WOFF2(体积约为 TTF 的一半,逐帧解析成本直接减半);没有再退回 TTF
+      const woff2Url = resolveFontWoff2Url(fdef.fFamily, fdef.fName);
+      const ttfUrl = resolveFontUrl(fdef.fFamily, fdef.fName);
+      const url = woff2Url || ttfUrl;
+      if (!url) continue;
+      const buf = await fetchFontBinary(url);
+      if (!buf || !looksLikeFontBuffer(buf)) continue;
+      const mime = /woff2/.test(url) ? 'font/woff2' : 'font/ttf';
+      uri = fontBytesToBlobUrl(buf, mime);
+    }
+    css += '@font-face{font-family:"' + fam + '";src:url("' + uri + '");}';
+  }
+  return css;
+}
+
+/* 把字体 CSS 包成 <style> 标签字符串:逐帧复用同一份字符串,序列化时只做一次字符串插入,
+ * 不再每帧把 5MB 的 style 文本节点交给 XMLSerializer(实测这是每帧最大的开销之一) */
+function svgRasterStyleTag(fontCss: string): string {
+  if (!fontCss) return '';
+  return '<style>' + fontCss.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</style>';
+}
+
+/* 上一帧的栅格结果:序列化结果完全一致时直接复用(动画里有不少静止段,省掉最贵的 SVG 解析) */
+let svgRasterLastKey = '';
+let svgRasterLastImg: HTMLImageElement | null = null;
+
+/* 外链图片 → data URI 缓存(SVG 作为 <img> 加载时不能引用外部资源) */
+const svgRasterImageCache = new Map<string, string>();
+async function svgRasterInlineImage(href: string): Promise<string> {
+  const hit = svgRasterImageCache.get(href);
+  if (hit) return hit;
+  const blob = await fetch(href).then((r) => r.blob());
+  const data = await new Promise<string>((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result));
+    fr.onerror = () => reject(new Error('读取图片失败'));
+    fr.readAsDataURL(blob);
+  });
+  svgRasterImageCache.set(href, data);
+  return data;
+}
+
+/* 把当前已渲染到 DOM 的一帧 SVG 光栅化并画到目标画布 */
+async function rasterizeSvgFrameToCtx(
+  svgEl: SVGSVGElement,
+  octx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  styleTag: string,
+): Promise<boolean> {
+  const NS_SVG = 'http://www.w3.org/2000/svg';
+  const XLINK = 'http://www.w3.org/1999/xlink';
+  const clone = svgEl.cloneNode(true) as SVGSVGElement;
+  // lottie 的图片预载元素(序列帧 720 张)与字体 <style> 都不在画面上,序列化前剔除
+  clone.querySelectorAll('defs image').forEach((n) => n.remove());
+  clone.querySelectorAll('defs style').forEach((n) => n.remove());
+  clone.setAttribute('width', String(w));
+  clone.setAttribute('height', String(h));
+  clone.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+  const imgs = Array.from(clone.querySelectorAll('image')) as SVGImageElement[];
+  for (const im of imgs) {
+    const href = im.getAttributeNS(XLINK, 'href') || im.getAttribute('href') || '';
+    if (!href || href.startsWith('data:')) continue;
+    try {
+      const data = await svgRasterInlineImage(href);
+      im.setAttributeNS(XLINK, 'href', data);
+      im.setAttribute('href', data);
+    } catch { /* 单张图片失败不阻断整帧 */ }
+  }
+  // 叠加序列调色用的是 SVG filter(feColorMatrix),滤镜定义挂在站点的隐藏 <svg> 里。
+  // 序列化出来的这份 SVG 会被当作「独立文档」用 <img> 加载,看不到外部文档的滤镜定义,
+  // 于是样式里的 filter:url(#...) 解析不到 → 导出画面退回素材原色(用户改的颜色丢失)。
+  // 所以必须把滤镜定义一并复制进这份 SVG。
+  if (seqTintSvg) {
+    const tintDefs = seqTintSvg.querySelector('defs');
+    if (tintDefs && tintDefs.childNodes.length) {
+      const copied = tintDefs.cloneNode(true) as Element;
+      const ownDefs = clone.querySelector('defs');
+      if (ownDefs) ownDefs.appendChild(copied);
+      else clone.insertBefore(copied, clone.firstChild);
+    }
+  }
+  let serialized = new XMLSerializer().serializeToString(clone);
+  // 字体 <style> 只做一次字符串插入(在 <svg ...> 开标签之后)
+  if (styleTag) serialized = serialized.replace(/<svg[^>]*>/, (m) => m + styleTag);
+  // 与上一帧完全相同(静止段):直接复用上一帧的图片,跳过整段 SVG 解析
+  if (svgRasterLastImg && svgRasterLastKey === serialized) {
+    octx.drawImage(svgRasterLastImg, 0, 0, w, h);
+    return true;
+  }
+  const url = URL.createObjectURL(new Blob([serialized], { type: 'image/svg+xml;charset=utf-8' }));
+  try {
+    const img = new Image();
+    img.width = w;
+    img.height = h;
+    const loaded = await new Promise<boolean>((resolve) => {
+      img.onload = () => resolve(true);
+      img.onerror = () => resolve(false);
+      img.src = url;
+    });
+    if (!loaded) return false;
+    octx.drawImage(img, 0, 0, w, h);
+    svgRasterLastKey = serialized;
+    svgRasterLastImg = img;
+    return true;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 async function exportVideo() {
   if (exporting || !currentData) return;
   exporting = true;
@@ -4860,6 +5460,8 @@ async function exportVideo() {
     : undefined;
   showExportOverlay({ formatLabel, warn });
   updateExportProgress(0, '正在初始化渲染器…', '');
+  /* 兼容导出:遮罩源被共用的动画自动改用 SVG 渲染器逐帧光栅化(canvas 渲染器遮罩合成不正确) */
+  const useRaster = needsSvgRasterExport(data);
   let container: HTMLDivElement | null = null;
   let renderAnim: AnimationItem | null = null;
   let popupExportContainer: HTMLDivElement | null = null;
@@ -4879,16 +5481,37 @@ async function exportVideo() {
     document.body.appendChild(container);
     renderAnim = lottie.loadAnimation({
       container,
-      renderer: 'canvas',
+      renderer: useRaster ? 'svg' : 'canvas',
       rendererSettings: { dpr: 1 },
       loop: false,
       autoplay: false,
       animationData: data,
       audioFactory,
     });
-    patchExportCanvasRenderer((renderAnim as any).renderer);
-    const canvas = container.querySelector('canvas') as HTMLCanvasElement;
-    if (!canvas) throw new Error('无法创建渲染画布');
+    if (useRaster) {
+      // SVG 渲染器同样要打站点的补丁:序列帧逐帧换图、AE 投影、overflow 等都在这里生效
+      patchSvgRendererTree((renderAnim as any).renderer);
+      // lottie 的图片预载元素(序列帧 720 张)只作缓存、不在画面上:导出期间先从 DOM 摘掉,
+      // 这样每帧克隆/序列化的节点数从 ~740 降到 ~20(实测每帧省 ~90ms)
+      const svgRoot = (renderAnim as any).renderer?.svgElement as SVGSVGElement | null;
+      if (svgRoot) {
+        svgRoot.querySelectorAll('defs image').forEach((n) => n.remove());
+        // lottie 会把字体 base64(TTF,约 5MB)塞进 <defs><style>:栅格化时改用下面注入的 WOFF2 版本,
+        // 否则每帧要白白序列化+解析两份字体(实测这是导出最慢的一环)
+        svgRoot.querySelectorAll('defs style').forEach((n) => n.remove());
+      }
+    } else {
+      patchExportCanvasRenderer((renderAnim as any).renderer);
+    }
+    let canvas: HTMLCanvasElement | null = null;
+    if (!useRaster) {
+      canvas = container.querySelector('canvas') as HTMLCanvasElement;
+      if (!canvas) throw new Error('无法创建渲染画布');
+    }
+    // 兼容导出的字体 <style>(只构建一次):主动画 + 弹窗的文字都要能在栅格化时正确排版
+    const rasterStyleTag = useRaster
+      ? svgRasterStyleTag(await buildSvgRasterFontCss([...(data?.fonts?.list ?? []), ...(withPopup ? popupData?.fonts?.list ?? [] : [])]))
+      : '';
     // 弹窗合成:导出时若开启弹窗,用同一帧号驱动弹窗渲染器,叠加到主动画之上
     if (withPopup) {
       await loadEmbeddedFonts(popupData);
@@ -4897,16 +5520,20 @@ async function exportVideo() {
       document.body.appendChild(popupExportContainer);
       popupExportAnim = lottie.loadAnimation({
         container: popupExportContainer,
-        renderer: 'canvas',
+        renderer: useRaster ? 'svg' : 'canvas',
         rendererSettings: { dpr: 1 },
         loop: false,
         autoplay: false,
         animationData: popupData,
         audioFactory,
       });
-      patchExportCanvasRenderer((popupExportAnim as any).renderer);
-      popupExportCanvas = popupExportContainer.querySelector('canvas') as HTMLCanvasElement | null;
-      if (!popupExportCanvas) throw new Error('无法创建弹窗渲染画布');
+      if (useRaster) {
+        patchSvgRendererTree((popupExportAnim as any).renderer);
+      } else {
+        patchExportCanvasRenderer((popupExportAnim as any).renderer);
+        popupExportCanvas = popupExportContainer.querySelector('canvas') as HTMLCanvasElement | null;
+        if (!popupExportCanvas) throw new Error('无法创建弹窗渲染画布');
+      }
     }
     // 合成画布:背景 + 主动画 + 弹窗(透明模式不填充背景,保留 alpha)
     const bg: string | null = wantTransparent ? null : bgColor.value;
@@ -4932,7 +5559,8 @@ async function exportVideo() {
       for (let k = 0; k < d.length; k++) { h ^= d[k]; h = Math.imul(h, 16777619) >>> 0; }
       return h;
     };
-    const renderFrame = (n: number) => {
+    const renderFrame = async (n: number) => {
+      const __t0 = import.meta.env.DEV ? performance.now() : 0;
       // 顺序与 lottie 的 AnimationItem.renderFrame 一致:先同步表达式/帧状态,再整帧强制重绘
       syncAnimFrameForExport(renderAnim, n);
       (renderAnim as any).renderer.renderFrame(n, true);
@@ -4947,8 +5575,26 @@ async function exportVideo() {
         octx.fillStyle = bg;
         octx.fillRect(0, 0, w, h);
       }
-      octx.drawImage(canvas, 0, 0);
-      if (popupExportCanvas) octx.drawImage(popupExportCanvas, 0, 0);
+      if (useRaster) {
+        // 兼容导出:把主/弹窗这一帧的 SVG 各自光栅化后叠加(与 SVG 预览完全一致)
+        const __tr = import.meta.env.DEV ? performance.now() : 0;
+        const mainSvg = (renderAnim as any).renderer?.svgElement as SVGSVGElement | null;
+        if (mainSvg) await rasterizeSvgFrameToCtx(mainSvg, octx, w, h, rasterStyleTag);
+        const popupSvg = popupExportAnim ? ((popupExportAnim as any).renderer?.svgElement as SVGSVGElement | null) : null;
+        if (popupSvg) await rasterizeSvgFrameToCtx(popupSvg, octx, w, h, rasterStyleTag);
+        if (import.meta.env.DEV) {
+          const st = (window as any).__exportStats || ((window as any).__exportStats = { frames: 0, rasterMs: 0, totalMs: 0 });
+          st.rasterMs += performance.now() - __tr;
+        }
+      } else {
+        octx.drawImage(canvas as HTMLCanvasElement, 0, 0);
+        if (popupExportCanvas) octx.drawImage(popupExportCanvas, 0, 0);
+      }
+      if (import.meta.env.DEV) {
+        const st = (window as any).__exportStats || ((window as any).__exportStats = { frames: 0, rasterMs: 0, totalMs: 0 });
+        st.frames += 1;
+        st.totalMs += performance.now() - __t0;
+      }
       // 自检指纹(96×54 缩放哈希,每帧 <1ms)
       const sig = frameSignature();
       if (sig !== -1) {
@@ -5001,6 +5647,7 @@ async function exportVideo() {
       setStatus('导出失败: ' + (e as Error).message, true);
     }
   } finally {
+    releaseSvgRasterFontBlobUrls();
     if (renderAnim) { try { renderAnim.destroy(); } catch { /* ignore */ } }
     if (container) container.remove();
     if (popupExportAnim) { try { popupExportAnim.destroy(); } catch { /* ignore */ } }
@@ -5014,7 +5661,7 @@ async function exportVideo() {
 
 btnExport.addEventListener('click', exportVideo);
 
-/* 动画选择器:切换撤离 / 位置暴露动画 */
+/* 动画选择器:切换撤离 / 位置暴露 / 核电站功率动画 */
 const selAnim = $<HTMLSelectElement>('selAnim');
 selAnim.addEventListener('change', () => void switchAnimation(selAnim.value));
 
