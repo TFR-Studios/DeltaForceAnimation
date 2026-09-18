@@ -1,7 +1,13 @@
+<!-- 三角洲行动动画编辑器 · 单页入口(Vite 构建,纯静态部署) -->
+<!-- 结构顺序:启动加载层 -> 顶栏 -> 主区(预览 + 侧栏) -> 数据加载浮层 -> 导出浮层 -> 状态栏 -->
+<!-- 样式来自 src/style.css,由 src/main.ts 顶部 import 引入,所以这里没有外部样式表链接 -->
+<!-- 只有启动加载层的样式内联在 head 的 style 标签里:它必须在样式表就绪之前就能渲染,否则会白屏 -->
+<!-- 本文件里的 id 与 main.ts 顶部的 $() 常量一一对应,改名必须两边同步,否则取到 null 后静默失效 -->
 <!doctype html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
+    <!-- viewport 只设 initial-scale=1,不锁定缩放:移动端允许用户双指放大查看画布细节 -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <!-- 站点图标:DFAED 矢量标志(public/logo.svg,构建时原样拷贝到站点根目录) -->
     <link rel="icon" type="image/svg+xml" href="/logo.svg" />
@@ -25,6 +31,9 @@
     </style>
   </head>
   <body>
+    <!-- 启动加载层:纯静态骨架(终端风文案 + 方块进度条),不依赖外部样式表,是「打开页面即见」的兜底画面 -->
+    <!-- 方块由 main.ts 的 startLoadingProgress 生成;进度推到 96% 附近会停下等待,动画 ready 后才冲向 100% -->
+    <!-- 冲满后加 is-hidden 淡出,500ms 后整体移除,同时给 html 元素挂上 craft-ready 触发顶栏徽标入场动效 -->
     <div id="app-loading" role="status" aria-label="加载中">
       <div class="ld-term">
         <div class="ld-title"><img class="ld-logo" src="/logo.svg" alt="" aria-hidden="true" />三角洲行动动画编辑器<span class="ld-cursor"></span></div>
@@ -34,17 +43,21 @@
         <div class="ld-pct" id="ldPct">0%</div>
       </div>
     </div>
+    <!-- 顶栏:品牌 + 制作声明徽标 + 动画选择器;高度自适应,窄屏时靠 flex-wrap 换到第二行 -->
     <header class="topbar">
       <div class="brand">
         <img class="brand-logo" src="/logo.svg" alt="" aria-hidden="true" />
         <span>三角洲行动动画编辑器<span class="tag">编辑 · 预览 · 导出</span></span>
       </div>
-      <!-- 制作声明:顶栏内联徽标(纯展示元素,不参与任何编辑/导出逻辑) -->
+      <!-- 制作声明徽标:纯展示元素,不参与任何编辑或导出逻辑;文案里「未使用AI辅助」是结论,样式上给了最高亮度 -->
+      <!-- 入场与待机动效全部由 craft-ready 触发,关键帧见 style.css 的 craft 系列(含 prefers-reduced-motion 降级) -->
       <span class="craft-note" role="note" title="网站内动画均由人工使用AE制作，未使用AI辅助">
         <svg class="bi craft-note-ico" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
           <path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293zm-9.761 5.175-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325"/>
         </svg><span class="craft-note-text">网站内动画均由人工使用<b>AE</b>制作，<em>未使用AI辅助</em></span>
       </span>
+      <!-- 动画选择器:option 的 value 就是三套数据包的标识(extraction / exposed / blinds),切换交给 main.ts 的 switchAnimation -->
+      <!-- 首次切到某套动画需要下载对应的动画 JSON,期间由 dataLoading 浮层显示进度 -->
       <label class="anim-switch" title="切换要编辑的动画">
         <span class="anim-switch-label">动画</span>
         <select id="selAnim">
@@ -55,17 +68,27 @@
       </label>
     </header>
 
+    <!-- 主区:左列预览面板 + 右侧固定 320px 侧栏;两侧各自滚动,页面本身不滚动 -->
     <main class="layout">
       <section class="preview-panel">
+        <!-- 预览舞台(stage):滚轮缩放、拖拽平移都在这一层响应,事件见 main.ts 的 wheel / pointer 处理 -->
+        <!-- 内层 previewInner 是 lottie 容器,同时代表安全框尺寸(撤离 1920×1080、位置暴露 3840×1080) -->
+        <!-- popupLayer 叠在画布内部显示弹窗动画,与主动画同帧号同步 -->
         <div class="preview-stage" id="stage">
           <div class="preview-inner" id="previewInner">
             <div class="popup-layer" id="popupLayer" hidden></div>
           </div>
         </div>
+        <!-- 时间轴:min/max/step 由 main.ts 按当前动画总帧数重写,这里的 0..0 只是占位 -->
+        <!-- 帧号与秒数同显,秒 = 帧号 / 动画帧率(帧率取自 lottie JSON 的 fr 字段),方便与 AE 时间轴对照 -->
         <div class="timeline">
             <input type="range" id="rngFrame" min="0" max="0" step="1" value="0" title="拖动预览时间轴" aria-label="动画时间轴" />
             <span class="frame">帧 <b id="frameInfo">0 / 0</b> · <span id="timeInfo">0.00s</span></span>
           </div>
+          <!-- 播放控制条:回到开头 / 播放暂停(空格键)/ 循环 / 速度(0.1~3.0 倍)/ 视图缩放与复位 -->
+          <!-- 「速度」只作用于预览(main.ts 调 anim.setSpeed),导出流程不读取该值 -->
+          <!-- spacer 之后是导出相关:导出格式(MP4 / AVI)、导出按钮、渲染器(SVG / Canvas)、适配(包含 / 铺满 / 原始)、背景色、透明背景 -->
+          <!-- 勾选「透明背景」时格式会自动切到 AVI 并被禁用(MP4 不支持透明通道),原因见 main.ts 的 syncExportFormatUI -->
           <div class="transport">
           <button id="btnRestart" class="icon-btn" type="button" title="回到开头" aria-label="回到开头">
             <svg class="bi" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
@@ -116,9 +139,14 @@
         </div>
       </section>
 
+      <!-- 侧栏:动画信息 -> 动画时长(仅位置暴露) -> 文字图层 -> 形状图层 -> 图片图层 -> 图标选择 -> 弹窗图层 -->
+      <!-- 除「动画信息」外,各区块默认 hidden,由 main.ts 按当前动画的数据能力逐块打开 -->
+      <!-- 各区块标题后的 span 是图层数量计数,由 main.ts 写入 -->
       <aside class="side-panel">
         <h3>动画信息</h3>
         <dl id="infoList"></dl>
+        <!-- 动画时长(仅位置暴露动画显示):时长滑杆把末尾淡出关键帧整体后移,范围 1~10s、步进 0.1s -->
+        <!-- 「二次扫描」勾选后主动画播完紧接着播第二段;下一行是它的时长,默认 hidden,勾选后才出现 -->
         <div id="timingSection" hidden>
         <h3>动画时长</h3>
           <div class="timing-row">
@@ -137,14 +165,20 @@
             </label>
           </div>
         </div>
+        <!-- 文字图层:每项可改文案与颜色,右上角「重置」恢复该图层在 JSON 里的原始文案与颜色 -->
         <h3>文字图层 <span id="textCount"></span></h3>
         <ul id="textList"></ul>
         <h3>形状图层 <span id="shapeCount"></span></h3>
         <ul id="shapeList"></ul>
+        <!-- 图片图层(默认 hidden):仅当动画里存在可调色的图片图层时由 main.ts 打开,例如位置暴露的图标位图 -->
         <div id="imageSection" hidden>
         <h3>图片图层 <span id="imageCount"></span></h3>
         <ul id="imageList"></ul>
         </div>
+        <!-- 图标选择(默认 hidden,仅位置暴露动画显示):分段选项卡分别给「位置暴露」与「二次扫描」指定图标 -->
+        <!-- 勾选「跟随位置暴露」时第二段复用第一段的图标,取消勾选后可为第二段单独选择或上传 -->
+        <!-- 「居中微调」在隐藏图标后可用:字体字形的墨迹存在固有光学偏差,用 ±8(合成坐标)手动调正 -->
+        <!-- 上传限制:PNG / JPG / WebP / GIF 且不超过 2MB,超限会在状态栏报错(校验在 main.ts) -->
         <div id="iconSection" hidden>
         <h3>图标选择 <span id="iconCount"></span></h3>
         <label class="popup-toggle" title="取消勾选后隐藏图标(主段与二次扫描同步),文字与底框一起回到画面中心">
@@ -196,6 +230,9 @@
         </label>
         <ul id="iconList"></ul>
         </div>
+        <!-- 弹窗图层:控制 windows_animation.json 弹窗的显隐,并编辑弹窗文字与颜色 -->
+        <!-- 整块是否显示由 main.ts 按当前动画是否带弹窗数据决定;弹窗与主动画同帧号同步叠加 -->
+        <!-- 提示:名称含「蒙版」的图层不可改色,弹窗文字默认居中对齐,改文字后仍保持居中 -->
         <div id="popupSection">
         <h3>弹窗图层 <span id="popupCount"></span></h3>
         <div class="popup-panel">
@@ -214,6 +251,8 @@
     </main>
 
     <!-- 切换动画时按需下载数据包的加载浮层(实时进度) -->
+    <!-- 数据加载浮层:层级 9999(见 style.css),与启动加载层同层,保证盖在所有内容之上 -->
+    <!-- 拿不到总长度时进度条会退化为来回滑动的不确定态(main.ts 加 indet 类) -->
     <div id="dataLoading" hidden>
       <div class="dl-card">
         <div class="dl-title"><b id="dlTitle">正在加载动画数据…</b><span id="dataLoadingPct" class="dl-pct">0%</span></div>
@@ -222,6 +261,9 @@
       </div>
     </div>
 
+    <!-- 导出进度浮层:状态文案 + 大号百分比 + 进度条 + 明细 + 告警 + 取消按钮 -->
+    <!-- 成功 / 失败 / 取消三态只改百分比的颜色类与文案;非错误态在若干秒后自动关闭(见 main.ts 的 finishExportOverlay) -->
+    <!-- 导出进行中按钮文案是「取消导出」,结束后变成「关闭」 -->
     <div class="export-overlay" id="exportOverlay" hidden>
       <div class="export-card">
         <div class="export-head">
@@ -244,7 +286,10 @@
       </div>
     </div>
 
+    <!-- 状态栏:显示最近一次操作的结果或错误,出错时加 error 类变红(文案由 main.ts 的 setStatus 写入) -->
     <footer class="statusbar" id="statusbar">就绪</footer>
+    <!-- 模块入口:main.ts 会 import style.css 以及 lottie-web / mp4-muxer,最终由 Vite 打包成纯静态资源 -->
+    <!-- 除动画数据包按需下载外不依赖后端;仅开发模式下有 /save-avi 中间件,用于把本地导出的文件取回 tools 目录 -->
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

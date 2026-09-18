@@ -1,3 +1,28 @@
+/*
+ * 三角洲行动 HUD 动画编辑器 —— 纯静态前端(无后端),Vite + TypeScript + lottie-web。
+ * 本文件是整个应用的入口与主逻辑(约 5.7k 行),按区块推进,建议按下面的顺序建立全局图景。
+ *
+ * 素材打包:动画 JSON、字体、音效、PNG 序列全部作为「静态资源」进产物 ——
+ *   JSON 用 ?url 按需 fetch(避免首屏拖十几 MB 的 chunk);字体用 new URL(字面量, import.meta.url);
+ *   图片序列用 import.meta.glob({ eager: true, query: '?url' })。Bodymovin 内嵌的 TTF 已剥离为
+ *   animation/fonts/ 下的共享文件,由本文件在运行时注册(否则只有装过该字体的机器显示正常)。
+ *
+ * 渲染管线:lottie-web 两套渲染器(SVG / Canvas)可切换,渲染器在构造时确定,切换即整段重建。
+ *   本文件在渲染器树上打三类补丁(见各 patch 区块):
+ *   Canvas 文字兜底(数据里没有 chars 字形轮廓,只能改用原生 fillText 绘制)、
+ *   图片序列驱动(逐帧换 src / <image> href,并强制 lottie 重绘,否则静态层画过一次就不再更新)、
+ *   叠加序列调色(feColorMatrix 做 colorize,滤镜宿主挂在 body 的隐藏 svg 上,预览与导出共用)。
+ *
+ * 三套动画(ANIMATIONS,按需加载):撤离动画(1920×1080)、位置暴露动画(画布加宽为 3840×1080,
+ *   可把「二次扫描」第二段合并进同一条时间轴)、核电站功率动画(两条 359 帧透明序列叠加)。
+ *
+ * 编辑面板:文字 / 形状 / 图片图层列表、图标替换、弹窗叠加层、动画时长(1–10s)与二次扫描时长。
+ *   所有编辑都是就地改渲染用的 JSON,再走 reRenderPreservingState() 单飞重建并恢复播放位置。
+ *
+ * 导出管线:逐帧 renderer.renderFrame(n, true) 渲染 → WebCodecs H.264 编码 → mp4-muxer 封装 MP4;
+ *   需要透明时走自封装 AVI(无压缩 BGRA + 预乘 alpha);浏览器不支持 WebCodecs 时回退 MJPEG AVI;
+ *   个别 Canvas 画不出的效果会自动改走 SVG 逐帧光栅化导出。导出实例与预览实例完全隔离。
+*/
 import lottie, { type AnimationItem } from 'lottie-web';
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import './style.css';
@@ -32,9 +57,13 @@ const FONT_CURVE_WOFF2_URL = new URL('../animation/fonts/ProjectDTypeCurve-Bold.
  * 代表样式已就绪,这里启动块状进度条动画。
  * 进度推进到接近完成时停滞等待;主动画首次 ready 后(符号 flag)快速冲到 100%,
  * 走到 100% 才淡出并移除加载界面(真正做到"进度条走满再进入网站")。 */
+// appLoadingHidden:加载界面是否已进入淡出流程 —— hideAppLoading 在多处分支被调用,这里做重入保护
 let appLoadingHidden = false;
 let appLoadingReady = false; // 主动画已就绪,允许进度条收尾到 100%
 
+/* 把百分比进度画到加载界面上:pct 取 0..100(#ldPct 显示四舍五入后的整数百分比)。
+ * #ldBar 里是 22 个 <i> 方块,按比例点亮前 on 个;方块总数用 children.length 动态取,
+ * 这样改 index.html 里的方块数量不会与本文件写死的数字失配。 */
 function renderLoadingPct(pct: number) {
   const bar = document.getElementById('ldBar');
   const pctEl = document.getElementById('ldPct');
@@ -49,6 +78,9 @@ function finishAppLoading() {
   appLoadingReady = true;
 }
 
+/* 淡出并移除启动加载界面:pct 参数先把进度条补画到指定值(默认 100),再挂 .is-hidden 触发 CSS 过渡。
+ * 500ms 后 remove() 与 style.css 里 #app-loading 的过渡时长对应,提前移除会打断淡出。 */
+// appLoadingHidden 保证重复调用只生效一次(多处失败分支都会调它)。
 function hideAppLoading(pct = 100) {
   if (appLoadingHidden) return;
   appLoadingHidden = true;
@@ -64,6 +96,11 @@ function hideAppLoading(pct = 100) {
   }
 }
 
+/* 块状进度条的自走逻辑(立即执行的 IIFE,不等任何数据)。
+ * step 的单位是百分比,每 70ms 推进一次:
+ *  • 未就绪时最多停在 96%:留出最后一段;60% 之后从 +2 降速到 +1,让「快满却还没满」更接近真实加载;
+ *  • 主动画 ready 后(appLoadingReady)每 tick +4 快速冲线,走到 100% 才 hideAppLoading,
+ *    保证「进度条走满再进入网站」,不会出现进度条没走完页面就消失。 */
 (function startLoadingProgress() {
   const bar = document.getElementById('ldBar');
   if (!bar) return;
@@ -103,6 +140,10 @@ const AUDIO_VOLUME = 0.3;
  * 元素常驻缓存不会被回收,既消除该报错,也避免重复请求。 */
 const audioElCache = new Map<string, HTMLAudioElement>();
 
+/* 音频控制器工厂:lottie-web 要求 audioFactory(assetPath) 返回带
+ * play/pause/seek/playing/rate/volume 的对象,并且会为每个音频层各调用一次,
+ * 所以必须返回独立的控制器闭包 —— wantPlay / retryHandler 是每个音频层各自的状态,不能复用同一对象。
+ * el.src 每次赋值是幂等的(值相同不会重新发起请求),所以放心直写。 */
 const audioFactory = (assetPath: string) => {
   let el = audioElCache.get(assetPath);
   if (!el) {
@@ -114,6 +155,7 @@ const audioFactory = (assetPath: string) => {
   let wantPlay = false; // lottie 期望该音频处于播放状态
   let retryHandler: (() => void) | null = null;
 
+  // play() 只有较新的浏览器才返回 Promise;返回 undefined 时无从得知是否被自动播放策略拦截
   const tryPlay = () => {
     const p = el.play();
     if (p && typeof (p as Promise<void>).catch === 'function') {
@@ -160,6 +202,8 @@ void prefetchAudios();
  * 动画销毁(切换/重建/导出结束)时 lottie 不会暂停音频层,若不处理,
  * 缓存的音频元素会继续播放,切换到其他动画时会出现声音重叠。 */
 let audioDestroyPatched = false;
+/* 在原型上打一次补丁即可对所有 lottie 实例生效(audioDestroyPatched 做幂等保护)。
+ * destroy() 内部可能因异常提前中断,所以 pause 包在 try 里,避免补丁把销毁流程带崩。 */
 function patchAudioDestroy(animItem: any) {
   if (audioDestroyPatched || !animItem) return;
   const proto = animItem.constructor && animItem.constructor.prototype;
@@ -190,6 +234,8 @@ function patchAudioDestroy(animItem: any) {
  *  3) 拿到的字节必须先校验字体魔数:服务器 MIME/中间层返回错误内容时,FontFace 会抛
  *     "Invalid font data in ArrayBuffer",要尽早发现并说明,而不是静默降级。
  */
+/* 已成功注册到 document.fonts 的 family 集合:只记成功项,失败的不入集合,
+ * 之后再遇到同名 family 仍会重试一次注册。 */
 const loadedFontFamilies = new Set<string>();
 
 /* 绑定字体 TTF 资源(与 JSON 中被剥离的 fPath 一一对应) */
@@ -234,6 +280,8 @@ const EXTERNAL_FONT_WOFF2_NORM: Record<string, string> = (() => {
   return out;
 })();
 
+/* 按 JSON 里出现的字体名查对应的 WOFF2 地址(可传 fFamily / fName 多个候选,依次尝试);
+ * 都命中不了返回空串,调用方以此为「该字体没有绑定资源」的判定依据。 */
 function resolveFontWoff2Url(...names: (string | undefined)[]): string {
   const norm = (s: string) => s.toLowerCase().replace(/[\s\-_]+/g, '');
   for (const n of names) {
@@ -244,6 +292,7 @@ function resolveFontWoff2Url(...names: (string | undefined)[]): string {
   return '';
 }
 
+// 与 resolveFontWoff2Url 同规则,只是返回 TTF 地址(预览与 Canvas 渲染用 TTF,内联光栅化导出用 WOFF2)
 function resolveFontUrl(...names: (string | undefined)[]): string {
   const norm = (s: string) => s.toLowerCase().replace(/[\s\-_]+/g, '');
   for (const n of names) {
@@ -256,6 +305,8 @@ function resolveFontUrl(...names: (string | undefined)[]): string {
 
 /* 同一字体二进制只取一次(内存缓存),供多个 family 名注册 FontFace */
 const fontBinaryCache = new Map<string, Promise<ArrayBuffer | null>>();
+/* 取字体二进制;同一 URL 只 fetch 一次并缓存 Promise(多个 family 名可共用同一份字节)。
+ * 网络失败或非 2xx 一律返回 null 而不抛异常,内容是否可用统一交给 looksLikeFontBuffer 判定。 */
 function fetchFontBinary(url: string): Promise<ArrayBuffer | null> {
   let p = fontBinaryCache.get(url);
   if (!p) {
@@ -286,11 +337,15 @@ function looksLikeFontBuffer(buf: ArrayBuffer | null): buf is ArrayBuffer {
 /* 字体注册结果:updateInfo 用它给出真实状态,而不是拿 JSON 里有没有 fPath 去猜。 */
 type FontLoadState = 'pending' | 'ready' | 'failed';
 const fontLoadState = new Map<string, FontLoadState>();
+/* lastFontWarnings 是「本次载入」的诊断信息:loadEmbeddedFonts 每次开头会清空,
+ * 供信息面板展示;addFontWarning 负责去重,避免同一 family 反复刷屏。 */
 const lastFontWarnings: string[] = [];
 function addFontWarning(msg: string) {
   if (!lastFontWarnings.includes(msg)) lastFontWarnings.push(msg);
 }
 
+/* 把一个二进制字体注册成指定 family 的 @font-face。
+ * FontFace.load() 只解析与校验,必须 document.fonts.add() 之后才真正参与字体匹配。 */
 function registerFontFamily(fam: string, source: ArrayBuffer): Promise<boolean> {
   if (loadedFontFamilies.has(fam)) return Promise.resolve(true);
   return new FontFace(fam, source).load().then((face) => {
@@ -301,6 +356,12 @@ function registerFontFamily(fam: string, source: ArrayBuffer): Promise<boolean> 
   });
 }
 
+/* 为一份动画 JSON 注册它用到的全部字体。fonts.list 每项两种情况:
+ *  • 仍有 fPath(旧数据:TTF base64 内嵌在 fPath 里)—— 直接按 CSS url(...) 交给 FontFace;
+ *  • fPath 已被剥离 —— 用 resolveFontUrl 查到 animation/fonts/ 下的共享文件,取二进制后校验魔数再注册。
+ * 查不到 / 魔数不对 / 注册抛错都只记 warning 并标 failed,绝不阻断动画渲染(回退系统字体)。
+ * 全部完成后 await document.fonts.ready,保证首帧渲染时字形已经可用;
+ * DEV 下把状态挂到 window.__fontDebug,方便确认用的是「本站注册的字体」而不是本机同名系统字体。 */
 async function loadEmbeddedFonts(data: any) {
   const list: any[] = data?.fonts?.list ?? [];
   lastFontWarnings.length = 0;
@@ -376,10 +437,19 @@ async function loadEmbeddedFonts(data: any) {
  * 保留 lottie 的逐字母动画(位置/透明度/颜色/描边),字形交给浏览器文本引擎。
  * 通过包装 buildItem 递归覆盖预合成内部的文字层。
  */
+/* 用原生 Canvas 文字绘制替换 lottie 的 Canvas 文字渲染。
+ * 为什么必须换:Canvas 渲染器的文字依赖 JSON 里的 chars 字形轮廓,而本项目的数据没有携带,
+ * lottie 会在 Font.getCharData 处抛异常并中断整个 renderFrame(表现是画布整块空白)。
+ * 替换后保留 lottie 的逐字母动画(位置矩阵 / 透明度 / 颜色 / 描边),只把「画字形」交给浏览器文本引擎。
+ * 注意:必须自己把 renderer.contextData(appliedFillStyle 等)与原生 ctx 的状态一起同步,
+ * 否则 lottie 的状态缓存与实际 ctx 不一致,后续元素会沿用错误的填充/描边。 */
 function patchCanvasTextElement(el: any) {
   const buildRgba = (c: number[] | undefined): string =>
     !c ? 'rgba(0,0,0,0)' : 'rgb(' + Math.round(c[0] * 255) + ',' + Math.round(c[1] * 255) + ',' + Math.round(c[2] * 255) + ')';
 
+  /* 两条绘制路径:doc.l 存在(有逐字母数据)→ 逐字母绘制;否则(如 singleShape)整段逐行绘制。
+   * doc 是 lottie 的文字属性当前值:finalSize 单位 px(已含缩放,不要再乘 globalData 的缩放),
+   * tr 是字距(AE tracking,单位 1/1000 em),j 是对齐(0=左 / 1=右 / 2=居中)。 */
   el.renderInnerContent = function (this: any) {
     const ctx = this.canvasContext;
     const renderer = this.globalData.renderer;
@@ -402,6 +472,7 @@ function patchCanvasTextElement(el: any) {
       cd.appliedLineJoin = 'miter';
       cd.appliedMiterLimit = 4;
     }
+    // finalSize 已是最终像素字号;family 取 JSON 声明的 fFamily,查不到就退回 doc.f 或 sans-serif
     ctx.font = doc.finalSize + 'px ' + family;
 
     const letters = Array.isArray(doc.l) ? doc.l : null;
@@ -416,6 +487,7 @@ function patchCanvasTextElement(el: any) {
       // renderedLetters 的 x 偏移只剩 tracking,导致字形全部重叠。
       // 这里用真实字体的 measureText 重算每字母位置,修正 rl.p 的 tx;
       // 修正量 = 正确布局 - lottie 的(错误)布局,因此动画器偏移得以保留。
+      // tracking 换算:AE 的 tr 单位是 1/1000 em,乘字号得到像素间距
       const tracking = (doc.tr || 0) * 0.001 * doc.finalSize;
       const widths: number[] = new Array(letters.length).fill(0);
       const lineW: Record<number, number> = {};
@@ -430,6 +502,7 @@ function patchCanvasTextElement(el: any) {
         lineW[ln] = (lineW[ln] || 0) + w + tracking;
         lineWBroken[ln] = (lineWBroken[ln] || 0) + tracking;
       }
+      // AE 对齐方式 j:0=左(不偏移)、1=右(整行左移一个行宽)、2=居中(左移半个行宽)
       const justifyX = (ln: number) => (doc.j === 1 ? -lineW[ln] : doc.j === 2 ? -lineW[ln] / 2 : 0);
       const justifyXBroken = (ln: number) => (doc.j === 1 ? -lineWBroken[ln] : doc.j === 2 ? -lineWBroken[ln] / 2 : 0);
 
@@ -451,6 +524,7 @@ function patchCanvasTextElement(el: any) {
         const ln = letters[i].line;
         const dx = xPos + justifyX(ln) - (xPosBroken + justifyXBroken(ln));
         renderer.save();
+        // rl.p 是 16 元素变换矩阵(列主序),p[12]/p[13] 是平移分量;复制一份再改,避免污染 lottie 缓存的矩阵
         const p = Array.from(rl.p || []);
         p[12] = ((rl.p && rl.p[12]) || 0) + dx;
         renderer.ctxTransform(p);
@@ -489,7 +563,9 @@ function patchCanvasTextElement(el: any) {
     } else {
       // 无逐字母数据(如 singleShape):整段文本逐行绘制
       const text = String(doc.t ?? doc.finalText ?? '');
+      // Bodymovin 用 \r 作换行符(不是 \n),按它切行才能与 AE 里的行结构一致
       const lines = text.split('\r');
+      // 行距优先用数据里的 yOffset;缺省按 1.2 倍字号估算(常见默认行高)
       const lh = doc.yOffset || doc.finalSize * 1.2;
       let align: CanvasTextAlign = 'left';
       if (doc.j === 1) align = 'right';
@@ -523,11 +599,17 @@ function patchCanvasTextElement(el: any) {
   };
 }
 
+/* 给 Canvas 渲染器树补丁:文字兜底 + 图片序列 + 投影效果,两个入口缺一不可:
+ *  • 遍历当前已构建的 elements —— loadAnimation 可能已经同步建好了元素;
+ *  • 包装 renderer.buildItem —— 元素是懒构建的,首次渲染才创建,只能靠包装覆盖后来出现的元素。
+ * ty===0 的预合成递归下钻;__lottieFallbackPatched 标记保证每个元素只补一次。
+ * exportMode 会透传给序列层的 canvas 补丁:导出走「导出专用图片」而不是预览双缓冲。 */
 function patchCanvasRendererTree(renderer: any, exportMode = false) {
   // loadAnimation 可能已同步构建元素,patch 需要对已构建元素立即生效
   for (const el of renderer.elements ?? []) {
     if (el && el.data && !el.__lottieFallbackPatched) {
       el.__lottieFallbackPatched = true;
+      // 图层类型 ty:0=预合成、1=实心、2=图片、3=空对象、4=形状、5=文字;这里只处理 5 / 2 / 0
       if (el.data.ty === 5) patchCanvasTextElement(el);
       else if (el.data.ty === 2 && seqEntryByInd.get(el.data.ind)) {
         el.__seqUseExport = exportMode;
@@ -550,6 +632,7 @@ function patchCanvasRendererTree(renderer: any, exportMode = false) {
       el.__seqUseExport = exportMode;
       patchSeqCanvasElement(el, seqEntryByInd.get(el.data.ind) as SeqEntry);
     } else if (el.data && el.data.ty === 0 && typeof el.buildItem === 'function') {
+      // 注意:预合成内层递归没有透传 exportMode(取默认 false),嵌套的序列层按预览路径处理
       patchCanvasRendererTree(el); // 预合成内的文字层
     }
     if (el.data && getDropShadow(el.data)) patchCanvasDropShadow(el);
@@ -562,11 +645,18 @@ function patchCanvasRendererTree(renderer: any, exportMode = false) {
  * - canvas 渲染器:绘制前把元素的 img 切换为当前帧图片(双缓冲预加载);
  * - SVG 渲染器:逐帧切换 <image> 的 href(浏览器图片缓存保证即时显示);
  * - 导出:在渲染帧前 await 解码,保证帧内容完整。 */
+/* urls 是按帧号稠密排列的数组(索引 = 帧号),没有关键帧的帧位填空串;
+ * seqFrameUrl 遇到空串会回退到第 0 帧,所以序列首帧应当始终存在。 */
 type SeqEntry = { ind: number; nm: string; urls: string[] };
 let seqEntries: SeqEntry[] = [];
 const seqEntryByInd = new Map<number, SeqEntry>();
 const seqExportImages = new Map<number, HTMLImageElement>(); // 序列图层 ind → 导出专用图片
 
+/* 从动画 JSON 里挑出「图像序列」层并建索引,供渲染期逐帧取图。
+ * 识别条件:ty===2(图片层)且 ks.src 是长度 ≥2 的关键帧数组(只有一帧不算序列)。
+ * 关键帧的 s 里放的是 asset id,要用它在 data.assets 里查到真正的 p(图片 URL),
+ * 再按 round(kf.t)(帧号取整)填进帧号索引数组 urls。
+ * 只扫描顶层 data.layers —— 现有数据的序列层都在顶层。 */
 function setupImageSequence(data: any) {
   seqEntries = [];
   seqEntryByInd.clear();
@@ -592,6 +682,8 @@ function setupImageSequence(data: any) {
   }
 }
 
+/* 取某帧对应的图片 URL:帧号四舍五入后夹到 [0, len-1](负帧与越界都用边界帧),
+ * 该帧位是空串时退回第 0 帧,保证永远返回一个可用 URL。 */
 function seqFrameUrl(entry: SeqEntry | undefined, frame: number): string {
   if (!entry || entry.urls.length === 0) return '';
   const f = Math.max(0, Math.min(entry.urls.length - 1, Math.round(frame)));
@@ -637,6 +729,7 @@ function patchSeqCanvasElement(el: any, entry: SeqEntry) {
           const nextUrl = seqFrameUrl(entry, f + 1);
           if (nextUrl && other.src !== nextUrl) other.src = nextUrl;
           this.__seqSlot = this.__seqSlot === 1 ? 0 : 1;
+          // 图片是异步解码的:解码完成的这一刻再补渲一次当前帧,避免换成还没解码完的图时画到空白
           mySlot.onload = () => {
             const anim = (window as any).__anim;
             if (anim && anim.isLoaded && anim.renderer) {
@@ -701,6 +794,7 @@ function patchSeqSvgElement(el: any, entry: SeqEntry) {
 
 /* SVG 渲染器树 patch(图片序列层 + 投影效果) */
 function patchSvgRendererTree(renderer: any) {
+  // 与 patchCanvasRendererTree 同构:__seqTreePatched 幂等标记 + 包装 buildItem 覆盖懒构建的元素
   if (renderer.__seqTreePatched) return;
   renderer.__seqTreePatched = true;
   // 移除根 <g> 上 Lottie 默认应用的固定尺寸 clipPath(1920×1080),并允许 SVG 溢出,
@@ -738,6 +832,9 @@ function patchSvgRendererTree(renderer: any) {
 }
 
 /* 导出前确保第 n 帧的序列图片已解码(每条序列各自的导出专用图片,与预览隔离) */
+/* 逐帧导出前调用:把第 n 帧的序列图片挂到导出专用 <img> 上并等它解码完成。
+ * 已经 complete 的图不再 await(decode() 虽会立即返回,但少一次 Promise 开销);
+ * decode() 失败(图 404 / 解码报错)被吞掉 —— 少一帧总好过中断整段导出。 */
 async function ensureSeqDecoded(n: number) {
   if (seqEntries.length === 0) return;
   await Promise.all(
@@ -784,10 +881,13 @@ function seqTintHexOfLayer(data: any): string | null {
   return isBlindsSequenceName(data?.nm) ? sequenceDefaultHex(String(data.nm)) : null;
 }
 
+// 滤镜 id 只能含字母数字 / 下划线 / 连字符,把 '动画key:ind' 里的非法字符统一替换掉
 function seqTintFilterId(ind: number): string {
   return 'df-seq-tint-' + seqTintKey(ind).replace(/[^a-zA-Z0-9_-]+/g, '-');
 }
 
+/* 生成 feColorMatrix 的 20 个系数(4×5,行主序):输出 RGB 恒等于目标色、alpha 沿用源图,
+ * 即用目标色给源图重新着色(colorize)—— 纹理信息都在 alpha 上,所以换色不丢纹理。 */
 function seqTintMatrixValues(hex: string): string {
   const r = parseInt(hex.slice(1, 3), 16) / 255;
   const g = parseInt(hex.slice(3, 5), 16) / 255;
@@ -858,6 +958,7 @@ function applySeqTintToSvg(el: any) {
 /* 元素查询:放宽到 HTMLElement | SVGElement(播放/暂停等内联 SVG 也要用它取引用) */
 const $ = <T extends HTMLElement | SVGElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
+/* 预览区与播放控制条的常用引用(播放/暂停、循环、速度、时长、帧滑块、渲染器/适配选择) */
 const previewStage = $<HTMLDivElement>('stage');
 const previewInner = $<HTMLDivElement>('previewInner');
 const btnPlay = $<HTMLButtonElement>('btnPlay');
@@ -914,6 +1015,9 @@ const popupShapeCount = $<HTMLElement>('popupShapeCount');
 const statusbar = $<HTMLElement>('statusbar');
 
 /* ---------- 状态 ---------- */
+/* currentData 是「当前正在渲染的那份数据」—— 可能已被二次扫描合并、时长调整、图标替换就地改过,
+ * 与 ANIMATIONS[].data() 返回的源数据不是同一个引用;currentName 用于按名字走特殊逻辑
+ * (如「位置暴露动画」的默认时长与图标处理)。scrubWasPlaying 记录拖动时间轴之前是否在播放。 */
 let anim: AnimationItem | null = null;
 let currentData: any = null;
 let currentName = '';
@@ -921,8 +1025,10 @@ let scrubWasPlaying = false;
 /* 播放/暂停图标上次同步到的状态:仅用于「变了才写 DOM」,同时便于发现动画状态与图标不一致 */
 let transportShownPlaying: boolean | null = null;
 let transportShownAnim: AnimationItem | null = null;
+// 兜底看门狗定时器 id:全局只注册一个(syncTransportUI 内部已做变化检测,可安全高频调用)
 let transportWatchdog: number | null = null;
 
+// HTML 转义:所有拼进 innerHTML 的文本(图层名、用户输入)都要过一遍,防止注入与破版
 const esc = (s: unknown) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string);
 
@@ -932,6 +1038,9 @@ function setStatus(msg: string, isError = false) {
 }
 
 /* ---------- 动画生命周期 ---------- */
+/* 销毁当前 lottie 实例并清空预览容器。
+ * 容器必须清空:destroy() 不会移除容器里残留的渲染节点,残留会让下一次重建出现新旧画面叠加,
+ * 或留下「只剩一个图标的半成品」。 */
 function destroyAnim() {
   if (anim) {
     try { anim.destroy(); } catch { /* ignore */ }
@@ -940,8 +1049,18 @@ function destroyAnim() {
   previewInner.innerHTML = '';
 }
 
+// 载入序号:loadData 中途要 await 字体加载,期间用户可能已经切到别的动画,
+// 回来自查序号不一致就整体放弃,避免过期数据把新动画覆盖掉
 let loadSeq = 0;
 
+/* 载入并渲染一份动画数据(编辑器的主入口,流程顺序有强约束,别随意调换):
+ *   销毁旧实例 → 记录 currentData/currentName → 位置暴露默认时长 → 捕获各项「原始状态」
+ *   → setupImageSequence → syncSeqTintFilters → 适配/复位视图/背景 → await 字体加载
+ *   → lottie.loadAnimation → 按渲染器打 patch → 注册事件 → rAF 兜底刷新帧范围。
+ * 几个容易踩的点:
+ *  • 原始状态(文字/形状/透明度/底框/图标)必须在时长压缩之后捕获,否则「重置」会恢复成压缩前的时刻;
+ *  • 字体 await 回来后必须校验 loadSeq,过期载入直接 return(连 UI 都不更新);
+ *  • 本函数不返回 Promise,调用方用 void loadData(...) 触发,内部失败只写状态栏。 */
 async function loadData(data: any, name: string) {
   const seq = ++loadSeq;
   const serial = ++buildSerial; // 使在途的 reRenderPreservingState 恢复逻辑失效
@@ -974,6 +1093,8 @@ async function loadData(data: any, name: string) {
   // 「显示图标」开关未勾选时,对刚载入的数据应用隐藏(图标透明度置 0 + 文字居中)
   if (!chkIcon.checked) setIconVisible(false, false);
   try {
+    /* lottie 实例化:renderer 由下拉框决定(SVG / Canvas 是两条不同的渲染管线,patch 也不同);
+     * autoplay 恒开 —— 是否循环由 chkLoop 控制;音效走上面注入的 audioFactory(修复 Howl 缺失导致的崩溃)。 */
     anim = lottie.loadAnimation({
       container: previewInner,
       renderer: selRenderer.value === 'canvas' ? 'canvas' : 'svg',
@@ -985,6 +1106,7 @@ async function loadData(data: any, name: string) {
     patchAudioDestroy(anim);
     (window as any).__anim = anim;
     (window as any).__lottie = lottie;
+    // 立即给已构建的元素打 patch;懒构建的元素由 patch 内部包装的 buildItem 覆盖
     if (selRenderer.value === 'canvas') {
       patchCanvasRendererTree((anim as any).renderer);
     } else {
@@ -1013,6 +1135,7 @@ async function loadData(data: any, name: string) {
     loadedAnim.addEventListener('DOMLoaded', revealIfLatest);
     loadedAnim.addEventListener('config_ready', revealIfLatest);
     requestAnimationFrame(revealIfLatest);
+  // 构造失败也必须收掉加载界面,否则用户会永远停在加载页上
   } catch (e) {
     hideAppLoading();
     setStatus('载入失败: ' + (e as Error).message, true);
@@ -1022,6 +1145,8 @@ async function loadData(data: any, name: string) {
   syncNextDurationSlider();
 }
 
+/* DOMLoaded 与 config_ready 都会触发这里(可能各触发一次),因此函数体必须可重复执行:
+ * finishAppLoading 只置标志位;帧范围与时长滑块都是「按当前数据重算后覆盖」,天然幂等。 */
 function onAnimReady() {
   finishAppLoading(); // 主动画就绪:放行进度条走到 100% 后再隐藏加载界面
   updateFrameRange();
@@ -1043,6 +1168,8 @@ function isAtLastFrame(a: AnimationItem): boolean {
   return a.currentFrame >= last - 0.5;
 }
 
+/* 把播放/暂停图标、按钮标题与 aria 同步到 anim.isPaused,并记录本次同步的基准
+ * (transportShownAnim / transportShownPlaying),供 syncTransportUI 做变化检测。 */
 function updateTransport() {
   const a = anim;
   if (!a) return;
@@ -1070,6 +1197,8 @@ function syncTransportUI(): void {
   updateTransport();
 }
 
+  /* 立即把时间轴滑块的帧范围刷新到当前实例(与下面的 scheduleFrameRangeRefresh 内容相同:
+   * 这里是同步写,那里是等一帧再写)。totalFrames 是帧数,滑块用 0 基帧号,故 max = totalFrames-1。 */
   function updateFrameRange() {
     if (!anim) return;
     
@@ -1096,6 +1225,8 @@ function syncTransportUI(): void {
     });
   }
 
+/* 播放按钮:停在末帧时 lottie 认为没有可播内容,play() 毫无反应(表现为点了没动静),
+ * 这种情况按用户预期回到首帧再播。空格键也是通过 btnPlay.click() 走同一个入口,不必另写一份逻辑。 */
 btnPlay.addEventListener('click', () => {
   if (!anim) return;
   if (anim.isPaused) {
@@ -1118,6 +1249,9 @@ btnRestart.addEventListener('click', () => {
   updateTransport(); // 同步图标/标题/aria:定格后一律显示播放三角
 });
 
+  /* 拖动时间轴:先把播放暂停(拖动中逐帧 seek 与播放循环会互相打架),
+   * scrubWasPlaying 记住「拖动前是否在播」,松手(change 事件)时才恢复。
+   * frameInfo 显示 0 基帧号 / 总帧数;timeInfo 把帧号换算成秒(帧号 ÷ 帧率)。 */
   rngFrame.addEventListener('input', () => {
     if (!anim) return;
     if (!anim.isPaused) {
@@ -1131,6 +1265,7 @@ btnRestart.addEventListener('click', () => {
     timeInfo.textContent = (f / anim.frameRate).toFixed(2) + 's';
   });
 
+  // 松手(change)才恢复播放:仅当本次拖动之前动画确实在播放
   rngFrame.addEventListener('change', () => {
     if (anim && scrubWasPlaying) {
       anim.play();
@@ -1143,6 +1278,7 @@ chkLoop.addEventListener('change', () => {
   if (anim) anim.loop = chkLoop.checked;
 });
 
+// 倍速滑块(HTML 上限定 0.1×–3×,步进 0.1):直接交给 lottie 的 setSpeed,1 = 原速
 rngSpeed.addEventListener('input', () => {
   const v = parseFloat(rngSpeed.value);
   speedVal.textContent = v.toFixed(1) + '×';
@@ -1154,11 +1290,18 @@ rngSpeed.addEventListener('input', () => {
  * 实现动画持续时间调整。仅移动"末尾淡出"(末帧值低于前一帧)的图层,
  * 避免破坏淡入结构。总播放时长 = 设定时长 + DURATION_BUFFER 帧。 */
 const DURATION_BUFFER = 5; // 在设定时长基础上额外多播放的帧数
+// 时长滑块的防抖定时器:两个时长滑块共用;拖动过程中不重建动画(重建代价高),停 200ms 才真正应用
 let durationTimer: number | undefined;
 let defaultDurationApplied = false; // 位置暴露动画默认时长仅首次载入时应用
 
 /* 调整指定段(0=第一段,1=二次扫描)的末尾淡出关键帧到目标时长。
  * 第二段关键帧已整体平移到 __mainOp 之后,末尾淡出以 __mainOp 为基准。 */
+/* 把指定段末尾的「淡出关键帧对」搬到目标时间,实现时长调整。
+ * 判定「末尾淡出」:ks.o 是动画属性(a===1)且最后两个关键帧里后一帧数值更低 ——
+ * 只动这类图层,以免破坏淡入结构(淡入的末帧值比前帧高,不会被碰)。
+ * 移动方式:保持两帧之间的 gap 不变(淡出快慢不变),末帧放到 base+targetEnd、前一帧放到 base+targetEnd-gap。
+ * base 对第二段是 __mainOp(第二段帧号已整体平移到主段之后)。段归属靠图层 ind 区分:
+ * 合并时第二段整段的 ind 被 +100,所以 ind>=100 即第二段。 */
 function applyDurationToSegment(data: any, seconds: number, segment: 0 | 1) {
   const fr = data.fr ?? 60;
   const targetEnd = Math.max(1, Math.round(seconds * fr));
@@ -1193,6 +1336,9 @@ function applyDurationToSegment(data: any, seconds: number, segment: 0 | 1) {
 }
 
 /* 应用第一段时长:调整第一段末尾淡出,第一段时长变化时整体平移第二段保持紧接 */
+/* 应用第一段时长。新出点 = round(秒 × 帧率) + DURATION_BUFFER(尾部多播的缓冲帧)。
+ * 第一段变长/变短时第二段要整体平移 delta 保持「紧接」,最后写回两个基准:
+ *   __mainOp = 第一段出点(不含第二段);data.op = __mainOp + __nextOp(合并态的总出点)。 */
 function applyMainDuration(data: any, seconds: number) {
   const fr = data.fr ?? 60;
   const oldMainOp = data.__mainOp ?? data.op;
@@ -1204,6 +1350,8 @@ function applyMainDuration(data: any, seconds: number) {
   data.op = newMainOp + (data.__nextOp ?? 0);
 }
 
+/* 由数据反算当前时长回填滑块:时长 = (__mainOp - ip - DURATION_BUFFER) / fr,单位秒,
+ * 并夹到滑块的 1–10s 范围内(数据可能来自别的实现或被手工改过,不能假定合法)。 */
 function syncDurationSlider() {
   if (!currentData) return;
   const fr = currentData.fr ?? 60;
@@ -1214,6 +1362,7 @@ function syncDurationSlider() {
   durationVal.textContent = Number(v.toFixed(2)).toString() + 's';
 }
 
+// 改完时长必须重建动画:lottie 的 totalFrames 在构造时就固定了,只改数据不会生效
 function applyDuration(seconds: number) {
   if (!currentData) return;
   applyMainDuration(currentData, seconds);
@@ -1221,6 +1370,7 @@ function applyDuration(seconds: number) {
   reRenderPreservingState();
 }
 
+// 二次扫描时长滑块:未合并第二段时直接返回(这一行在 UI 上也是隐藏的)
 function syncNextDurationSlider() {
   if (!currentData || !isMergedNext(currentData)) return;
   const fr = currentData.fr ?? 60;
@@ -1231,6 +1381,8 @@ function syncNextDurationSlider() {
   nextDurationVal.textContent = Number(v.toFixed(2)).toString() + 's';
 }
 
+/* 应用第二段(二次扫描)时长:规则同第一段,只是出点写进 __nextOp;
+ * 总出点 data.op = 主段出点 + 第二段出点 —— AE 的 op 是绝对出点,合并后第二段帧号已被平移过。 */
 function applyNextDuration(seconds: number) {
   if (!currentData || !isMergedNext(currentData)) return;
   const fr = currentData.fr ?? 60;
@@ -1243,6 +1395,8 @@ function applyNextDuration(seconds: number) {
   reRenderPreservingState();
 }
 
+/* 时长滑块 input:拖动过程中只更新读数,停 200ms 才真正重建动画(见 durationTimer);
+ * 两个时长滑块共用同一个防抖定时器,连续拖动不会把重建排成队。 */
 rngDuration.addEventListener('input', () => {
   const v = parseFloat(rngDuration.value);
   durationVal.textContent = Number(v.toFixed(2)).toString() + 's';
@@ -1258,6 +1412,9 @@ rngNextDuration.addEventListener('input', () => {
 });
 
 /* 二次扫描开关:开启时把第二段并入当前数据,关闭时移除第二段 */
+/* 「二次扫描」开关:真实状态记在 showNextScan(这个 checkbox 只是 UI)。
+ * 开启时把 animation2NextData 合并进主动画(mergeNextInto:第二段整体平移到主段之后,
+ * 资源重命名为 image_0_n),关闭时再拆出来(extractMainFrom),最后统一走一次 loadData 重建。 */
 chkNextScan.addEventListener('change', () => {
   showNextScan = chkNextScan.checked;
   nextDurationRow.hidden = !showNextScan;
@@ -1292,10 +1449,12 @@ chkNextScan.addEventListener('change', () => {
   else imageList.innerHTML = '';
 });
 
+// 切换渲染器:lottie 的渲染器在构造时确定,只能整段重建
 selRenderer.addEventListener('change', () => {
   if (currentData) void loadData(currentData, currentName);
 });
 
+// 空格 = 播放/暂停;焦点在输入控件上时不抢按键(否则输入框里打不出空格,按钮也无法用空格触发)
 window.addEventListener('keydown', (e) => {
   if (e.code !== 'Space') return;
   const t = e.target as HTMLElement | null;
@@ -1305,6 +1464,9 @@ window.addEventListener('keydown', (e) => {
 });
 
 /* ---------- 显示适配 / 缩放 / 平移 ---------- */
+/* 视图变换模型:previewInner 的尺寸就是动画的原始像素(w×h),用负 margin 把自己居中到 stage;
+ * 最终缩放 = baseScale(适配模式决定,1 表示 1 动画像素 = 1 CSS 像素)× viewZoom(用户缩放倍数),
+ * 平移 viewPanX/Y 的单位是屏幕像素。三者由 updateViewTransform 一次性写进 transform。 */
 let baseScale = 1; // 由适配模式决定的基准缩放
 let viewZoom = 1; // 用户缩放倍数
 let viewPanX = 0; // 平移偏移(屏幕像素)
@@ -1312,6 +1474,7 @@ let viewPanY = 0;
 
 const zoomInfo = $<HTMLElement>('zoomInfo');
 const btnResetView = $<HTMLButtonElement>('btnResetView');
+/* 导出面板 DOM:格式下拉、导出/取消按钮与提示、进度遮罩(百分比 + 进度条 + 明细行) */
 const selFormat = $<HTMLSelectElement>('selFormat');
 const btnExport = $<HTMLButtonElement>('btnExport');
 const exportHint = $<HTMLSpanElement>('exportHint');
@@ -1324,6 +1487,9 @@ const exportFormatTag = $<HTMLElement>('exportFormatTag');
 const exportWarn = $<HTMLElement>('exportWarn');
 const btnExportCancel = $<HTMLButtonElement>('btnExportCancel');
 
+/* 按动画数据尺寸设置画布框,并计算适配缩放:
+ *  contain 取较小的缩放比(完整装下,四周留白)、cover 取较大的(铺满容器,可能被裁)、none = 1。
+ * 尺寸与居中只在这里设置,缩放交给 transform,所以换适配档位不需要重建动画。 */
 function applyFit() {
   const d = currentData;
   if (!d || !d.w || !d.h) return;
@@ -1340,6 +1506,7 @@ function applyFit() {
   updateViewTransform();
 }
 
+// 合成最终 transform 并刷新缩放读数;zoomInfo 显示的是用户缩放(viewZoom),不含 baseScale
 function updateViewTransform() {
   const s = baseScale * viewZoom;
   previewInner.style.transform =
@@ -1347,6 +1514,7 @@ function updateViewTransform() {
   zoomInfo.textContent = Math.round(viewZoom * 100) + '%';
 }
 
+// 复位视图:缩放回到 100%、平移归零(双击画布与「重置视图」按钮共用)
 function resetView() {
   viewZoom = 1;
   viewPanX = 0;
@@ -1358,9 +1526,13 @@ selFit.addEventListener('change', () => {
   applyFit();
   resetView();
 });
+// 容器尺寸变化(窗口缩放、侧栏折叠)时重算 baseScale,否则 contain 会按旧尺寸失准
 new ResizeObserver(applyFit).observe(previewStage);
 
 /* 滚轮缩放(以鼠标位置为中心) */
+/* 滚轮缩放:factor = 1.1^(-deltaY/100),即每滚 100 像素(一格)约 ±10%;
+ * 缩放范围夹在 0.05×–50×;平移按「鼠标所指的点保持不动」补偿(以 stage 中心为原点算 dx/dy)。
+ * 监听必须 passive:false,否则 preventDefault 无效、页面会跟着一起滚。 */
 previewStage.addEventListener(
   'wheel',
   (e) => {
@@ -1380,12 +1552,14 @@ previewStage.addEventListener(
 );
 
 /* 鼠标拖动平移 */
+// 平移拖拽的临时状态:按下时的指针位置 + 当时的平移基准;pointercancel(触控被系统接管)也要收尾
 let panning = false;
 let panStartX = 0;
 let panStartY = 0;
 let panOrigX = 0;
 let panOrigY = 0;
 
+// 只响应鼠标左键;setPointerCapture 让指针移出画布后仍能持续收到 move 事件
 previewStage.addEventListener('pointerdown', (e) => {
   if (e.pointerType === 'mouse' && e.button !== 0) return;
   e.preventDefault();
@@ -1449,18 +1623,31 @@ selFormat.addEventListener('change', syncExportFormatUI);
 syncExportFormatUI();
 
 /* ---------- 帧指示 ---------- */
+/* 帧指示缓存:上一次写进 DOM 的整数帧号。
+ * 初值取 -1 而不是 0:帧号从 0 开始,用 0 初始化会漏掉第 0 帧的刷新。
+ * 只在帧号变化时才写 DOM —— 60Hz 的 rAF 里每帧都改 textContent 与滑块值会带来
+ * 无谓的样式/布局开销,反而拖慢主动画本身。 */
 let lastFrame = -1;
+/* 常驻 rAF 心跳:读主动画当前帧号,刷新帧号/时间读数与时间轴滑块,并驱动弹窗叠加层的帧。
+ * 不用 lottie 的 enterFrame 回调:它只在播放时触发,暂停、拖动时间轴、重建之后都不再回调,
+ * 读数会停在旧值;这里逐帧轮询,任何状态下都能拿到真实帧号。
+ * 循环不设退出条件(动画销毁后 anim 为 null,函数体直接跳过),页面隐藏时浏览器会自动降频。 */
 function tick() {
   if (anim && anim.isLoaded) {
     const f = Math.round(anim.currentFrame);
     if (f !== lastFrame) {
       lastFrame = f;
+      /* 单位换算:frameInfo 显示「当前帧 / 总帧数」(帧号是 0 起的整数,滑块上限由
+       * updateFrameRange 设为 totalFrames - 1);timeInfo 显示秒 = 帧号 ÷ 帧率(帧率取 JSON 的 fr)。 */
       frameInfo.textContent = f + ' / ' + Math.round(anim.totalFrames);
       timeInfo.textContent = (f / anim.frameRate).toFixed(2) + 's';
         rngFrame.value = String(f);
     }
   }
   // 弹窗叠加层按帧号跟随主动画(播放/暂停/拖动时间轴均同步)
+  /* 弹窗用 goToAndStop 单向跟随主动画帧号,而不是自己 play():两个独立 lottie 实例各自播放
+   * 会因启动时刻与加载耗时不同而逐渐漂移,单向驱动才能保证严格同帧。
+   * try/catch 兜底:实例可能正好在重建中途被 destroy。 */
   if (popupAnim && anim && anim.isLoaded) {
     const f = Math.round(anim.currentFrame);
     if (f !== popupLastFrame) {
@@ -1473,12 +1660,18 @@ function tick() {
 requestAnimationFrame(tick);
 
 /* ---------- 信息面板 ---------- */
+/* 取文字图层的文字内容(对应 AE 的 source text)。
+ * Bodymovin 把文字文档放在 t.d.k:t.d.k 是数组时每个元素是一段文字关键帧(取第一段作代表),
+ * 是对象时 k.s 就是唯一的文档。非文字层或结构异常时返回空串。 */
 function textOfLayer(l: any): string {
   const td = l.t?.d?.k;
   const s = Array.isArray(td) ? td[0]?.s : td?.s;
   return s?.t ?? '';
 }
 
+/* 深度收集所有文字图层(ty === 5),含预合成内部的图层,返回扁平列表 { nm, ind, text }。
+ * ind 是同一次导出内唯一的图层 id,侧栏所有编辑控件都用它回查图层(data-ind),
+ * 因此藏在预合成里的文字也能被 findLayerByInd 找回来。 */
 function collectTextLayers(data: any): { nm: string; ind: number; text: string }[] {
   const out: { nm: string; ind: number; text: string }[] = [];
   const walk = (layers: any[]) => {
@@ -1501,6 +1694,9 @@ function fcToHex(fc: number[] | undefined): string {
   return '#' + toHex(fc[0]) + toHex(fc[1]) + toHex(fc[2]);
 }
 
+/* #rrggbb → Bodymovin 的 fc 数组,分量为 0~1 的浮点(#ff0000 → [1,0,0])。
+ * 传入 originalFc 时保留其第 4 个分量:部分数据里 fc 带额外通道,丢掉会改变渲染结果。
+ * 这里不校验输入合法性 —— 取色器只在 /^#[0-9a-fA-F]{6}$/ 通过后才调用(见 bindColorPicker)。 */
 function hexToFc(hex: string, originalFc?: number[]): number[] {
   const h = hex.replace('#', '');
   const fc = [
@@ -1540,6 +1736,9 @@ function bindColorPicker(colorInput: HTMLInputElement, onChange: (hex: string) =
 
 /* ---------- 图片图层调色(如位置暴露动画的「百叶窗.png」) ----------
  * 采用「保留原图亮度、替换色相/饱和度」的着色方式,保留百叶窗纹理的明暗质感。 */
+/* #rrggbb → HSL。三个分量统一归一化到 0~1(色相不是 0~360、饱和度/亮度不是百分数),
+ * 与 Bodymovin 的 0~1 颜色分量保持一致,便于直接参与逐像素着色运算。
+ * 灰色(max === min)色相无意义,按 0 返回。 */
 function hexToHsl(hex: string): [number, number, number] {
   const h = hex.replace('#', '');
   const r = parseInt(h.slice(0, 2), 16) / 255;
@@ -1558,6 +1757,8 @@ function hexToHsl(hex: string): [number, number, number] {
   return [hue, s, l];
 }
 
+/* HSL(0~1)→ RGB,返回 0~255 的三个整数,与 hexToHsl 互为逆变换。
+ * hue2rgb 是 W3C 定义的分段线性函数;入参 t 可能越界(±1/3 偏移后),所以先做环绕归一化。 */
 function hslToRgb(h: number, s: number, l: number): [number, number, number] {
   if (s === 0) {
     const v = Math.round(l * 255);
@@ -1585,6 +1786,10 @@ function hslToRgb(h: number, s: number, l: number): [number, number, number] {
  * 按 data URI 分别缓存,支持多张纹理(主段百叶窗 + 二次扫描百叶窗2)。 */
 const imageTintCaches = new Map<string, { img: HTMLImageElement; data: ImageData }>();
 
+/* 取(并缓存)调色用的原始位图:首次调用时解码图片,并一次性把像素读进 ImageData。
+ * 必须走 canvas.getImageData 而不能直接把 <img> 交给 drawImage —— 着色要在 JS 里逐像素改;
+ * 图片是 data: URI,画布不会被跨域污染,getImageData 不会抛 SecurityError。
+ * 解码或取像素失败时 reject,由调用方打日志,不阻塞后续交互。 */
 function getImageTintSource(uri: string): Promise<{ img: HTMLImageElement; data: ImageData }> {
   const cached = imageTintCaches.get(uri);
   if (cached) return Promise.resolve(cached);
@@ -1646,6 +1851,9 @@ function tintImageDataFast(src: ImageData, hexColor: string): ImageData {
 /* 记录每个文字图层的原始文字与颜色,供重置使用 */
 const originalTextState = new Map<number, { text: string; fc: number[] }>();
 
+/* 快照文字图层的原始文字与颜色,供「重置」还原。
+ * 必须在任何编辑动作之前调用一次(载入动画时),且写入的是副本 —— 之后改的是同一份 JSON,
+ * 不拷贝会让「原始值」跟着一起变、重置失效。键为图层 ind,缺字段时回落 '' / 白色 [1,1,1]。 */
 function captureOriginalState(data: any) {
   originalTextState.clear();
   for (const t of collectTextLayers(data)) {
@@ -1666,6 +1874,11 @@ function isSingleDigitTextName(nm: string | undefined): boolean {
   return !!nm && SINGLE_DIGIT_TEXT_NAMES.has(nm);
 }
 
+/* 重建右侧信息面板:文档信息(尺寸/帧率/入出点/时长/图层与资源数/字体状态)加三个
+ * 可编辑列表(文字、形状、图片)。
+ * 每次整段重写 innerHTML,因为列表项随当前动画变化;代价是其中的事件监听与滑块绑定
+ * 必须在本函数末尾全部重新挂一遍(见下方各 querySelectorAll)。
+ * 字段名按 Bodymovin 规范:ip / op 为入点与出点帧号、fr 为帧率、v 为导出器版本。 */
 function updateInfo(data: any) {
   const ip = data.ip ?? 0;
   const op = data.op ?? 0;
@@ -1702,6 +1915,7 @@ function updateInfo(data: any) {
     ['字体', fontStatus],
     ['Bodymovin 版本', data.v ?? '—'],
   ];
+  /* 信息面板的键值都要过 esc():字体名、版本号等直接来自 JSON,含 < > & 时会破坏表格结构。 */
   infoList.innerHTML = items.map(([k, v]) => '<dt>' + esc(k) + '</dt><dd>' + esc(v) + '</dd>').join('');
 
   textCount.textContent = '· ' + texts.length + ' 个 · 可编辑';
@@ -1714,6 +1928,8 @@ function updateInfo(data: any) {
       const td = layer?.t?.d?.k;
       const s = (Array.isArray(td) ? td[0]?.s : td?.s) || {};
       const hex = fcToHex(s.fc);
+      /* AE/Bodymovin 用 \r 作为换行符,textarea 只认 \n,回填前必须先转换;
+       * rows 按实际行数设置,避免多行文字挤在一行里编辑。 */
       const displayText = String(t.text).replace(/\r/g, '\n');
       const rows = Math.max(1, displayText.split('\n').length);
       // 「第 N 位」是单字符数字位:输入框限一位数字(输入侧过滤 0-9)
@@ -1738,6 +1954,8 @@ function updateInfo(data: any) {
       );
     })
     .join('');
+  /* 列表 HTML 是整段重写的,所以每次重建后都要为新的 textarea 重新绑定输入处理;
+   * 普通文字层与单字符数字位的校验规则在下面的分支里区分。 */
   textList.querySelectorAll<HTMLTextAreaElement>('.t-input').forEach((ta) => {
     const ind = Number(ta.dataset.ind);
     const target = texts.find((t) => t.ind === ind);
@@ -1791,6 +2009,9 @@ function updateInfo(data: any) {
 }
 
 /* ---------- 文字编辑 ---------- */
+/* 按图层 ind 深度查找图层(含预合成内部),找不到返回 null。
+ * ind 在侧栏 HTML 里以 data-ind 传递(字符串),调用方需先 Number() 转换。
+ * 不做 ind → layer 的常驻索引:每次编辑都会改写 JSON 结构,缓存容易失效,而层级本身很浅。 */
 function findLayerByInd(layers: any[], ind: number): any | null {
   for (const l of layers ?? []) {
     if (l.ind === ind) return l;
@@ -1820,6 +2041,10 @@ function setLayerText(layer: any, newText: string) {
 
 let textEditTimer: number | undefined;
 
+/* 文字编辑的写回入口:改 JSON → 同步底框宽度 → 防抖重建动画。
+ * 不每次按键都重建:重建要走完整的 loadAnimation 流程(解析 JSON、建 DOM、恢复播放状态),
+ * 连续输入会把主线程占满;250ms 无输入才真正重建。
+ * 重建由 reRenderPreservingState 负责保留当前帧/播放状态/缩放。 */
 function onTextEdited(ind: number, newText: string) {
   if (!currentData) return;
   const layer = findLayerByInd(currentData.layers, ind);
@@ -1833,6 +2058,9 @@ function onTextEdited(ind: number, newText: string) {
   }, 250);
 }
 
+/* 写入文字颜色。fc 是 0~1 的三(四)分量数组(见 hexToFc),不能直接存 0~255。
+ * 与 setLayerText 一样要兼容「关键帧数组」和「静态文档」两种结构,并写入新拷贝的数组,
+ * 避免多个图层共享同一个数组引用。 */
 function setLayerColor(layer: any, hex: string) {
   const td = layer?.t?.d?.k;
   if (!td) return;
@@ -1859,6 +2087,9 @@ function syncDigitColorInputs(hex: string, exceptInd?: number) {
   }
 }
 
+/* 文字颜色编辑入口。普通文字层只改自己;「第 N 位」数字位视为同一组,改一个五位一起改,
+ * 并同步侧栏其余行的取色器显示,否则同一屏上的数字会出现两种颜色。
+ * 与文字编辑共用 textEditTimer,两类编辑不会各自排队重复重建。 */
 function onColorChanged(ind: number, hex: string) {
   if (!currentData) return;
   const layer = findLayerByInd(currentData.layers, ind);
@@ -1873,6 +2104,8 @@ function onColorChanged(ind: number, hex: string) {
   }, 250);
 }
 
+/* 把某个文字图层的文字、颜色、不透明度还原到快照值,并把侧栏控件同步回原始值
+ * (textarea 内容、取色器与相邻 HEX 输入框)。数字位连同其余四位一起还原颜色。 */
 function onResetText(ind: number) {
   if (!currentData) return;
   const orig = originalTextState.get(ind);
@@ -1902,6 +2135,8 @@ function onResetText(ind: number) {
 }
 
 /* ---------- 形状图层颜色 ---------- */
+/* 深度收集形状图层内的填充项(ty 'fl')与描边项(ty 'st'),含组内嵌套(it.it)。
+ * 返回的是 JSON 里的原始对象引用,调用方直接原地改 c.k 即可。 */
 function collectShapeFillsStrokes(shapes: any[]): { fills: any[]; strokes: any[] } {
   const fills: any[] = [];
   const strokes: any[] = [];
@@ -1916,6 +2151,9 @@ function collectShapeFillsStrokes(shapes: any[]): { fills: any[]; strokes: any[]
   return { fills, strokes };
 }
 
+/* 汇总每个形状图层的可编辑颜色:填充/描边各取第一个,且只接受静态色(c.a === 0)。
+ * 带关键帧的颜色不提供编辑 —— 只改单值会破坏整条颜色动画,宁可不显示控件。
+ * 返回的 fill / stroke 是原始数组引用,null 表示该图层没有对应属性。 */
 function shapeLayerColorInfo(data: any): { ind: number; nm: string; fill: number[] | null; stroke: number[] | null }[] {
   const out: { ind: number; nm: string; fill: number[] | null; stroke: number[] | null }[] = [];
   for (const l of data.layers ?? []) {
@@ -1931,6 +2169,8 @@ function shapeLayerColorInfo(data: any): { ind: number; nm: string; fill: number
 
 const originalShapeState = new Map<number, { fill: number[] | null; stroke: number[] | null }>();
 
+/* 快照形状图层的原始填充/描边色,供「重置颜色」还原(与文字快照同理,写的是副本)。
+ * 属性不存在时存 null,重置时跳过,避免凭空给图层加出一个填充或描边。 */
 function captureOriginalShapeState(data: any) {
   originalShapeState.clear();
   for (const s of shapeLayerColorInfo(data)) {
@@ -1946,6 +2186,9 @@ function captureOriginalShapeState(data: any) {
  * 静态不透明度直接改 ks.o.k;动画不透明度按比例缩放关键帧,保留淡入淡出形态。 */
 const originalOpacityState = new Map<number, { a: number; k: any }>();
 
+/* 快照每个图层的不透明度:记录 o.a(0 = 静态值、1 = 关键帧数组)与深拷贝的 o.k。
+ * 深拷贝是必须的:setLayerOpacity 会按比例改写关键帧里的数值,若没有独立的原始副本,
+ * 连续拖动滑块就会在「上一次的结果」上反复缩放,越改越偏。 */
 function captureOpacityState(data: any) {
   originalOpacityState.clear();
   const walk = (layers: any[]) => {
@@ -1959,6 +2202,9 @@ function captureOpacityState(data: any) {
   walk(data.layers);
 }
 
+/* 读取图层当前的不透明度(0~100 的整数),用作滑块初值。
+ * 静态层(o.a === 0)直接读 o.k;带关键帧的层取所有关键帧的最大值 —— 滑块代表
+ * 「该图层最亮时的不透明度」,取首帧会把淡入的图层显示成 0%。 */
 function getLayerOpacity(layer: any): number {
   const o = layer?.ks?.o;
   if (!o) return 100;
@@ -1974,6 +2220,10 @@ function getLayerOpacity(layer: any): number {
   return Math.round(max);
 }
 
+/* 设置图层不透明度(0~100)。
+ * 静态层直接赋值;带关键帧的层按 value ÷ 原始峰值 等比缩放每个关键帧,保持淡入淡出的相对
+ * 形态,而不是把所有关键帧压成同一个值。
+ * 比例始终以 originalOpacityState 里的原始值为基准(而非当前值),反复拖动不会累积误差。 */
 function setLayerOpacity(layer: any, value: number) {
   const o = layer?.ks?.o;
   if (!o) return;
@@ -2000,6 +2250,9 @@ function setLayerOpacity(layer: any, value: number) {
   }
 }
 
+/* 从快照恢复不透明度:o.a 与 o.k 一起还原,并对 o.k 再做一次深拷贝断开与快照的共享引用。
+ * 最后回写对应的 .o-slider 与数值标签 —— 列表是动态重建的,这里用 document 全局查询
+ * 按 data-ind 定位当前可见的那个滑块。 */
 function resetLayerOpacity(ind: number) {
   if (!currentData) return;
   const layer = findLayerByInd(currentData.layers, ind);
@@ -2019,6 +2272,8 @@ function resetLayerOpacity(ind: number) {
   }
 }
 
+/* 生成不透明度滑块的一段 HTML(0~100、step 1、带 % 后缀),文字/形状/图片三个列表共用。
+ * 初值取 getLayerOpacity(带关键帧的图层即峰值);事件绑定统一由 bindOpacitySliders 完成。 */
 function opacitySliderHtml(ind: number, layer: any): string {
   const v = layer ? getLayerOpacity(layer) : 100;
   return (
@@ -2028,6 +2283,9 @@ function opacitySliderHtml(ind: number, layer: any): string {
   );
 }
 
+/* 给 root 内所有 .o-slider 绑定输入处理(每次重写列表 HTML 后都要重新调用)。
+ * 拖动过程中只改 JSON 和数值标签,防抖后才重建动画;与文字/颜色编辑共用 textEditTimer,
+ * 避免多个编辑各自排队重建。 */
 function bindOpacitySliders(root: HTMLElement) {
   root.querySelectorAll<HTMLInputElement>('.o-slider').forEach((sl) => {
     sl.addEventListener('input', () => {
@@ -2045,16 +2303,20 @@ function bindOpacitySliders(root: HTMLElement) {
   });
 }
 
+/* 写入形状图层所有填充项的静态色;hexToFc 传入原数组以保留第 4 个分量。
+ * 只改 c.a === 0 的项,关键帧颜色原样不动(与列表只展示静态色保持一致)。 */
 function setShapeFillColor(layer: any, hex: string) {
   const { fills } = collectShapeFillsStrokes(layer.shapes);
   for (const f of fills) if (f.c?.a === 0) f.c.k = hexToFc(hex, f.c.k);
 }
 
+/* 写入形状图层所有描边项的静态色,规则同 setShapeFillColor。 */
 function setShapeStrokeColor(layer: any, hex: string) {
   const { strokes } = collectShapeFillsStrokes(layer.shapes);
   for (const s of strokes) if (s.c?.a === 0) s.c.k = hexToFc(hex, s.c.k);
 }
 
+/* 形状颜色编辑入口:kind 区分填充/描边,改完 250ms 防抖后重建动画。 */
 function onShapeColorChanged(ind: number, hex: string, kind: 'fill' | 'stroke') {
   if (!currentData) return;
   const layer = findLayerByInd(currentData.layers, ind);
@@ -2065,6 +2327,7 @@ function onShapeColorChanged(ind: number, hex: string, kind: 'fill' | 'stroke') 
   textEditTimer = window.setTimeout(() => reRenderPreservingState(), 250);
 }
 
+/* 重置形状图层的填充/描边与不透明度,并把两个取色器及其 HEX 输入框同步回原始色。 */
 function onShapeReset(ind: number) {
   if (!currentData) return;
   const orig = originalShapeState.get(ind);
@@ -2090,6 +2353,10 @@ function hideShapeFill(nm: string): boolean {
   return HIDE_FILL_SHAPE_NAMES.has(String(nm || '').replace(/\s+/g, ''));
 }
 
+/* 渲染「形状图层」列表 HTML 并绑定控件(颜色、重置、图层不透明度)。
+ * 矩形不透明度滑块只挂在该动画各段的「底框(可见)」图层上(dikuangVisibleInds 命中):
+ * 它调的是底框内「矩形 1」形状组自己的 tr.o,与图层级不透明度不是一回事,
+ * 所以走 dr-slider / dr-reset 这套独立类名与独立状态(见「底框黑色矩形独立透明度」区)。 */
 function renderShapeList(data: any) {
   const shapes = shapeLayerColorInfo(data);
   shapeCount.textContent = '· ' + shapes.length + ' 个';
@@ -2173,6 +2440,8 @@ const SEQ_REF_PREFIX = 'seq:';
 function sequenceDefaultHex(nm: string): string {
   return BLINDS_SEQUENCES.find((s) => s.name === nm)?.defaultHex ?? '#d82f28';
 }
+/* 解析列表用的 'seq:<ind>' 键;不带该前缀(即纹理图的资源 id)时返回 null,
+ * 调用方据此回落到逐像素着色分支。 */
 function seqIndOfRef(ref: string): number | null {
   if (!ref.startsWith(SEQ_REF_PREFIX)) return null;
   const n = Number(ref.slice(SEQ_REF_PREFIX.length));
@@ -2185,6 +2454,12 @@ function seqLayerElementOf(ind: number): any {
   return null;
 }
 
+/* 渲染「图片图层」列表。两类图层的取色键不同:
+ *  - 纹理图(百叶窗.png / 百叶窗2.png / 光.png)的 refId 就是 assets 里的资源 id,
+ *    调色方式是替换该资源的 data URI,所以键用 refId;
+ *  - 叠加序列逐帧换图(ks.src),没有单一资源可替换,调色走 SVG 滤镜,状态只按图层 ind
+ *    记在 seqTints 里,所以键用 'seq:<ind>'。
+ * 键通过 data-ref 传给回调,重置按钮复用同一个键。 */
 function renderImageList(data: any) {
   // 主段「百叶窗.png」+ 二次扫描段「百叶窗2.png」「光.png」+ 核电站功率动画的两条叠加序列
   const layers = tintableImageLayers(data);
@@ -2238,6 +2513,12 @@ function baiyechuangOriginalUriOf(refId: string): string | null {
   return baiyechuangOriginalData;
 }
 
+/* 图片颜色编辑入口,两条路径完全不同:
+ *  - 叠加序列(seq: 前缀)只改滤镜,立即生效,不重建动画;
+ *  - 纹理图从缓存的原始位图重新着色,再替换 assets 里的 data URI。
+ * 纹理图拖取色器会连续触发,这里 200ms 防抖且只记最后一个颜色:着色加 toDataURL
+ * (上万像素宽)是重活,每次都做会卡住拖动;每次都从原始位图着色(而不是在上次结果上
+ * 再着色),避免多次调色的累计偏差。 */
 function onImageColorChanged(refId: string, hex: string) {
   // 叠加序列:滤镜着色,立即生效(无需重建动画、无需逐帧重新编码 359×2 张 PNG)
   const seqInd = seqIndOfRef(refId);
@@ -2300,6 +2581,10 @@ function onImageColorChanged(refId: string, hex: string) {
   }, 200);
 }
 
+/* 图片颜色重置:
+ *  - 叠加序列删除手动着色记录回到出厂色,滤镜保持挂着(序列本身靠滤镜着色),同时恢复该
+ *    图层的不透明度,立即生效不重建;
+ *  - 纹理图把资源 data URI 换回缓存的原始图,取色器与滑块同步回默认色,并重建预览。 */
 function onImageColorReset(refId: string) {
   // 叠加序列:撤销手动着色,回到出厂色 #d82f28(滤镜仍然挂着),不重建动画
   const seqInd = seqIndOfRef(refId);
@@ -2333,6 +2618,15 @@ function onImageColorReset(refId: string) {
  * lottie-web 不渲染 AE 效果,这里手动解析「投影」参数并渲染:
  * - SVG 渲染器:对图层 <g> 应用 CSS drop-shadow filter;
  * - Canvas 渲染器:双次绘制(先带阴影画内容,再清晰覆盖)。 */
+/* 从图层效果列表里读出 AE「投影」(ADBE Drop Shadow)参数。
+ * lottie-web 不渲染任何 AE 效果(ef 字段),必须自己解析:
+ *  - e.ty === 25 是投影类型,e.mn 是效果名,e.en === 0 表示效果被关掉,跳过;
+ *  - 参数按 ix 索引取:1 颜色、2 不透明度、3 角度、4 距离、5 柔化。
+ * 三处单位换算的坑:
+ *  - 不透明度是 0~255(不是 0~1),要除 255 再钳到 [0,1];
+ *  - 角度是度且 0° 指向上方,而屏幕 y 轴向下,所以 dy 取负、dx 用 cos;
+ *  - 柔化值到 CSS blur 半径是经验换算 /2,直接当半径会明显糊成一片。
+ * 参数缺失或结构异常时返回 null,调用方保持原样渲染。 */
 function getDropShadow(layer: any): { color: string; alpha: number; dx: number; dy: number; blur: number } | null {
   const ef = layer?.ef;
   if (!Array.isArray(ef)) return null;
@@ -2358,21 +2652,32 @@ function getDropShadow(layer: any): { color: string; alpha: number; dx: number; 
   };
 }
 
+/* 拼出 SVG 渲染器用的 filter 字符串:drop-shadow(dx dy blur #rrggbbaa)。
+ * CSS 的 8 位十六进制颜色把 alpha 直接写在颜色里,这里由 0~1 的 alpha 换算成两位。 */
 function dropShadowCss(ds: { color: string; alpha: number; dx: number; dy: number; blur: number }): string {
   const a = Math.round(ds.alpha * 255).toString(16).padStart(2, '0');
   return 'drop-shadow(' + ds.dx.toFixed(2) + 'px ' + ds.dy.toFixed(2) + 'px ' + ds.blur.toFixed(2) + 'px ' + ds.color + a + ')';
 }
 
+/* 拼出 Canvas 渲染器用的 rgba() 颜色字符串(0~255 的整数分量 + 0~1 的 alpha)。 */
 function dropShadowRgba(ds: { color: string; alpha: number; dx: number; dy: number; blur: number }): string {
   return 'rgba(' + parseInt(ds.color.slice(1, 3), 16) + ',' + parseInt(ds.color.slice(3, 5), 16) + ',' + parseInt(ds.color.slice(5, 7), 16) + ',' + ds.alpha + ')';
 }
 
+/* 给 SVG 渲染器里的单个图层挂投影:直接写 layerElement(即图层的 <g>)的 style.filter。
+ * 由 patchSvgRendererTree 在动画载入/重建时逐层调用;重复调用是幂等的(整串赋值),
+ * 不会叠加出双重阴影。 */
 function patchSvgDropShadow(el: any) {
   const ds = getDropShadow(el.data);
   if (!ds || !el.layerElement) return;
   el.layerElement.style.filter = dropShadowCss(ds);
 }
 
+/* 给 Canvas 渲染器里的图层补投影:包装该图层的 renderFrame,一帧画两次 ——
+ * 第一次设好 shadowColor/Blur/Offset 后照常画(内容被盖住,只留下外扩的阴影),
+ * restore 之后再清晰地画一遍覆盖上去。
+ * 必须画两次:ctx 的阴影会作用于每一笔画出来的内容,单次绘制会把文字、图标本身糊掉。
+ * 代价是该图层每帧多画一遍,只有带投影的图层才走这条路径。 */
 function patchCanvasDropShadow(el: any) {
   const ds = getDropShadow(el.data);
   if (!ds) return;
@@ -2399,12 +2704,18 @@ function patchCanvasDropShadow(el: any) {
  * - 文字图层可改文字/颜色/对齐(默认居中,即文档数据 j=2,lottie 每帧按实际文字
  *   宽度原生居中,参考 renderInnerContent 中 doc.j 的对齐分支);
  * - 颜色图层可改填充/描边,但名称含「蒙版」的图层不可改色。 */
+/* 弹窗叠加层状态:popupData 是解析后的 JSON(编辑文字/颜色改的是它,不是动画实例),
+ * popupAnim 是独立于主动画的第二个 lottie 实例,popupLastFrame 与 tick 里的 lastFrame
+ * 同理(初值 -1 保证首帧一定同步)。popupEditTimer 是弹窗文字编辑的防抖句柄。 */
 let popupData: any = null;
 let popupVisible = false; // 弹窗默认关闭,由「显示弹窗」复选框开启
 let popupAnim: AnimationItem | null = null;
 let popupLastFrame = -1;
 let popupEditTimer: number | undefined;
 
+/* 销毁弹窗实例并清空容器:destroy() 会移除 lottie 自己创建的 SVG/Canvas 节点。
+ * 用 try/catch 兜底 —— 实例尚未加载完(或已被销毁过)时 destroy 可能抛错,
+ * 重建流程不该因此中断。 */
 function destroyPopupAnim() {
   if (popupAnim) {
     try { popupAnim.destroy(); } catch { /* ignore */ }
@@ -2413,6 +2724,13 @@ function destroyPopupAnim() {
   popupLayer.innerHTML = '';
 }
 
+/* 重建弹窗叠加层:渲染器切换、文字/形状编辑、重置后都要整体重建 —— 改 JSON 不会自动生效,
+ * lottie 只在 loadAnimation 时读一次数据。
+ * 两个关键点:
+ *  - loop 与 autoplay 都关:弹窗帧号完全由 tick 按主动画帧号驱动(goToAndStop),
+ *    自己播放会与主动画漂移;
+ *  - 新实例要挂上与主动画相同的渲染补丁(patch*RendererTree),否则弹窗里的投影、
+ *    文字兜底渲染等行为与主动画不一致。 */
 function rebuildPopupOverlay() {
   destroyPopupAnim();
   // destroyAnim() 会清空 previewInner,弹窗层可能被移除,先重新挂回(即使当前隐藏也要保持挂载)
@@ -2442,6 +2760,9 @@ function rebuildPopupOverlay() {
   }
 }
 
+/* 保留当前帧地重建弹窗:先取出帧号(新实例会从第 0 帧开始),重建成功后再 goToAndStop 回去,
+ * 并同步 popupLastFrame,避免 tick 下一帧再做一次多余的跳帧。
+ * popupAnim 为空(弹窗未显示或上次重建失败)时无事可做,直接返回。 */
 function rebuildPopupPreservingState() {
   if (!popupAnim) return;
   const frame = popupAnim.currentFrame;
@@ -2452,6 +2773,9 @@ function rebuildPopupPreservingState() {
   }
 }
 
+/* 写入文字对齐方式 j(0 = 左、1 = 右、2 = 居中,取值同 AE/Bodymovin)。
+ * 与 setLayerText 一样兼容关键帧数组与静态文档两种结构;j = 2 时 lottie 每帧按实际文字宽度
+ * 重新居中,所以改完文字不需要挪锚点。 */
 function setLayerAlign(layer: any, j: number) {
   const td = layer?.t?.d?.k;
   if (!td) return;
@@ -2462,6 +2786,9 @@ function setLayerAlign(layer: any, j: number) {
   }
 }
 
+/* 取文字图层的文档对象(t.d.k → s):关键帧写法取第一段,静态写法直接取 s。
+ * 与 textOfLayer 的区别是返回整个文档(含字号 s、字距 tr、对齐 j、字体 f),
+ * 改对齐和量文字宽度都要用它。 */
 function textDocOf(layer: any): any | null {
   const td = layer?.t?.d?.k;
   return (Array.isArray(td) ? td[0]?.s : td?.s) ?? null;
@@ -2473,6 +2800,9 @@ function textDocOf(layer: any): any | null {
  * 与文字宽度增量一致,左右留白就保持恒定:
  *   新底板X缩放 = 原X缩放 × (底板原宽 + 文字增量) / 底板原宽
  * 文字增量按文字图层自身缩放折算为合成单位(本例 40.215%)。 */
+/* 量文字宽度用的离屏 canvas 2D 上下文:懒创建后常驻复用。
+ * measureText 只需要一个 ctx,不必挂进 DOM;若每次测量都新建 canvas,防抖后的每次编辑
+ * (要量多行文字、两段底框与弹窗)都会持续分配。 */
 let popupMeasureCtx: CanvasRenderingContext2D | null = null;
 
 function getPopupMeasureCtx(): CanvasRenderingContext2D | null {
@@ -2490,6 +2820,7 @@ function measurePopupTextWidth(text: string, doc: any): number {
   const family = (fontDef && fontDef.fFamily) || doc.f || 'sans-serif';
   ctx.font = doc.s + 'px "' + family + '"';
   const tracking = (doc.tr || 0) * 0.001 * (doc.s || 0); // 每字母字距(与 lottie 渲染一致)
+  /* 多行文字取最长一行的宽度:底板/图标是按最长行居中的,只量第一行会算窄。 */
   let maxW = 0;
   for (const line of String(text).split('\r')) {
     const w = ctx.measureText(line).width + tracking * line.length;
@@ -2506,6 +2837,8 @@ const POPUP_PANEL_NAMES = ['弹窗用的底板', '弹窗底部'];
 let popupPanelBaseScaleX = 0;
 let popupPanelBaseShapeW = 0;
 
+/* 递归(含预合成)按名称找弹窗底板图层。名称是 AE 里的图层名,硬编码在 POPUP_PANEL_NAMES 里,
+ * 换一份 AE 导出就要同步修改。返回原始图层对象引用,调用方就地改 ks.s。 */
 function findPanelLayers(): any[] {
   if (!popupData) return [];
   const out: any[] = [];
@@ -2534,6 +2867,8 @@ function popupTextLayerScale(): number {
 const POPUP_MASK_NAMES = ['蒙版'];
 let popupMaskBaseKeys: { s: number[] }[] = [];
 
+/* 找弹窗的「蒙版」图层:它的 X 缩放带关键帧(起始 0 → 终值),底板加宽时整条关键帧都要
+ * 按同一个系数放大,否则动画中途会露出底板边缘。 */
 function findMaskLayers(): any[] {
   if (!popupData) return [];
   const out: any[] = [];
@@ -2552,6 +2887,8 @@ const POPUP_ICON_NAMES = ['感叹号', '感叹号的底'];
 const ICON_GAP = 4;      // 图标右缘与文字左缘的间距(合成单位,越小越靠右)
 const ICON_HALF_W = 11.3; // 菱形底座包围盒半宽(18.25×0.87408×√2/2)
 
+/* 找感叹号图标的两层(字形「感叹号」+ 菱形底座「感叹号的底」)。
+ * 它们必须一起改 X 位置才能保持相对关系,见 positionPopupIcon。 */
 function findIconLayers(): any[] {
   if (!popupData) return [];
   const out: any[] = [];
@@ -2620,6 +2957,8 @@ function positionPopupIcon(deltaComp: number) {
 
 /* 文字宽度变化 → 同步调整底板/蒙版宽度与图标位置(增量一致,两侧留白不变) */
 function adaptPopupPanelWidth() {
+  /* 这里只改 popupData 里的几何数值,不碰动画实例 —— 调用方随后用 rebuildPopupPreservingState
+   * 重建才会显示出来;两段基准几何未捕获(基准缩放/基准宽为 0)时直接放弃,避免除零。 */
   if (!popupData || popupPanelBaseScaleX <= 0 || popupPanelBaseShapeW <= 0) return;
   // 取所有文字图层中"增长最多"的增量(负数=整体变短,面板同样收窄)
   let deltaText: number | null = null;
@@ -2693,13 +3032,20 @@ interface DikuangSeg {
   lightBasePosKeys: { t: number; s: number }[]; // 光.png 位移 X 关键帧基准(合成空间,含时刻 t)
   platePivotX: number | null; // 底框缩放枢轴(合成空间 X):仿射变换的定点
 }
+/* 当前动画的底框段表:载入时由 captureDikuangBaseState 重建。
+ * 「主段」一定存在,「二次扫描段」只在该动画是两段合并(见 isMergedNext)时才追加。 */
 let dikuangSegs: DikuangSeg[] = [];
 
+/* 用「底框(可见)」图层的 ind 反查所属段:矩形不透明度滑块的 data-ind 只有图层 ind,
+ * 靠它能定位到所属段,进而拿到该段「矩形 1」的基准不透明度。 */
 function dikuangSegByVisibleInd(ind: number): DikuangSeg | null {
   return dikuangSegs.find((s) => s.visibleInd === ind) ?? null;
 }
 
 /* 贝塞尔缓动:lottie 用 getBezierEasing(o.x,o.y,i.x,i.y) 作关键帧间插值,这里用二分求解还原 */
+/* 为什么要自己实现:lottie-web 内部的 getBezierEasing 不对外导出,而这里需要在
+ * 「不启动动画」的前提下按关键帧求某个时刻的值(改写图标位移时要按该时刻的父级缩放折算)。
+ * 精度:24 次二分把 t 收敛到 1/2^24 以内,远超预览所需。 */
 function bezierEasingValue(x1: number, y1: number, x2: number, y2: number, p: number): number {
   if (p <= 0) return 0;
   if (p >= 1) return 1;
@@ -2715,6 +3061,8 @@ function bezierEasingValue(x1: number, y1: number, x2: number, y2: number, p: nu
 }
 
 /* 父级空 2 在指定帧的缩放(小数),按动画关键帧间贝塞尔插值 */
+/* 关键帧之间用 k0 的出手柄(ox/oy)与 k1 的入手柄(ix/iy)做三次贝塞尔插值,与 lottie 一致。
+ * 关键帧的 s0 是百分数缩放(需 /100),frame 为整帧号;区间外按端点值钳位。 */
 function getParentScaleAtFrame(seg: DikuangSeg, frame: number): number {
   const keys = seg.parentScaleKeys;
   if (keys.length === 0) return seg.parentScale;
@@ -2731,6 +3079,8 @@ function getParentScaleAtFrame(seg: DikuangSeg, frame: number): number {
   return seg.parentScale;
 }
 
+/* 找某一段里的底框图层(含预合成内部),用 seg.inSeg 把两段分开:
+ * 主段 ind < 100,二次扫描段 ind ≥ 100(合并时第二段图层的 ind 被整体加了 100,见 prepareNextData)。 */
 function findDikuangLayers(seg: DikuangSeg): any[] {
   if (!currentData) return [];
   const out: any[] = [];
@@ -2748,6 +3098,8 @@ function findDikuangLayers(seg: DikuangSeg): any[] {
  * 注意:lottie 渲染时每字母 advance = 字形宽 + 字距 tr(公式 tr×0.001×字号),
  * 居中对齐的总宽也包含全部字母的字距;仅量字形宽会导致适配计算偏小,
  * 文字变长后底框/图标位移不足。这里把字距一并计入(与 lottie 渲染一致)。 */
+/* 与 measurePopupTextWidth 的实现相同,但字体表取自 currentData(主动画)而不是 popupData ——
+ * 主段与弹窗是两个独立 JSON,混用会量出错误宽度。 */
 function measureDikuangTextWidth(text: string, doc: any): number {
   const ctx = getPopupMeasureCtx();
   if (!ctx || !doc || !doc.s) return 0;
@@ -2764,6 +3116,8 @@ function measureDikuangTextWidth(text: string, doc: any): number {
 }
 
 /* 取属性在「静态值」或「首个关键帧」处的分量(用于求底框缩放枢轴) */
+/* 只用于取「基准几何」(求缩放枢轴、求图标基准位置),不做逐帧插值:
+ * 动画属性取第一个关键帧的值,静态属性直接取数组分量,取不到返回 null。 */
 function propBaseValue(prop: any, index = 0): number | null {
   if (!prop) return null;
   if (prop.a === 1 && Array.isArray(prop.k)) {
@@ -2780,6 +3134,8 @@ function propBaseValue(prop: any, index = 0): number | null {
  *   ② 整体位置:ks.p.k[i].s = [x, y, z](光.png 这种没有 split 的写法)
  * 两者的 X 分量都落在 s[0],因此统一返回关键帧数组、统一读写 s[0] 即可。 */
 function posXKeyframesOf(layer: any): any[] | null {
+  /* 返回的是数据里的关键帧数组本体(不是副本),因此就地改 s[0] 就等于改动画数据;
+   * 数组元素形如 { t: 时刻帧号, s: [x, y, z] }。 */
   const p = layer?.ks?.p;
   if (!p) return null;
   if (p.x && Array.isArray(p.x.k)) return p.x.k;
@@ -2795,6 +3151,8 @@ function layerAnchorCompX(layer: any): number | null {
   if (!currentData || !layer) return null;
   let vx = propBaseValue(layer.ks?.p, 0);
   if (vx === null) return null;
+  /* visited 用于防 parent 成环:AE 工程里手工构造的父子引用可能互相指向,
+   * 不加保护这里会死循环卡死主线程。 */
   const visited = new Set<number>();
   let cur: any = layer;
   while (cur && typeof cur.parent === 'number' && !visited.has(cur.parent)) {
@@ -2817,6 +3175,8 @@ function captureDikuangBaseState() {
   dikuangVisibleInds = [];
   dikuangRectBaseOpacity = 100;
   if (!currentData) return;
+  /* 段定义:二次扫描段固定用 ind 104 / 105 / 103,是合并时把第二段图层的 ind 整体 +100 得到的;
+   * 未合并的动画没有这一段,只建主段。 */
   const defs: { seg: 'main' | 'next'; textInd: number; iconInd: number; parentInd: number; inSeg: (ind: number) => boolean }[] = [
     { seg: 'main', textInd: 4, iconInd: 5, parentInd: 3, inSeg: (ind) => ind < 100 },
   ];
@@ -2844,6 +3204,9 @@ function captureDikuangBaseState() {
       lightBasePosKeys: [],
       platePivotX: null,
     };
+    /* 记录文字图层的终态缩放 textScale:measureText 量到的是文字空间 px,折算成合成单位要乘它。
+     * 取关键帧数组最后一帧的值(文字带放大动画时以终态为准);静态缩放 ks.s.k = [100,100,100]
+     * 取不到关键帧结构,回落为 1(即 100%)。 */
     const textLayer = findLayerByInd(currentData.layers, seg.textInd);
     const doc = textLayer ? textDocOf(textLayer) : null;
     if (doc) seg.origText = doc.t ?? '';
@@ -2852,12 +3215,18 @@ function captureDikuangBaseState() {
       const last = ts.k[ts.k.length - 1];
       if (Array.isArray(last.s) && last.s[0]) seg.textScale = last.s[0] / 100;
     }
+    /* 取底框 X 缩放的关键帧基准(原样拷贝三个分量,后面按系数 k 放大),并从形状组里量出矩形
+     * 基准宽:'rc'(矩形)且尺寸是静态值时才计,取最大值是因为底框里可能有多层矩形。
+     * 同一段里可能有「底框」与「底框(可见)」两个图层,基准几何取第一个命中的(两者缩放一致),
+     * 所以循环末尾 break。 */
     for (const layer of findDikuangLayers(seg)) {
       const s = layer?.ks?.s;
       if (!s || !Array.isArray(s.k)) continue;
       seg.baseScaleKeys = s.k
         .filter((kf: any) => Array.isArray(kf.s))
         .map((kf: any) => ({ s: [kf.s[0], kf.s[1], kf.s[2]] }));
+      /* 遍历该图层（含嵌套形状组）里所有静态圆角矩形（rc），取最大宽度作为底框「基准矩形宽」。
+       * 只认静态值 a=0：被做成关键帧的尺寸无法作为缩放基准，直接跳过。 */
       const walk = (items: any[]) => {
         for (const it of items ?? []) {
           if (it.ty === 'rc' && it.s?.a === 0 && Array.isArray(it.s.k) && it.s.k[0] > 0) {
@@ -2871,6 +3240,9 @@ function captureDikuangBaseState() {
       if (Array.isArray(last.s) && last.s[0]) seg.frameScale = last.s[0] / 100;
       break;
     }
+    /* 记录父级「空 2」的缩放关键帧（取 X 分量 s[0]，百分比）以及该级的出/入缓动
+     * 控制点 o/i（维度缺省时 o=0、i=1，即等价线性），供 adaptDikuangWidth 用
+     * getParentScaleAtFrame 在任意帧插值还原父缩放——图标位移必须按当时的父缩放折算。 */
     const parent = findLayerByInd(currentData.layers, seg.parentInd);
     const ps = parent?.ks?.s;
     if (ps && Array.isArray(ps.k)) {
@@ -2965,20 +3337,28 @@ function adaptDikuangWidth() {
     const doc = textLayer ? textDocOf(textLayer) : null;
     if (!doc) continue;
     const curText = String(doc.t ?? '');
+    // 字数按去掉换行符后的字符数统计（Bodymovin 文本里换行存为 \r），「>4 字」规则据此判断
     const charCount = curText.replace(/\r/g, '').length;
     // 文字宽度增量始终计算(可正可负),图标距离随文字左缘自适应;
     // 底框缩放沿用第一段规则:>4 字且变宽才放大,≤4 字或变窄保持当前。
     const cur = measureDikuangTextWidth(curText, doc);
     const orig = measureDikuangTextWidth(seg.origText, doc);
+    /* 文字宽度增量：measureDikuangTextWidth 返回的是文字空间 px，乘文字层终态缩放
+     * textScale（已除 100）后即为合成单位，与底框宽度同一坐标系；可正可负。 */
     const deltaComp = (cur - orig) * seg.textScale;
+    // k = 底框 X 缩放倍数：1 表示保持基准宽（≤4 字或文字变窄时都不放大）
     let k = 1;
     if (charCount > 4 && deltaComp > 0) {
+      /* frameW = 可见基准宽度（合成单位）= 形状基准宽 × 底框终态缩放 × 父级空 2 终态缩放；
+       * 新增的宽度按同一比例放大，因此缩放系数 =（frameW + deltaComp）/ frameW。 */
       const frameW = seg.baseShapeW * seg.frameScale * seg.parentScale;
       if (frameW > 0) k = (frameW + deltaComp) / frameW;
     }
     for (const layer of findDikuangLayers(seg)) {
       const s = layer?.ks?.s;
       if (!s || !Array.isArray(s.k)) continue;
+      /* 关键帧按「捕获的基准值 × k」整体重写，而不是在当前值上累乘 ——
+       * 反复改文字长度、再改回原文都不会产生误差漂移。 */
       s.k.forEach((kf: any, i: number) => {
         const base = seg.baseScaleKeys[i];
         if (base && Array.isArray(kf.s) && base.s) kf.s[0] = base.s[0] * k;
@@ -2991,6 +3371,8 @@ function adaptDikuangWidth() {
         px.k.forEach((kf: any, i: number) => {
           const base = seg.iconBasePosKeys[i];
           if (!base || !Array.isArray(kf.s)) return;
+          /* 末关键帧通常没有 t 字段，回退到捕获时记录的基准时刻；
+           * 除以父缩放前先判 > 0.01：空 2 缩放动画的起始处缩放接近 0，直接除会把位移放大到无穷。 */
           const frame = typeof kf.t === 'number' ? kf.t : base.t;
           const parentScaleAtFrame = getParentScaleAtFrame(seg, frame);
           if (parentScaleAtFrame > 0.01) kf.s[0] = base.s - (deltaComp / 2) / parentScaleAtFrame;
@@ -3045,6 +3427,8 @@ function getDikuangRectTr(layer: any): any | null {
   return gr.it.find((x: any) => x.ty === 'tr') ?? null;
 }
 
+/* 读取「矩形 1」形状组的不透明度（0..100）；取不到时按 100（完全不透明）兜底。
+ * 不传 ind 时作用于第一段（主段）的底框可见层。 */
 function getDikuangRectOpacity(ind?: number): number {
   if (!currentData) return 100;
   if (ind === undefined) {
@@ -3058,6 +3442,8 @@ function getDikuangRectOpacity(ind?: number): number {
   return isFinite(v) ? Math.round(v) : 100;
 }
 
+/* 设置「矩形 1」形状组不透明度（0..100，四舍五入并 clamp）。只接受静态值属性
+ * （a=0）：该属性若被做成了关键帧则直接忽略，避免改坏动画。改完防抖 200ms 重建动画。 */
 function setDikuangRectOpacity(val: number, ind?: number) {
   if (!currentData) return;
   if (ind === undefined) {
@@ -3071,6 +3457,8 @@ function setDikuangRectOpacity(val: number, ind?: number) {
   textEditTimer = window.setTimeout(() => reRenderPreservingState(), 200);
 }
 
+/* 恢复该段「矩形 1」的基准不透明度：优先取这一段捕获的基准值（主段与二次扫描段
+ * 各自独立），查不到段时退回全局基准（主段的值，默认 100）。 */
 function resetDikuangRectOpacity(ind?: number) {
   if (!currentData) return;
   if (ind === undefined) {
@@ -3086,9 +3474,16 @@ function resetDikuangRectOpacity(ind?: number) {
 }
 
 
+/* ---------- 弹窗图层编辑：原始状态快照与底板基准几何 ----------
+ * 弹窗叠加层（windows_animation.json）的编辑方式是「改数据 + 整体重建 lottie 实例」，
+ * 因此每次数据就绪后都要先把原始状态存下来：侧栏「重置」按钮靠它还原文字/颜色/对齐，
+ * 底板宽度自适应靠它拿到基准几何（底板形状基准宽、X 缩放、蒙版 X 缩放关键帧）。
+ * 键都是图层 ind：主动画与弹窗各有一套编号，互不冲突。 */
 const originalPopupTextState = new Map<number, { text: string; fc: number[]; j: number }>();
 const originalPopupShapeState = new Map<number, { fill: number[] | null; stroke: number[] | null }>();
 
+/* 捕获弹窗原始状态：文本（内容 / 填充色 fc / 对齐 j）与形状（填充、描边颜色）按 ind
+ * 存档，同时记录底板基准几何。fc 是 0..1 归一化 RGB（见 hexToFc / fcToHex），不是 0..255。 */
 function capturePopupOriginalState() {
   originalPopupTextState.clear();
   originalPopupShapeState.clear();
@@ -3141,6 +3536,9 @@ function capturePopupOriginalState() {
   }
 }
 
+/* 弹窗文字编辑回调（输入框每次 input 都触发，250ms 防抖）。
+ * 顺序不能颠倒：先 await 内嵌字体加载完成再测量宽度 —— 字体未就绪时 measureText 用的是
+ * 后备字体，量出的宽度偏小，底板会窄一截；之后才是底板适配 + 整体重建。 */
 function onPopupTextEdited(ind: number, text: string) {
   if (!popupData) return;
   const layer = findLayerByInd(popupData.layers, ind);
@@ -3156,6 +3554,7 @@ function onPopupTextEdited(ind: number, text: string) {
   }, 250);
 }
 
+/* 弹窗文字改色：写入文本 doc 的 fc（hex → 0..1 三元组），防抖后重建弹窗 */
 function onPopupColorChanged(ind: number, hex: string) {
   if (!popupData) return;
   const layer = findLayerByInd(popupData.layers, ind);
@@ -3165,6 +3564,7 @@ function onPopupColorChanged(ind: number, hex: string) {
   popupEditTimer = window.setTimeout(() => rebuildPopupPreservingState(), 250);
 }
 
+/* 弹窗文字对齐：j 用 Bodymovin 编码 0=左、1=右、2=居中（注意 1/2 与直觉顺序相反） */
 function onPopupAlignChanged(ind: number, j: number) {
   if (!popupData) return;
   const layer = findLayerByInd(popupData.layers, ind);
@@ -3174,6 +3574,7 @@ function onPopupAlignChanged(ind: number, j: number) {
   popupEditTimer = window.setTimeout(() => rebuildPopupPreservingState(), 250);
 }
 
+/* 弹窗形状改色：kind='fill' 写 fl.c，'stroke' 写 st.c，同样防抖后重建 */
 function onPopupShapeColorChanged(ind: number, hex: string, kind: 'fill' | 'stroke') {
   if (!popupData) return;
   const layer = findLayerByInd(popupData.layers, ind);
@@ -3184,6 +3585,8 @@ function onPopupShapeColorChanged(ind: number, hex: string, kind: 'fill' | 'stro
   popupEditTimer = window.setTimeout(() => rebuildPopupPreservingState(), 250);
 }
 
+/* 重置单个弹窗文本：文字 / 颜色 / 对齐都写回原始快照。数据写回后必须同步刷新侧栏控件值，
+ * 否则输入框还显示用户改过的内容，与画面不一致；随后按与编辑相同的流程适配底板宽并重建。 */
 function onPopupTextReset(ind: number) {
   const orig = originalPopupTextState.get(ind);
   if (!orig || !popupData) return;
@@ -3208,6 +3611,7 @@ function onPopupTextReset(ind: number) {
   }, 250);
 }
 
+/* 重置单个弹窗形状颜色：原始快照里缺 fill/stroke 说明该图层本来就没有这一项，跳过不写 */
 function onPopupShapeReset(ind: number) {
   const orig = originalPopupShapeState.get(ind);
   if (!orig || !popupData) return;
@@ -3223,6 +3627,10 @@ function onPopupShapeReset(ind: number) {
   popupEditTimer = window.setTimeout(() => rebuildPopupPreservingState(), 250);
 }
 
+/* 渲染弹窗侧栏的「文字」与「颜色图层」两个列表（每次数据变更后整体重绘）。要点：
+ *   ①名称含「蒙版」的图层不列入可改色项，改色会破坏蒙版形状与配对；
+ *   ②textarea 的 rows 按文本里的换行数给足，避免多行内容被折叠；
+ *   ③控件用 data-ind 关联图层 ind，事件在重绘时逐个重新绑定（列表很小，代价可忽略）。 */
 function renderPopupLists() {
   if (!popupData) return;
   const texts = collectTextLayers(popupData);
@@ -3325,6 +3733,8 @@ chkPopup.addEventListener('change', () => {
 let rerenderBusy = false;
 let rerenderQueued = false;
 
+/* 请求一次「保留状态的重渲染」：忙时只置排队标记（多次点击被合并成一次重建），
+ * 当前这轮结束后补跑。调用方不需要等待，也不返回 Promise。 */
 function reRenderPreservingState() {
   if (!currentData || !anim) {
     rerenderBusy = false;
@@ -3336,6 +3746,8 @@ function reRenderPreservingState() {
     return;
   }
   rerenderBusy = true;
+  /* 结束回调：清忙标记；有排队请求则推迟到下一帧补跑（用 rAF 而不是同步递归，
+   * 避免在深层调用栈里继续重建，也给浏览器一次渲染机会）。 */
   const finish = () => {
     rerenderBusy = false;
     if (rerenderQueued) {
@@ -3346,6 +3758,10 @@ function reRenderPreservingState() {
   reRenderPreservingStateCore(finish);
 }
 
+/* 单飞队列的执行体：记录状态 → 销毁旧实例 → 重新 loadAnimation → 恢复帧号与播放状态
+ * → 放行队列。全程用 buildSerial 序号识别「自己是否已被更新的重建顶替」，被顶替时只放行
+ * 队列、不再动画面。settle 幂等，保证正常路径、DOMLoaded、看门狗超时、异常分支都恰好放行
+ * 一次队列，否则单飞标记会永久卡住、之后所有重建请求都被丢弃。 */
 function reRenderPreservingStateCore(onSettled?: () => void) {
   let settled = false;
   const settle = () => {
@@ -3357,6 +3773,8 @@ function reRenderPreservingStateCore(onSettled?: () => void) {
     settle();
     return;
   }
+  // 记录重建前的状态：当前帧号（lottie 的 currentFrame，与合成帧号同一坐标系，0 为首帧）、
+  // 是否处于暂停、倍速与渲染器；重建后原样恢复，让用户察觉不到动画被整体换掉
   const frame = anim.currentFrame;
   const wasPaused = anim.isPaused;
   const speed = parseFloat(rngSpeed.value);
@@ -3371,6 +3789,8 @@ function reRenderPreservingStateCore(onSettled?: () => void) {
     if (serial !== buildSerial) settle();
   }, 900);
   let newAnim: AnimationItem;
+  /* loadAnimation 也可能同步抛错（数据异常 / 容器异常）：这条路径必须清掉看门狗并放行
+   * 单飞队列，否则后续所有重建请求都会被 rerenderBusy 挡住。 */
   try {
     newAnim = lottie.loadAnimation({
       container: previewInner,
@@ -3390,12 +3810,15 @@ function reRenderPreservingStateCore(onSettled?: () => void) {
   anim = newAnim;
   (window as any).__anim = newAnim;
   (window as any).__lottie = lottie;
+  // 渲染器补丁要在实例刚建好时立刻挂上：loadAnimation 可能已同步构建好元素，
+  // 补丁内部会对已构建元素补做处理（图片序列层调色、投影、SVG 裁剪等两套渲染器的差异）
   if (renderer === 'canvas') patchCanvasRendererTree(newAnim.renderer as any);
   else patchSvgRendererTree(newAnim.renderer as any);
   rebuildPopupOverlay();
   newAnim.addEventListener('DOMLoaded', onAnimReady);
   newAnim.addEventListener('config_ready', onAnimReady);
   newAnim.setSpeed(speed);
+  // 兜底刷新时间轴帧范围上限：改时长/开关二次扫描都会重建动画，而 DOMLoaded 可能在本监听绑定前就已触发
   scheduleFrameRangeRefresh(); // 调整时长等会重建动画,DOMLoaded 可能已错过,这里兜底刷新时间轴上限
   // 恢复播放位置/播放状态必须等动画真正就绪(DOMLoaded)后再执行:
   // lottie 元素在就绪前只完成了创建(变换未应用、文字未排版),此时若 goToAndStop
@@ -3448,6 +3871,7 @@ const blindsSeqModules: Record<string, string>[] = [
   import.meta.glob('../animation_3/png resources/99999/*.png', { eager: true, query: '?url', import: 'default' }) as Record<string, string>,
   import.meta.glob('../animation_3/png resources/百叶窗/*.png', { eager: true, query: '?url', import: 'default' }) as Record<string, string>,
 ];
+/* 把 glob 得到的「路径 → url」映射按键名升序取出 url 数组：文件名帧号补零到 5 位，字典序即帧序 */
 const seqUrlsOf = (mods: Record<string, string>): string[] => Object.keys(mods).sort().map((k) => mods[k]);
 /* place:'top' = 叠在最上层;'belowDigits' = 紧跟在五个数字位(第一~第五位)之下 */
 const BLINDS_SEQUENCES: { name: string; urls: string[]; defaultHex: string; place: 'top' | 'belowDigits' }[] = [
@@ -3459,6 +3883,8 @@ const dataLoadingFill = $<HTMLDivElement>('dataLoadingFill');
 const dataLoadingPct = $<HTMLSpanElement>('dataLoadingPct');
 const dlTitle = $<HTMLElement>('dlTitle');
 
+/* 数据加载浮层：大体积 JSON 按需下载时显示，进度条支持确定/不确定两种形态
+ *（.indet class = 拿不到 Content-Length 时来回滑动的动画）。 */
 function showDataLoading(label: string) {
   dlTitle.textContent = '正在加载「' + label + '」数据…';
   dataLoadingFill.classList.remove('indet');
@@ -3466,6 +3892,8 @@ function showDataLoading(label: string) {
   dataLoadingPct.textContent = '0%';
   dataLoadingEl.hidden = false;
 }
+/* p 为 0..1 的下载比例；null / undefined / NaN 表示总长度未知（HEAD 未返回 Content-Length），
+ * 此时切到不确定进度样式并显示「…」。 */
 function setDataLoadingProgress(p: number | null | undefined) {
   if (dataLoadingEl.hidden) return;
   if (p === null || p === undefined || !isFinite(p)) {
@@ -3493,6 +3921,8 @@ async function fetchJsonText(url: string, onProgress?: (p: number | null) => voi
     if (onProgress) onProgress(1);
     return t;
   }
+  /* 手动读流：res.text() 拿不到中途进度。分片先累积再统一解码，TextDecoder 用 stream:true
+   * 保证多字节字符被切在两个分片之间时不会解出乱码。 */
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   const parts: Uint8Array[] = [];
@@ -3512,6 +3942,9 @@ async function fetchJsonText(url: string, onProgress?: (p: number | null) => voi
 }
 
 /* 顺序下载多个 JSON 并合并为同一进度(如撤离数据 + 弹窗数据) */
+/* 先逐个发 HEAD 取各文件的 Content-Length 作为权重，再串行 GET：进度因此是单调的，
+ * 不会因并发完成顺序而回退，也避免多个大 JSON 同时驻留内存。
+ * 任一长度缺失（响应无 Content-Length）时整体退化为不确定进度。 */
 async function fetchJsonBundle(urls: string[], onProgress?: (p: number | null) => void): Promise<string[]> {
   const lens: number[] = [];
   let total = 0;
@@ -3546,6 +3979,8 @@ const iconModules = import.meta.glob('../animation_2/icon/*.{png,webp}', {
   query: '?url',
   import: 'default',
 }) as Record<string, string>;
+/* 图标选项列表（{name, url}）：同名 PNG/WebP 只保留 WebP（素材换格式后列表不出现重复项），
+ * 再按名称自然序排序 —— numeric:true 让 Hero_Sp_2 排在 Hero_Sp_10 前面。 */
 const ICON_OPTIONS = (() => {
   // 同名图标同时存在 PNG 与 WebP 时只保留 WebP(体积约为 PNG 的 40%),避免列表出现重名重复项
   const byBase = new Map<string, { name: string; url: string }>();
@@ -3560,15 +3995,22 @@ const ICON_OPTIONS = (() => {
   return [...byBase.values()].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
 })();
 const DEFAULT_ICON_BASE = 'Hero_Sp_03'; // 默认图标(不含扩展名,PNG/WebP 均可)
+/* 默认图标文件名：优先精确匹配 DEFAULT_ICON_BASE（扩展名不限），素材缺失时退化为列表首项，
+ * 再退化为约定的 .png 文件名 —— 保证任何情况下都有非空值可用。 */
 const DEFAULT_ICON_NAME =
   ICON_OPTIONS.find((o) => o.name.replace(/\.[^.]+$/, '') === DEFAULT_ICON_BASE)?.name ??
   ICON_OPTIONS[0]?.name ??
   DEFAULT_ICON_BASE + '.png';
 
+/* 撤离动画数据缓存 + 「进行中的加载」Promise：并发调用（切动画 / 导出 / 改时长）复用同一次
+ * 下载与解析，避免同一份大 JSON 被重复拉取。 */
 let bootAnimation: any = null;
 let bootDataPromise: Promise<void> | null = null;
 
 /* 撤离动画(animation_data.json)+ 弹窗动画(windows_animation.json)数据加载 */
+/* 数据按需加载：每个入口都可能被并发调用，因此用 bootDataPromise 合流 ——正在加载就复用
+ *（进度以不确定态显示），失败则置空以便下次重试。撤离动画与弹窗动画打包在同一次 bundle 里
+ * 下载，两者都就绪才算成功。 */
 async function ensureExtractionData(onProgress?: (p: number | null) => void): Promise<void> {
   if (bootAnimation && popupData) return;
   if (bootDataPromise) {
@@ -3609,6 +4051,7 @@ async function ensureExtractionData(onProgress?: (p: number | null) => void): Pr
   return bootDataPromise;
 }
 
+/* 位置暴露动画：主段数据、二次扫描段数据，以及用于并发合流的「进行中」Promise */
 let animation2Data: any = null;
 let animation2NextData: any = null;
 let exposedDataPromise: Promise<void> | null = null;
@@ -3622,6 +4065,8 @@ let guangOriginalData: string | null = null; // 光.png(二次扫描)原始图�
 /* 位置暴露动画(animation_data.json + 二次扫描 animation_data_next_fixed.json)数据加载。
  * 其内嵌音频为 Bodymovin 导出的坏占位符(data:audio/mp3;base64,undefined),
  * 剥离后注入独立的 WAV 音效资源(音频层 refId=audio_0 指向打包的 WAV 文件)。 */
+/* 同 ensureExtractionData：并发合流 + 失败可重试。主段与二次扫描段在同一个 bundle 里下载，
+ * 缺任何一个都视为未就绪（exposedDataPromise 置空后可重来）。 */
 async function ensureExposedData(onProgress?: (p: number | null) => void): Promise<void> {
   if (animation2Data && animation2NextData) return;
   if (exposedDataPromise) {
@@ -3649,6 +4094,9 @@ async function ensureExposedData(onProgress?: (p: number | null) => void): Promi
           animation2Data.assets.push({ id: 'audio_0', p: exposedAudioUrl, u: '', e: 1 });
         }
         // 修复音频层音量:au.lv 为 [0,0] 会被 lottie 当作静音,改为满音量并按 AUDIO_VOLUME 调低
+        /* 递归修复音频层音量（ty=6，预合成内嵌套的图层也要处理）：
+         * 原 JSON 的 au.lv 是 [0,0]，lottie 会把它当成静音；这里改写为
+         * AUDIO_VOLUME（0..1）× 100 取整后的值（lottie 的音量按 0..100 解释）。 */
         const fixAudioVol = (layers: any[]) => {
           for (const l of layers ?? []) {
             if (l.ty === 6 && l.au && l.au.lv) l.au.lv.k = [Math.round(AUDIO_VOLUME * 100)];
@@ -3704,6 +4152,10 @@ async function ensureExposedData(onProgress?: (p: number | null) => void): Promi
  * 复用站点既有的「图片序列图层」通路(图层 ks.src 逐帧关键帧 + assets[] 逐帧图片):
  * 预览(SVG / Canvas)与视频导出(H.264 MP4/AVI、无压缩 AVI)都自动包含叠加层,无需另写合成代码。
  * 两条序列按 README.txt 默认开启、不设开关;颜色在侧栏「图片图层」里改(见 syncSeqTintFilters)。 */
+/* 在底层动画数据上叠加两条逐帧 PNG 序列：图层改名 → 微调「形状图层 6」的 Y 缩放 →
+ * 为每一帧 PNG 建一条资源和一个图片层（src 逐帧关键帧）→ 按 place 插进图层数组。
+ * 注意：原地修改并返回传入的 base（不深拷贝），且不做去重 —— 对同一份数据重复调用会重复
+ * 追加图层与资源，因此只允许执行一次（由 ensureBlindsData 的缓存保证）。 */
 function buildBlindsComposite(base: any, seqs: { name: string; urls: string[]; place?: 'top' | 'belowDigits' }[]): any {
   const data = base;
   data.assets = data.assets ?? [];
@@ -3721,6 +4173,25 @@ function buildBlindsComposite(base: any, seqs: { name: string; urls: string[]; p
   for (const l of data.layers) {
     if (l && typeof l.nm === 'string' && renameMap[l.nm]) l.nm = renameMap[l.nm];
   }
+  /* 形状图层 6:Y 轴缩放略调大(1.1 = +10%,视觉微调)。要再调只改这个系数即可。 */
+  const SHAPE6_Y_SCALE = 1.3;
+  for (const l of data.layers) {
+    if (!l || l.nm !== '形状图层 6' || !l.ks?.s) continue;
+    const s = l.ks.s;
+    const bump = (arr: any) => {
+      for (const kf of arr) {
+        if (Array.isArray(kf?.s) && kf.s.length >= 2) kf.s[1] = Math.round(kf.s[1] * SHAPE6_Y_SCALE * 1000) / 1000;
+        if (Array.isArray(kf?.e) && kf.e.length >= 2) kf.e[1] = Math.round(kf.e[1] * SHAPE6_Y_SCALE * 1000) / 1000;
+      }
+    };
+    if (s.a === 0 && Array.isArray(s.k)) {
+      s.k = [s.k[0], Math.round(s.k[1] * SHAPE6_Y_SCALE * 1000) / 1000, s.k[2] ?? 100];
+    } else if (Array.isArray(s.k)) {
+      bump(s.k);
+    }
+  }
+  /* 注入的资源 id 与图层 ind 必须全局唯一：资源 id 用 taken 集合避让冲突（重名时尾部补 '_'），
+   * 图层 ind 从现有最大值继续递增，避免与内置图层撞号。 */
   const taken = new Set<string>(data.assets.map((a: any) => a.id));
   let maxInd = data.layers.reduce((m: number, l: any) => Math.max(m, l.ind ?? 0), 0);
   const injectedTop: any[] = [];       // 叠在最上层
@@ -3736,6 +4207,8 @@ function buildBlindsComposite(base: any, seqs: { name: string; urls: string[]; p
       data.assets.push({ id, w: data.w, h: data.h, u: '', p: url, e: 1 });
       seqIds.push(id);
     });
+    /* 图片序列的标准写法：把图片源属性 src 做成关键帧，第 i 帧指向第 i 个资源 id。
+     * 关键帧时刻 t 直接用帧号（合成 60fps，一帧 = 1），所以 seqIds 的顺序必须与帧序一致。 */
     const srcKeyframes = seqIds.map((id, i) => ({ t: i, s: [id] }));
     (seq.place === 'belowDigits' ? injectedBelowDigits : injectedTop).push({
       ddd: 0,
@@ -3764,6 +4237,8 @@ function buildBlindsComposite(base: any, seqs: { name: string; urls: string[]; p
    * 「模糊效果」(原 99999 叠加序列)要求紧跟五个数字位之下 —— 数字压在它上面,
    * 但不再压到最底层(它下面还有 HAAVK / MW 等图层);
    * 「百叶窗」保持叠在最上层。 */
+  /* 定位「紧贴数字位之下」的插入点：lottie 图层数组下标越小越靠上，取最后一个数字位图层的
+   * 下标 +1 即它的正下方；数据被改过、找不到数字位图层时退化为插到数组末尾（即最下层）。 */
   let digitEnd = -1;
   data.layers.forEach((l: any, i: number) => {
     if (l?.ty === 5 && isSingleDigitTextName(l.nm)) digitEnd = i;
@@ -3800,6 +4275,9 @@ async function ensureBlindsData(onProgress?: (p: number | null) => void): Promis
 }
 
 /* 递归偏移对象中所有动画属性({a:1, k:[{t,...}]})的关键帧时刻 t */
+/* 说明：只平移动画属性（{a:1}）里关键帧的 t（帧号，60fps 下一帧 = 1）；数组直接递归；
+ * 遇到 a===1 的 k 数组后不再向下递归，避免把关键帧的 s/e 值当成嵌套属性处理；
+ * delta 与图层 ip/op/st 同一单位（合成帧），两者必须一起平移，否则图层区间与动画内容错位。 */
 function offsetKeyframes(obj: any, delta: number) {
   if (!obj || typeof obj !== 'object') return;
   if (Array.isArray(obj)) {
@@ -3817,6 +4295,12 @@ function offsetKeyframes(obj: any, delta: number) {
 
 /* 第二段数据:重新编号 ind(+100)并更新 parent 引用、重命名资源(id+_n)并更新
  * refId、图层 ip/op/st 与全部关键帧整体平移 baseOp 帧。 */
+/* 第二段与第一段共用一条时间线，合并前必须做四件事：
+ *   ① 图层 ind 与 parent 引用整体 +100（全文件以「ind ≥ 100 即第二段」为约定，见 isMergedNext）；
+ *   ② 资源 id 加 _n 后缀并同步改写 refId，避免与第一段同名资源互相覆盖、引用错图；
+ *   ③ 图层 ip/op/st 与全部关键帧整体平移 baseOp 帧（baseOp = 第一段的 op），使第二段紧随其后；
+ *   ④ 修掉 AE 导出遗留的路径手柄 / 轨道蒙版 / 底框填充等与第一段不一致的地方（见下）。
+ * 入参 next 先被深拷贝，函数不会改动调用方的数据。 */
 function prepareNextData(next: any, baseOp: number): any {
   const d = JSON.parse(JSON.stringify(next));
   const renumber = (layers: any[]) => {
@@ -3848,6 +4332,9 @@ function prepareNextData(next: any, baseOp: number): any {
   // 注意:第二段 AE 导出时竖条(形状 3/形状 2)的填充是绿色 [0.31,1,0.18](第一段为黑色),
   // 侧栏形状图层显示的是第一个填充(绿色),因此必须把所有形状组的填充统一为黑色,
   // 侧栏才会显示 #000000,渲染也与第一段一致(金/红描边 + 黑填充)。
+  /* 只改两处：矩形形状组的 tr.o 固定为 55%（整体重建为静态值 a:0，消除可能的关键帧），
+   * 以及所有形状组的填充 fl.c 统一为纯黑不透明（[0,0,0,1]，分量是 0..1 不是 0..255）。
+   * 金色/红色描边保持原样不动。 */
   const normalizeDikuangRect = (layer: any) => {
     for (const g of layer?.shapes ?? []) {
       if (!g || g.ty !== 'gr' || !Array.isArray(g.it)) continue;
@@ -3865,6 +4352,7 @@ function prepareNextData(next: any, baseOp: number): any {
     if (src) {
       const vis = JSON.parse(JSON.stringify(src));
       vis.nm = '底框(可见)';
+      // ind 取 900001：远离第一段（<100）与第二段（1xx）的号段，不会与任何真实图层撞号
       vis.ind = 900001;
       delete vis.td;
       normalizeDikuangRect(vis);
@@ -3911,6 +4399,8 @@ function prepareNextData(next: any, baseOp: number): any {
   for (const l of d.layers ?? []) {
     if (l.ty === 4 && Array.isArray(l.shapes)) convertShapesToAbsolute(l.shapes);
   }
+  /* 资源 id 统一加 _n 后缀并建立「旧 → 新」映射，随后按映射改写所有 refId（含预合成内的嵌套
+   * 图层）：两段数据出自同一套 AE 工程，资源 id 极可能重名，不区分会让第二段引用到第一段的图。 */
   const idMap = new Map<string, string>();
   for (const a of d.assets ?? []) {
     const newId = a.id + '_n';
@@ -3924,6 +4414,8 @@ function prepareNextData(next: any, baseOp: number): any {
     }
   };
   updateRefs(d.layers);
+  /* 图层时间整体平移：ip（入点）/ op（出点）/ st（起始时刻）三个时间字段与全部关键帧时刻
+   * 必须一起平移，否则图层的显示区间与它自己的动画会对不上。 */
   const offsetLayers = (layers: any[]) => {
     for (const l of layers ?? []) {
       l.ip += baseOp;
@@ -3942,11 +4434,17 @@ function prepareNextData(next: any, baseOp: number): any {
   return d;
 }
 
+/* 是否已把第二段并进主数据：prepareNextData 给第二段图层统一 +100，因此出现 ind ≥ 100
+ * 即视为已合并（整个文件都用这个约定区分两段）。 */
 function isMergedNext(data: any): boolean {
   return Array.isArray(data?.layers) && data.layers.some((l: any) => l.ind >= 100);
 }
 
 /* 把第二段并入主数据(深拷贝,保留第一段编辑状态) */
+/* 合并要点：主数据深拷贝，保留用户在第一段上的编辑状态；图层与资源直接首尾拼接；
+ * 字体表按 fFamily/fName 去重合并，避免同名字体重复登记（lottie 按字体名查找，重复无益）。
+ * 时长：op = 第一段 op + 第二段 op，并把第一段原 op 存进 __mainOp、第二段时长存进 __nextOp，
+ * 供「取消二次扫描」还原主数据与时长显示使用。 */
 function mergeNextInto(main: any): any {
   const d = JSON.parse(JSON.stringify(main));
   const next = prepareNextData(animation2NextData, d.op);
@@ -4000,6 +4498,7 @@ function offsetSecondSegment(data: any, delta: number) {
         l.op += delta;
         l.st += delta;
         offsetKeyframes(l, delta);
+        // 文字内容关键帧的时刻不在 {a:1,k:[...]} 结构里（t.d.k 直接就是数组），offsetKeyframes 覆盖不到
         const tdk = l?.t?.d?.k;
         if (Array.isArray(tdk)) for (const kf of tdk) if (kf && typeof kf.t === 'number') kf.t += delta;
       }
@@ -4064,6 +4563,9 @@ const plateParentXOriginal = new Map<number, number>(); // 空 2 ind → 原 p.x
  * 只影响「显示图标」未勾选时的文字与其跟随的底框;SVG/Canvas、预览/导出一致。 */
 let iconCenterNudge = 0; // 合成单位,正值右移;0 = 关闭微调
 let nudgeRebuildTimer: number | undefined; // 连点微调防抖(220ms):一次快速连点只合并成一次重建
+/* 居中微调（合成单位 px，范围 ±8）：只影响「显示图标」未勾选时的文字及其跟随的底框。
+ * 图标仍显示时微调值照样记录，但不重建（对显示态无影响）；
+ * 连点走 220ms 防抖合并成一次重建，配合单飞队列不会出现交错重建。 */
 function changeIconNudge(delta: number) {
   iconCenterNudge = Math.max(-8, Math.min(8, iconCenterNudge + delta));
   const v = document.getElementById('iconNudgeVal');
@@ -4080,12 +4582,17 @@ function changeIconNudge(delta: number) {
  * (约 0.5 字格 ≈ 1.5 合成单位),按字格中心/锚点校正反而让墨迹视觉中心落在
  * 1918.4 附近(观感偏左)。逐字形墨迹实测:p.x=1920 时主段「位置暴露」墨迹中心
  * 1919.6、二次扫描「即将扫描移动单位」1920.2,观感最居中;SVG 与 Canvas 一致。 */
+/* 捕获「显示图标」状态下的原始值（图标层 ks.o、文字层 p.x、底框父级 p.x）。
+ * 只在图标显示时捕获：隐藏状态下的重建若也捕获，会把「隐藏后的值」当成原值存下来，
+ * 之后再勾选「显示图标」就还原不回原始布局了。 */
 function captureIconState() {
   if (!chkIcon.checked) return; // 仅图标显示时记录原始状态,隐藏时保留上次记录
   iconOpacityOriginal.clear();
   textPosXOriginal.clear();
   plateParentXOriginal.clear();
   if (!currentData) return;
+  /* 图层 ind 约定（内置位置暴露数据）：主段 = 文字 4 / 图标 5；
+   * 二次扫描段合并时整体 +100 → 文字 104 / 图标 105。因此按是否已合并决定要改哪些图层。 */
   const iconInds = [5];
   const textInds = [4];
   if (isMergedNext(currentData)) {
@@ -4109,6 +4616,9 @@ function captureIconState() {
   }
 }
 
+/* 切换「显示图标」：隐藏时把图标层透明度改成动画关键帧、把文字及其底框父级移到画布中心；
+ * 恢复时写回 captureIconState 捕获的原值（而非就地增减，重复调用不会累积偏移）。
+ * rerender=false 用于「批量改完数据再统一重建」的场景，避免重建多次。 */
 function setIconVisible(visible: boolean, rerender = true) {
   iconVisible = visible;
   // 居中微调组件仅在取消显示图标(图标隐藏)后出现;恢复显示图标时收回
@@ -4166,11 +4676,13 @@ chkIcon.addEventListener('change', () => setIconVisible(chkIcon.checked));
 document.getElementById('btnNudgeL')?.addEventListener('click', () => changeIconNudge(-1));
 document.getElementById('btnNudgeR')?.addEventListener('click', () => changeIconNudge(1));
 document.getElementById('btnNudgeReset')?.addEventListener('click', () => changeIconNudge(-iconCenterNudge));
+// 初始化微调数值的显示（模块加载时同步一次，否则面板会显示为空）
 {
   const v = document.getElementById('iconNudgeVal');
   if (v) v.textContent = iconCenterNudge + ' px';
 }
 
+// 自定义上传的图标排在内置素材之前，便于用户一眼看到自己加的那张
 function allIconOptions() {
   return [...customIcons, ...ICON_OPTIONS];
 }
@@ -4194,6 +4706,9 @@ function effectiveIconUrl(scope: IconScope) {
   return findIconOption(effectiveIconName(scope))?.url ?? '';
 }
 
+/* 把某条资源指向打包后的 url：必须同时把 u 置空、e 置 1，lottie 才会把 p 当成完整地址；
+ * 否则它会按 u+p 去拼路径，或把 data URI 再当 base64 解码一次。
+ * 返回是否命中资源 —— 资源 id 不存在时调用方需要知道这次改写没生效。 */
 function setAssetImageUrl(data: any, id: string, url: string): boolean {
   const asset = (data?.assets ?? []).find((a: any) => a.id === id);
   if (!asset) return false;
@@ -4207,6 +4722,7 @@ function setAssetImageUrl(data: any, id: string, url: string): boolean {
  * 只认「位置暴露动画」的两个数据对象:切换动画的瞬间 currentData 可能仍是撤离动画,
  * 而它的资源 id 也叫 image_0,误写会改坏撤离动画的图标。合并后的数据与 animation2Data
  * 是同一个对象(见 chkNextScan / switchAnimation),因此写它就等于写 currentData。 */
+/* 返回是否有资源被实际改写（调用方据此决定要不要重建动画）。 */
 function applyIconUrlToScope(scope: IconScope, url: string): boolean {
   if (!url) return false;
   let updated = false;
@@ -4249,6 +4765,7 @@ function setIconForScope(scope: IconScope, name: string) {
   reRenderPreservingState();
 }
 
+/* 切换图标选项卡（位置暴露 / 二次扫描）：只刷新 UI，不改数据也不重建动画 */
 function setIconScope(scope: IconScope) {
   if (iconScope === scope) return;
   iconScope = scope;
@@ -4265,6 +4782,7 @@ function syncIconScopeUI(data: any = currentData) {
   iconScopeNext.setAttribute('aria-selected', String(isNext));
   iconFollowRow.hidden = !isNext;
   chkFollowMainIcon.checked = followMainIcon;
+  // 缩略图与名称就地更新：src 相同时不重复赋值，避免浏览器重新加载同一张图造成闪烁
   const setPick = (thumb: HTMLImageElement, label: HTMLElement, name: string) => {
     const opt = findIconOption(name);
     if (!opt) return;
@@ -4282,6 +4800,8 @@ function syncIconScopeUI(data: any = currentData) {
   renderIconList();
 }
 
+// 重绘图标网格:位置暴露与二次扫描共用同一份列表,当前生效项标 is-active。
+// 用 innerHTML 整体重建而不是局部 diff —— 条目数量级很小(内置 + 用户上传),重建成本可忽略。
 function renderIconList() {
   const opts = allIconOptions();
   const activeName = effectiveIconName(iconScope);
@@ -4307,6 +4827,7 @@ function renderIconList() {
   });
 }
 
+// 两个选项卡只切换 iconScope;缩略图、跟随开关、提示与列表统一由 syncIconScopeUI 刷新
 iconScopeMain.addEventListener('click', () => setIconScope('main'));
 iconScopeNext.addEventListener('click', () => setIconScope('next'));
 
@@ -4325,6 +4846,8 @@ iconFile.addEventListener('change', () => {
   const file = iconFile.files?.[0];
   iconFile.value = ''; // 允许重复选择同一文件
   if (!file) return;
+  // 上限 2MB:上传的图标会以 data URL 形式写进动画数据(每次应用、每次导出都要重新解析),
+  // 存成 base64 还会比原文件大约 1/3,过大既拖慢渲染也让导出产物变重
   if (file.size > 2 * 1024 * 1024) {
     setStatus('图标过大:请上传 ≤2MB 的图片', true);
     return;
@@ -4350,6 +4873,10 @@ iconFile.addEventListener('change', () => {
   reader.readAsDataURL(file);
 });
 
+/* 切换动画(撤离 / 位置暴露 / 核电站功率)。
+ * 数据包按需加载:仅首次进入该动画时才下载,期间显示加载浮层与实时进度,结束后关闭。
+ * 弹窗数据随动画一起换,并强制关闭弹窗、隐藏无关区块(弹窗 / 图片调色 / 图标 / 时长)。
+ * 载入前先把「图标、图片调色」等用户设置写回数据,保证随后 loadData 构建出的动画直接用对资源。 */
 async function switchAnimation(key: string) {
   const def = ANIMATIONS.find((a) => a.key === key);
   if (!def) return;
@@ -4421,15 +4948,24 @@ async function switchAnimation(key: string) {
   void loadData(data, def.label);
 }
 /* ---------- 视频导出 ---------- */
+// 导出单飞锁:导出期间为 true,再次点击导出按钮直接返回。
+// 两个导出并行会互抢 GPU 编码器与渲染容器,还会互相覆盖进度浮层。
 let exporting = false;
 
 /* ---------- 导出进度浮层 ---------- */
+// 用户主动取消导出的专用错误类型:catch 里用 instanceof 区分「取消」与「真失败」,
+// 取消走静默收尾(不打印堆栈、浮层显示已取消),失败才回显错误信息与堆栈。
 class ExportCancelledError extends Error {}
 
+// 取消是「协作式」的:取消按钮只置位 exportCancelRequested,真正的中断发生在逐帧循环的检查点
+// (见 runWebCodecsExport / exportVideoAvi),这样硬件编码器与渲染器都能被正常关闭、不泄漏。
+// exportLastPct 让「正在取消…」的提示停留在当前进度;exportOverlayTimer 管终态的自动隐藏。
 let exportCancelRequested = false;
 let exportLastPct = 0;
 let exportOverlayTimer: number | undefined;
 
+// 字节数 → 人类可读体积,按 1000 进制显示(与「无压缩 AVI ≈ 宽×高×4×帧数」的粗算口径一致),
+// 只用于导出前的量级提示,不追求精确。
 function fmtSize(bytes: number): string {
   if (bytes >= 1e9) return (bytes / 1e9).toFixed(2) + ' GB';
   if (bytes >= 1e6) return (bytes / 1e6).toFixed(1) + ' MB';
@@ -4437,6 +4973,9 @@ function fmtSize(bytes: number): string {
   return bytes + ' B';
 }
 
+// 打开进度浮层并复位所有导出状态:取消标志、进度、按钮文案、颜色 class。
+// exportPercent 的 class 必须重设 —— 上一次导出留下的 done/error/cancel 会让本次进度数字保持旧配色。
+// warn 只在有需要提前告知的风险时显示(目前仅透明 AVI 的体积提示)。
 function showExportOverlay(opts: { formatLabel: string; warn?: string }) {
   window.clearTimeout(exportOverlayTimer);
   exportCancelRequested = false;
@@ -4451,6 +4990,8 @@ function showExportOverlay(opts: { formatLabel: string; warn?: string }) {
   updateExportProgress(0, '正在准备…', '');
 }
 
+// 更新进度:百分比取整并夹到 0..100(逐帧回调按整数帧计算,可能因取整越界),进度条宽度与数字同步。
+// status 是阶段描述(如「正在编码帧 3 / 300」),detail 是更细的补充信息。
 function updateExportProgress(pct: number, status: string, detail = '') {
   const p = Math.max(0, Math.min(100, Math.round(pct)));
   exportLastPct = p;
@@ -4460,6 +5001,9 @@ function updateExportProgress(pct: number, status: string, detail = '') {
   exportDetail.textContent = detail;
 }
 
+// 收尾:把浮层切到 done / error / cancel 三种终态。
+// done 时把文案里的字符勾「✓」换成矢量 ICON_CHECK —— 不同平台的 emoji 字体会把勾渲染成彩色方块。
+// 非 error 会在 holdMs(默认 2600ms)后自动关闭浮层;失败则常驻,免得用户还没看清原因就消失了。
 function finishExportOverlay(kind: 'done' | 'error' | 'cancel', status: string, detail: string, holdMs = 2600) {
   exportPercent.classList.add(kind === 'done' ? 'done' : kind === 'error' ? 'error' : 'cancel');
   // 成功时把「导出完成 ✓」的字符勾换成矢量对勾
@@ -4473,6 +5017,8 @@ function finishExportOverlay(kind: 'done' | 'error' | 'cancel', status: string, 
   }
 }
 
+// 取消按钮一钮两用:导出中 = 请求取消(置位标志,等逐帧循环在检查点中断,按钮随即禁用并转成「关闭」);
+// 导出已结束 = 单纯关闭浮层。
 btnExportCancel.addEventListener('click', () => {
   if (!exporting) { exportOverlay.hidden = true; return; }
   exportCancelRequested = true;
@@ -4492,6 +5038,8 @@ const ICON_CHECK =
   '<svg class="bi" viewBox="0 0 16 16" aria-hidden="true" focusable="false">' +
   '<path d="M13.9 3.5a.95.95 0 0 1 .05 1.34l-6.5 7.4a.95.95 0 0 1-1.4.05L2.2 8.6a.95.95 0 1 1 1.33-1.36l3.15 3.08 5.83-6.64a.95.95 0 0 1 1.34-.18z"/>' +
   '</svg>';
+// 启动时一次性取出 WebCodecs 的四个构造器(浏览器不支持时都是 undefined,导出前据此回退)。
+// 这些 API 只在安全上下文(https / localhost)可用,所以 pickH264Codec 里还要额外判断 isSecureContext。
 const WebVideoEncoder = (window as any).VideoEncoder;
 const WebAudioEncoder = (window as any).AudioEncoder;
 const WebVideoFrame = (window as any).VideoFrame;
@@ -4506,6 +5054,8 @@ const WebAudioData = (window as any).AudioData;
  *   Failed to execute 'encode' on 'VideoEncoder': Cannot call 'encode' on a closed codec.
  * (真正的原因留在 error 回调里,而旧代码在回调里 throw,根本传不到 UI。)
  * 这里按分辨率/帧率算出所需的最低 Level 再配置,并在开跑前用 isConfigSupported 校验。 */
+// 固定码率 30 Mbps(单位 bit/s):HUD 动画以大面积纯色加锐利文字为主,码率给足才压得住文字边缘的块效应。
+// 1080p 与 4K 共用同一常量(对两者都够高),不按分辨率细分,文件体积主要由时长决定。
 const H264_BITRATE = 30_000_000;
 const AVC_PROFILE_HIGH = '6400'; // High Profile(与原来的 avc1.64002a 一致)
 const AVC_PROFILE_MAIN = '4d00';
@@ -4558,6 +5108,8 @@ async function pickH264Codec(w: number, h: number, fps: number): Promise<string 
   return null;
 }
 
+// codec string → 可读的「High / Level 5.0」,仅用于错误提示与状态显示。
+// avc1.PPCCLL:PP = profile_idc、CC = 约束标志位、LL = level_idc,这里取后两位查 AVC_LEVELS 还原名称。
 function avcProfileLevelName(codec: string | null): string {
   if (!codec) return '未知';
   const hex = codec.split('.')[1] || '';
@@ -4569,12 +5121,19 @@ function avcProfileLevelName(codec: string | null): string {
   return profName + ' / Level ' + (hit ? hit[0] : '0x' + idc.toString(16));
 }
 
+// mp4-muxer 与 AVI 帧收集器共用的最小接口:只要能把编码后的 chunk 交出去即可,
+// 这样 runWebCodecsExport 不必关心最终封装成 MP4 还是 AVI。
 type MuxerLike = { addVideoChunk: (chunk: any, meta: any) => void; addAudioChunk: (chunk: any, meta: any) => void };
 
 /* 统一的 WebCodecs 编码驱动:
  * ① 开跑前用 isConfigSupported 校验 codec / 分辨率,失败给出可读原因;
  * ② 编码器因故关闭时抛出 error 回调里的真实原因,而不是「closed codec」;
  * ③ 结束/取消时一定 close,不泄漏硬件编码器。 */
+/* 参数约定:
+ *   encodeFrame(enc, i) 由调用方实现「渲染第 i 帧 → new VideoFrame(canvas) → enc.encode」,
+ *                       i 是【输出帧序号】(0..totalFrames-1),不是动画帧号;
+ *   onProgress(p, detail) 每 12 帧回调一次,p 是输出帧进度(0..100),不含封装与下载阶段;
+ *   audio 为 null 表示本次导出没有音轨(AVI 的音频走 PCM,另行封装)。 */
 async function runWebCodecsExport(
   muxer: MuxerLike, w: number, h: number, fr: number, totalFrames: number,
   onProgress: (p: number, detail?: string) => void,
@@ -4608,9 +5167,14 @@ async function runWebCodecsExport(
       throw new Error('H.264 编码配置不受支持(' + avcProfileLevelName(codec) + ', ' + w + '×' + h + '): ' + ((e as Error).message || e));
     }
     videoEncoder.configure({ codec, width: w, height: h, bitrate: H264_BITRATE, framerate: fr });
+    // AAC-LC(mp4a.40.2)+ 48kHz:采样率必须与 exportVideoMp4 的重采样目标、muxer 里 audio.sampleRate 完全一致,
+    // 对不上会出现音调偏移或时长漂移;192 kbps 对音效足够,声道数跟随素材(最多 2)。
     if (audioEncoder && audioSrc) audioEncoder.configure({ codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: audioSrc.numCh, bitrate: 192000 });
 
     if (audioEncoder && audioSrc) {
+      // AAC-LC 的帧长固定 1024 采样:WebCodecs AudioEncoder 每帧必须正好喂 1024 个采样,这里按此切分。
+      // 时间戳单位是【微秒】,由采样偏移 off 换算(off / 48000 秒);planar 复用同一块缓冲区,
+      // 尾帧不足 1024 时由 sample 内部补零,多余内容不会被读取(numberOfFrames 只取 n)。
       const AAC_FRAME = 1024;
       const planar = new Float32Array(AAC_FRAME * audioSrc.numCh);
       for (let off = 0; off < audioSrc.frames; off += AAC_FRAME) {
@@ -4631,9 +5195,13 @@ async function runWebCodecsExport(
       if (encError) throw encError; // 编码器已因错误关闭:抛出真实原因,而不是 closed codec
       if (videoEncoder.state !== 'configured') throw encError || new Error('H.264 编码器已关闭(state=' + videoEncoder.state + ')');
       await encodeFrame(videoEncoder, i);
+      // 每 12 帧刷新一次进度并 setTimeout(0) 让出一次事件循环:
+      // 逐帧渲染是同步重活,不让出的话导出期间取消按钮和进度条完全没有响应。
       if (i % 12 === 0) { onProgress(Math.round((i / totalFrames) * 100), '正在编码帧 ' + (i + 1) + ' / ' + totalFrames); await new Promise((r) => setTimeout(r, 0)); }
     }
 
+    // flush 不能省:编码器内部还有排队中的帧,不 flush 就拿不到最后几个 chunk。
+    // flush 之后要再查一次错误回调 —— 有些编码错误只在收尾时才暴露出来。
     if (audioEncoder) { await audioEncoder.flush(); if (encError) throw encError; }
     await videoEncoder.flush();
     if (encError) throw encError;
@@ -4649,6 +5217,11 @@ function findAudioAsset(): string | null {
   return (def && def.audio) || null;
 }
 
+/* 解码音效文件为浮点 PCM:每声道一个 Float32Array,取值 -1..1。
+ * buf.slice(0) 是必需的:decodeAudioData 会「分离(detach)」传入的 ArrayBuffer,直接传 res.arrayBuffer()
+ * 会让这块内存后续不可用。
+ * 用临时 AudioContext 解码后立即 close():浏览器对同时存在的 AudioContext 数量有上限(约 6 个),
+ * 泄漏会连带把预览音频一起搞哑。任何失败(404、格式不支持)都返回 null,导出继续但不带音轨。 */
 async function decodeAudio(dataUrl: string): Promise<{ channels: Float32Array[]; sampleRate: number } | null> {
   try {
     const res = await fetch(dataUrl);
@@ -4664,6 +5237,9 @@ async function decodeAudio(dataUrl: string): Promise<{ channels: Float32Array[];
   } catch { return null; }
 }
 
+/* 用 OfflineAudioContext 重采样到目标采样率(MP4 的 AAC 轨固定 48000)。
+ * 采样率相同则直接返回原数组(不复制);输出长度按 toRate/fromRate 比例取整,末尾可能有不到一个采样的零头,
+ * 由调用方按视频时长截断 / 补静音。 */
 async function resampleTo(channels: Float32Array[], fromRate: number, toRate: number): Promise<Float32Array[]> {
   if (fromRate === toRate) return channels;
   const numCh = channels.length;
@@ -4681,6 +5257,8 @@ async function resampleTo(channels: Float32Array[], fromRate: number, toRate: nu
   return out;
 }
 
+// 触发浏览器下载。blob URL 不能立刻 revoke:部分浏览器在大文件真正开始落盘前会被中断,
+// 所以延迟 10 秒释放;<a> 用完即从 DOM 移除,避免节点堆积。
 function downloadBlob(blob: Blob, filename: string) {
   // 开发模式:把同一份字节流上传到 dev server 落盘(tools/user-export.avi),
   // 用于分析真实导出的文件结构(仅 dev,不影响生产)
@@ -4697,16 +5275,25 @@ function downloadBlob(blob: Blob, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
+/* MP4 导出(H.264 视频 + AAC 音频,由 mp4-muxer 封装)。
+ * 取帧统一来自「合成画布」(背景 + 主动画 + 弹窗),画面由调用方传入的 renderFrame 负责画好。
+ * 音频先解码音效再重采样到 48kHz(与 AAC 轨声明一致),然后按视频时长截断 / 补静音,
+ * 保证音轨与视频严格等长,导入剪辑软件不会音画不同步。
+ * animFrameOf 负责把输出帧序号 i 映射到动画帧号。 */
 async function exportVideoMp4(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void | Promise<void>, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, animFrameOf: (i: number) => number = (i) => data.ip + i) {
   if (!WebVideoEncoder || !WebVideoFrame) throw new Error('当前浏览器不支持 WebCodecs 视频编码(请用 Chrome/Edge)');
   const w = data.w, h = data.h;
   const audioUrl = findAudioAsset();
   const audioInfo = audioUrl ? await decodeAudio(audioUrl) : null;
   const audioChannels = audioInfo ? await resampleTo(audioInfo.channels, audioInfo.sampleRate, 48000) : null;
+  // 声道数上限 2:导出的 AAC 轨只声明立体声,多声道素材也只取前两路
   const numCh = audioChannels ? Math.min(audioChannels.length, 2) : 0;
   const videoSec = totalFrames / fr;
+  // 音轨长度严格按视频时长(秒 × 48000)定:多出来的音频丢掉,不够的补静音
   const audioFrames = audioChannels ? Math.round(videoSec * 48000) : 0;
 
+  // fastStart:'in-memory' 把 moov 索引块写到文件头(代价是组装期间数据在内存里多留一份),
+  // 这样浏览器/播放器能边下边播,剪辑软件拖进度条也不必先扫完整个文件。
   const muxer = new Muxer({
     target: new ArrayBufferTarget(),
     video: { codec: 'avc', width: w, height: h, frameRate: fr },
@@ -4720,6 +5307,8 @@ async function exportVideoMp4(data: any, canvas: HTMLCanvasElement, renderFrame:
         numCh,
         frames: audioFrames,
         sample: (planar: Float32Array, off: number, n: number) => {
+          // f32-planar 是「按通道连续」排布:第 c 通道第 i 个采样在 planar[c * n + i]
+          // (n = 本帧样本数,不是缓冲区容量 AAC_FRAME × numCh),写成交错布局会被解成噪声
           for (let c = 0; c < numCh; c++) {
             const ch = audioChannels[c];
             for (let i = 0; i < n; i++) {
@@ -4735,11 +5324,14 @@ async function exportVideoMp4(data: any, canvas: HTMLCanvasElement, renderFrame:
     const animFrame = animFrameOf(i);
     await ensureSeqDecoded(Math.round(animFrame));
     await renderFrame(animFrame);
+    // VideoFrame 的 timestamp / duration 单位是【微秒】:第 i 帧时间戳 = i/fr 秒。
+    // 关键帧每 60 帧(约 1 秒)一个 —— 太稀会让播放与剪辑 seek 变慢,太密则白白增大文件。
     const frame = new WebVideoFrame(canvas, { timestamp: Math.round((i * 1e6) / fr), duration: Math.round(1e6 / fr) });
     enc.encode(frame, { keyFrame: i % 60 === 0 });
     frame.close();
   }, audio);
 
+  // 编码阶段只报到 99%:最后的封装(finalize 要把整段数据在内存里搬一遍)与下载同样要占时间
   onProgress(99, '帧编码完成,正在封装音视频…');
   muxer.finalize();
   onProgress(100, '封装完成,正在下载…');
@@ -4747,6 +5339,8 @@ async function exportVideoMp4(data: any, canvas: HTMLCanvasElement, renderFrame:
 }
 
 /* --- AVI 自封装(MJPEG + PCM / 无压缩 BGRA 透明 + PCM) --- */
+// 三个小工具:ASCII 四cc / 小端 u32 / 小端 u16。
+// AVI(RIFF)的所有整数字段都是 little-endian 且不做对齐填充,所以统一用 DataView 按小端写入。
 function ascii(s: string) { const b = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i); return b; }
 function u32(v: number) { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, v, true); return b; }
 function u16(v: number) { const b = new Uint8Array(2); new DataView(b.buffer).setUint16(0, v, true); return b; }
@@ -4850,6 +5444,8 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
     }
     return idx;
   };
+  // 写 idx1 标准索引块:每条目 16 字节(四cc + flags + offset + size,全部小端)。
+  // 有索引,播放器与 ffmpeg 才能直接 seek 到任意帧,不必顺序扫描整个 movi。
   const writeIdx1 = (target: BlobPart[], idx: { fourcc: string; flags: number; offset: number; size: number }[]) => {
     target.push(ascii('idx1'), u32(idx.length * 16));
     for (const e of idx) {
@@ -4920,6 +5516,8 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
     parts.push(ascii('RIFF'), u32(riffSize), ascii('AVI '));
     // hdrl
     parts.push(ascii('LIST'), u32(hdrlContent), ascii('hdrl'));
+    // avih 是主文件头,固定 56 字节(40 字节字段 + 16 字节保留区,保留区保持全 0)。
+    // 播放器主要校验 microSecPerFrame / totalFrames / 宽高;dwStreams 必须与实际写出的 strl 数量一致。
     // avih
     {
       const microSecPerFrame = Math.round(1e6 / fr);
@@ -4976,11 +5574,15 @@ function buildAvi(w: number, h: number, fr: number, videoFcc: string, strf: Uint
       d.setUint32(20, 1, true);
       d.setUint32(24, audioRate, true);
       d.setUint32(28, 0, true);
+      // 音频流的 dwLength 以「样本单位」计(scale=1、rate=audioRate,所以一个单位 = 一个采样帧):
+      // 采样帧数 = 字节数 / 每帧字节数(numCh × 2)
       d.setUint32(32, Math.floor(pcm16.length / bytesPerSample), true);
       d.setUint32(36, 0, true);
       d.setUint32(40, 0xffffffff, true); // -1 quality
       d.setUint32(44, bytesPerSample, true);
       parts.push(ascii('strh'), u32(56), strh);
+      // WAVEFORMATEX 18 字节(比 16 字节的 PCMWAVEFORMAT 多一个 cbSize=0,AVI 音频的标准写法):
+      // 格式标签(1=PCM)/ 声道数 / 采样率 / 平均字节率 / 块对齐 / 位深 / 附加字节数
       const strf = new Uint8Array(18);
       const df = new DataView(strf.buffer);
       df.setUint16(0, 1, true); // PCM
@@ -5092,6 +5694,8 @@ function rgbaToBgraBottomUp(img: ImageData, w: number, h: number): Uint8Array<Ar
 
 /* MJPEG 压缩 AVI(体积小,不含 alpha,用于带背景色的导出) */
 function buildAviMjpeg(w: number, h: number, fr: number, jpegFrames: Uint8Array<ArrayBuffer>[], pcm16: Uint8Array<ArrayBuffer>, numCh: number, audioRate: number): Blob {
+  // JPEG 帧长度可能为奇数:先统一补 1 字节,保证 movi 内每个块偶对齐
+  // (与 buildAvi 内对 strf / 音频块做的 RIFF 填充是同一件事,漏掉会让后续所有偏移错位 1 字节)
   const frameChunks = jpegFrames.map((f) => { const pad = f.length % 2 ? 1 : 0; const c = new Uint8Array(f.length + pad); c.set(f); return c; });
   return buildAvi(w, h, fr, 'MJPG', mjpegStrf(w, h), '00dc', frameChunks, pcm16, numCh, audioRate);
 }
@@ -5106,6 +5710,8 @@ async function buildPcm16(data: any, totalFrames: number, fr: number): Promise<{
   const audioUrl = findAudioAsset();
   const audioInfo = audioUrl ? await decodeAudio(audioUrl) : null;
   const audioChannels = audioInfo ? audioInfo.channels : null;
+  // 有音效时直接用素材原始采样率:AVI 的 PCM strf 可以声明任意采样率,不像 AAC 被固定 48k 约束,
+  // 所以这里不做重采样、不引入额外失真;无音效时 numCh=0,audioRate 只是占位值。
   const audioRate = audioInfo ? audioInfo.sampleRate : 44100;
   const numCh = audioChannels ? Math.min(audioChannels.length, 2) : 0;
   const videoSec = totalFrames / fr;
@@ -5119,6 +5725,8 @@ async function buildPcm16(data: any, totalFrames: number, fr: number): Promise<{
       const ch = audioChannels![c];
       for (let i = 0; i < audioFrames; i++) {
         const s = i < ch.length ? Math.max(-1, Math.min(1, ch[i])) : 0;
+        // 浮点 -1..1 → int16:先 clamp(素材本身可能轻微过载)再乘 AUDIO_VOLUME(0.3,与预览音量一致),
+        // 最后乘 32767 而不是 32768,避免 +1.0 溢出成反向的负值
         dv.setInt16((i * numCh + c) * 2, Math.round(s * AUDIO_VOLUME * 32767), true);
       }
     }
@@ -5126,6 +5734,11 @@ async function buildPcm16(data: any, totalFrames: number, fr: number): Promise<{
   return { pcm16, numCh, audioRate };
 }
 
+/* 导出 AVI,两种模式:
+ *   dib   —— 无压缩 32 位 BGRA,逐帧 getImageData 直读像素,真正保留 alpha 透明通道(体积大);
+ *   mjpeg —— 每帧 toBlob 成 JPEG 再封装,浏览器不支持 WebCodecs 时的回退方案(体积小,但无透明、有色度毛边)。
+ * 两条路都是「先把所有帧收进内存,最后一次性组装 AVI」,内存占用与帧数成正比。
+ * 取消靠逐帧循环里的 exportCancelRequested 检查点。 */
 async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void | Promise<void>, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, mode: 'dib' | 'mjpeg', animFrameOf: (i: number) => number = (i) => data.ip + i) {
   const { pcm16, numCh, audioRate } = await buildPcm16(data, totalFrames, fr);
 
@@ -5140,6 +5753,8 @@ async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame:
       const animFrame = animFrameOf(i);
       await ensureSeqDecoded(Math.round(animFrame));
       await renderFrame(animFrame);
+      // 透明只能走 getImageData 直读像素:canvas 的 toBlob 只给 JPEG/PNG(JPEG 无 alpha),
+      // 而这里要的是「预乘 alpha、自下而上」的 DIB 布局,转换在 rgbaToBgraBottomUp 里完成
       bgraFrames.push(rgbaToBgraBottomUp(ctx.getImageData(0, 0, data.w, data.h), data.w, data.h));
       if (i % 12 === 0) { onProgress(Math.round((i / totalFrames) * 100), '正在处理帧 ' + (i + 1) + ' / ' + totalFrames); await new Promise((r) => setTimeout(r, 0)); }
     }
@@ -5153,6 +5768,7 @@ async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame:
       const animFrame = animFrameOf(i);
       await ensureSeqDecoded(Math.round(animFrame));
       await renderFrame(animFrame);
+      // JPEG 质量 0.92:MJPEG 每帧独立压缩,质量给足以减少色度毛边,同时别把体积推回 PNG 量级
       const b = await new Promise<Blob>((res, rej) => canvas.toBlob((x) => (x ? res(x) : rej(new Error('toBlob 失败'))), 'image/jpeg', 0.92));
       jpegFrames.push(new Uint8Array(await b.arrayBuffer()));
       if (i % 12 === 0) { onProgress(Math.round((i / totalFrames) * 100), '正在处理帧 ' + (i + 1) + ' / ' + totalFrames); await new Promise((r) => setTimeout(r, 0)); }
@@ -5187,6 +5803,8 @@ async function exportVideoAviH264(data: any, canvas: HTMLCanvasElement, renderFr
     chunk.copyTo(buf);
     frames.push({ data: buf, key: chunk.type === 'key' });
   };
+  // 复用统一的 WebCodecs 驱动,但 muxer 换成「只收集帧数据」的收集器 —— 封装交给 AVI 自己写;
+  // AVI 的音频走 PCM,所以 addAudioChunk(即 AAC 编码)整个不用,audio 参数传 null。
   await runWebCodecsExport(
     { addVideoChunk: collect, addAudioChunk: () => { /* AVI 音频走 PCM,不用 AAC */ } },
     w, h, fr, totalFrames, onProgress,
@@ -5200,9 +5818,13 @@ async function exportVideoAviH264(data: any, canvas: HTMLCanvasElement, renderFr
     },
     null,
   );
+  // avcC(解码配置,含 SPS/PPS)来自首个 chunk 的 decoderConfig.description,必须拿到:
+  // 缺了它 AVI 的 strf 无法声明 H.264 参数集,播放器会黑屏或直接拒播
   if (!avcCLocal) throw new Error('未能获取 H.264 解码配置(avcC)');
 
   onProgress(99, '帧编码完成,正在组装 AVI(H.264)…');
+  // frameKeyFlags 决定 idx1 里每个帧块的 0x10(AVIIF_KEYFRAME)标志:H.264 的非关键帧无法单独解码,
+  // 标错会让播放器 / 剪辑软件 seek 之后花屏
   const blob = buildAvi(w, h, fr, 'H264', h264Strf(w, h, avcCLocal), '00dc', frames.map((f) => f.data), pcm16, numCh, audioRate, frames.map((f) => f.key));
   onProgress(100, 'AVI 组装完成,正在下载…');
   downloadBlob(blob, 'animation.avi');
@@ -5231,6 +5853,8 @@ function syncAnimFrameForExport(item: AnimationItem | null, frame: number) {
 /* 导出专用 Canvas 渲染器 patch:文字兜底 + 修复 getElementById 扫描未构建元素报错 */
 function patchExportCanvasRenderer(renderer: any) {
   patchCanvasRendererTree(renderer, true);
+  // 覆盖 getElementById:lottie 原实现直接读 this.elements[i].data,而元素数组在 buildItem 之前
+  // 存在空槽位 → 读 .data 抛 TypeError。导出是「按帧直渲」,元素未必都构建过,所以补上空值保护。
   renderer.getElementById = function (id: number) {
     const els = this.elements || [];
     for (let i = 0; i < els.length; i++) {
@@ -5251,6 +5875,8 @@ function patchExportCanvasRenderer(renderer: any) {
  *   克隆 <svg> → 剔除预载图片 → 内联外链图片与字体(SVG 以 <img> 加载时禁止外部资源)
  *   → Blob URL → <img> → drawImage 到合成画布。
  * 编码、音频、进度、取消全部沿用原导出管线,只把「取帧」这一步换掉。 */
+/* 统计动画里的遮罩相关图层:tt(轨道遮罩层,自身带 matte)、td(遮罩源层)、ty===5(文字层)。
+ * 预合成要递归进去(图层自己的 layers,以及 assets 里的预合成),否则共用遮罩藏在预合成里就检测不到。 */
 function countMatteLayers(data: any): { tt: number; td: number; text: number } {
   let tt = 0;
   let td = 0;
@@ -5270,6 +5896,8 @@ function countMatteLayers(data: any): { tt: number; td: number; text: number } {
 
 /* 需要兼容导出吗:被遮罩层(tt)多于遮罩源(td)说明遮罩源被共用,canvas 合成不可靠 */
 function needsSvgRasterExport(data: any): boolean {
+  // 判定是启发式:tt > td 只说明「有遮罩源被共用」,并不保证 canvas 一定出错;
+  // 但兼容导出的代价只是更慢(SVG 逐帧光栅化),画面正确优先于速度,所以宁可多走这条路。
   const { tt, td } = countMatteLayers(data);
   return tt > td;
 }
@@ -5284,12 +5912,15 @@ function fontBytesToBlobUrl(buf: ArrayBuffer, mime: string): string {
   svgRasterFontBlobUrls.push(url);
   return url;
 }
+// 释放本次导出创建的所有字体 blob URL(正常结束、失败、取消三条路径都会调到),
+// 不释放的话反复导出会持续累积内存占用。
 function releaseSvgRasterFontBlobUrls() {
   while (svgRasterFontBlobUrls.length) {
     const u = svgRasterFontBlobUrls.pop();
     if (u) URL.revokeObjectURL(u);
   }
 }
+// data URI 的 base64 主体 → 字节数组;atob 遇到非法字符会抛异常,这里捕获后返回 null(视为该字体不可用)
 function base64ToBytes(b64: string): Uint8Array | null {
   try {
     const bin = atob(b64);
@@ -5309,6 +5940,8 @@ async function buildSvgRasterFontCss(list: any[]): Promise<string> {
     const fam = fdef?.fFamily || fdef?.fName;
     if (!fam || seen.has(fam)) continue;
     seen.add(fam);
+    // 字体来源分两种:fPath 是 data URI 时直接转成 blob URL;
+    // 否则按 fFamily/fName 解析到打包好的 WOFF2(优先,逐帧解析成本约减半)或 TTF,并校验文件头再使用。
     let uri = '';
     const fPath = typeof fdef?.fPath === 'string' ? fdef.fPath : '';
     if (fPath.startsWith('data:')) {
@@ -5347,6 +5980,8 @@ let svgRasterLastImg: HTMLImageElement | null = null;
 
 /* 外链图片 → data URI 缓存(SVG 作为 <img> 加载时不能引用外部资源) */
 const svgRasterImageCache = new Map<string, string>();
+/* 外链图片 → data URI 并缓存(同一张图整个导出期间只读一次)。
+ * 必须内联的原因:SVG 以 <img> 加载时是「禁止外部资源」的独立文档,外部 http/blob 图片会被静默丢弃(画面缺图)。 */
 async function svgRasterInlineImage(href: string): Promise<string> {
   const hit = svgRasterImageCache.get(href);
   if (hit) return hit;
@@ -5375,10 +6010,14 @@ async function rasterizeSvgFrameToCtx(
   // lottie 的图片预载元素(序列帧 720 张)与字体 <style> 都不在画面上,序列化前剔除
   clone.querySelectorAll('defs image').forEach((n) => n.remove());
   clone.querySelectorAll('defs style').forEach((n) => n.remove());
+  // 强制按导出尺寸重建视口:clone 沿用了 lottie 写在 <svg> 上的尺寸属性,
+  // 不覆盖的话 <img> 会按原尺寸呈现,合成到输出画布上位置和大小都会错位。
   clone.setAttribute('width', String(w));
   clone.setAttribute('height', String(h));
   clone.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
   const imgs = Array.from(clone.querySelectorAll('image')) as SVGImageElement[];
+  // 逐个内联 <image> 的地址:同时写 xlink:href 与 href 两份(SVG 2 解析器读 href,老解析器只认 xlink:href),
+  // 本来就是 data: 的跳过;单张图失败不阻断整帧。
   for (const im of imgs) {
     const href = im.getAttributeNS(XLINK, 'href') || im.getAttribute('href') || '';
     if (!href || href.startsWith('data:')) continue;
@@ -5409,6 +6048,8 @@ async function rasterizeSvgFrameToCtx(
     octx.drawImage(svgRasterLastImg, 0, 0, w, h);
     return true;
   }
+  // 用 Blob URL 而不是 data URI:data URI 每帧都要把整份 SVG(数 MB)base64 编码一遍,
+  // 字符串还会膨胀约 1/3;Blob URL 由浏览器直接持有字节,解码完立刻 revoke。
   const url = URL.createObjectURL(new Blob([serialized], { type: 'image/svg+xml;charset=utf-8' }));
   try {
     const img = new Image();
@@ -5429,6 +6070,10 @@ async function rasterizeSvgFrameToCtx(
   }
 }
 
+/* 视频导出总入口(导出按钮点击)。
+ * 在页面上另建一套离屏渲染器(与预览实例隔离),用一张合成画布把「背景 + 主动画 + 弹窗」叠起来,
+ * 再按所选格式交给对应的导出函数(MP4 / AVI-H.264 / AVI 无压缩透明 / AVI-MJPEG 回退)。
+ * 进度浮层、取消、以及导出结束后恢复预览播放状态都在这里统一处理。 */
 async function exportVideo() {
   if (exporting || !currentData) return;
   exporting = true;
@@ -5446,6 +6091,7 @@ async function exportVideo() {
    * 因此导出帧率取 max(动画帧率, 60):30fps 动画导出 60fps(输出帧映射到小数动画帧,
    * lottie 线性插值),60fps 动画与原来完全一致,更高帧率的动画不降采样。 */
   const srcFps = data.fr || 60;
+  // 帧率上限 240 是护栏:源动画帧率再高也不超过它(正常素材远到不了)
   const fr = Math.min(240, Math.max(60, Math.round(srcFps)));
   const srcFrames = Math.max(1, Math.round((data.op ?? 0) - (data.ip ?? 0)));
   const totalFrames = Math.max(1, Math.round((srcFrames / srcFps) * fr));   // 时长不变,帧数按倍率增加
@@ -5455,6 +6101,7 @@ async function exportVideo() {
   const formatLabel = (format === 'avi'
     ? (wantTransparent ? 'AVI · 无压缩透明' : 'AVI · H.264')
     : 'MP4 · H.264') + ' · ' + fr + 'fps' + (fr !== srcFps ? '(插值)' : '') + popupTag;
+  // 无压缩透明 AVI 的体积 ≈ 宽 × 高 × 4 字节(BGRA)× 帧数,不含音频与封装开销
   const warn = wantTransparent
     ? '透明 AVI 为无压缩编码,预计文件约 ' + fmtSize(w * h * 4 * totalFrames) + ';已采用预乘 alpha(premultiplied),与 PotPlayer/Windows 渲染语义一致,半透明组件可正常显示。导出期间请勿关闭页面。'
     : undefined;
@@ -5476,9 +6123,13 @@ async function exportVideo() {
     setStatus(wantTransparent
       ? '导出中: 已选透明背景,自动导出 AVI…'
       : '导出中: 初始化渲染器…');
+    // 导出容器挂在文档里但推到视口外(left:-10000px):渲染器必须在文档中才能正确测量与绘制,
+    // 又不能被用户看到;dpr:1 让渲染像素 = 动画坐标像素,取帧时不需要任何缩放换算。
     container = document.createElement('div');
     container.style.cssText = 'position:fixed;left:-10000px;top:0;width:' + w + 'px;height:' + h + 'px;';
     document.body.appendChild(container);
+    // 另建一个独立 AnimationItem,不复用预览实例:导出要按帧号直渲(renderer.renderFrame),
+    // 复用会把用户的预览位置一并搞乱;音频仍走 audioFactory,避免 lottie 内部找不到 Howl 时报错。
     renderAnim = lottie.loadAnimation({
       container,
       renderer: useRaster ? 'svg' : 'canvas',
@@ -5503,6 +6154,7 @@ async function exportVideo() {
     } else {
       patchExportCanvasRenderer((renderAnim as any).renderer);
     }
+    // canvas 渲染器:lottie 把 <canvas> 建在容器里,取出它当「动画层」,每帧 drawImage 到合成画布
     let canvas: HTMLCanvasElement | null = null;
     if (!useRaster) {
       canvas = container.querySelector('canvas') as HTMLCanvasElement;
@@ -5514,6 +6166,7 @@ async function exportVideo() {
       : '';
     // 弹窗合成:导出时若开启弹窗,用同一帧号驱动弹窗渲染器,叠加到主动画之上
     if (withPopup) {
+      // 弹窗文字要先注册自带字体(FontFace):否则量文本宽度时用的是系统字体,排版会错位
       await loadEmbeddedFonts(popupData);
       popupExportContainer = document.createElement('div');
       popupExportContainer.style.cssText = 'position:fixed;left:-10000px;top:0;width:' + w + 'px;height:' + h + 'px;';
@@ -5546,6 +6199,8 @@ async function exportVideo() {
      * 用途:导出后画面看起来只有 30fps 时,先分清是「渲染侧丢了帧」还是
      * 「编码器/播放器把同一帧显示了两次」——自检报重复帧 → 渲染侧问题(有确切帧号);
      * 自检为 0 但播放仍重复 → 编码/播放侧问题(与渲染无关)。 */
+    // 自检缩略图 240×135(约 3.2 万像素):把合成帧缩到小图再取像素做指纹,
+    // 即便是 4K 帧也只读这么点数据,单帧成本不到 1ms,不会拖慢导出。
     const checkCanvas = document.createElement('canvas');
     checkCanvas.width = 240; checkCanvas.height = 135;
     const checkCtx = checkCanvas.getContext('2d', { willReadFrequently: true });
@@ -5559,6 +6214,10 @@ async function exportVideo() {
       for (let k = 0; k < d.length; k++) { h ^= d[k]; h = Math.imul(h, 16777619) >>> 0; }
       return h;
     };
+    /* 每帧渲染回调,参数 n 是【动画帧号】(可为小数,由 animFrameOf 映射得到):
+     * 顺序与 lottie 的 AnimationItem.renderFrame 保持一致 —— 先同步表达式与帧状态,再整帧强制重绘;
+     * 主动画与弹窗各渲染一次,然后依次叠到合成画布(透明模式不铺背景,保留 alpha)。
+     * 兼容导出时这里换成 SVG 光栅化,下游的编码 / 音频 / 进度完全无感。 */
     const renderFrame = async (n: number) => {
       const __t0 = import.meta.env.DEV ? performance.now() : 0;
       // 顺序与 lottie 的 AnimationItem.renderFrame 一致:先同步表达式/帧状态,再整帧强制重绘
@@ -5582,6 +6241,8 @@ async function exportVideo() {
         if (mainSvg) await rasterizeSvgFrameToCtx(mainSvg, octx, w, h, rasterStyleTag);
         const popupSvg = popupExportAnim ? ((popupExportAnim as any).renderer?.svgElement as SVGSVGElement | null) : null;
         if (popupSvg) await rasterizeSvgFrameToCtx(popupSvg, octx, w, h, rasterStyleTag);
+        // DEV 性能统计:把光栅化耗时(rasterMs)与整帧耗时(totalMs)累计到 window.__exportStats,
+        // 便于在控制台快速判断导出瓶颈在渲染还是在编码;生产构建里这段会被摇掉。
         if (import.meta.env.DEV) {
           const st = (window as any).__exportStats || ((window as any).__exportStats = { frames: 0, rasterMs: 0, totalMs: 0 });
           st.rasterMs += performance.now() - __tr;
@@ -5603,8 +6264,11 @@ async function exportVideo() {
         checkedFrames++;
       }
     };
+    // 各导出函数统一从合成画布取帧:它们只管编码与封装,不关心画面上叠了哪些图层
     const srcCanvas = outCanvas;
 
+    // 格式分发:AVI 有三条路(透明无压缩 → H.264 → MJPEG 回退);
+    // MP4 只有 WebCodecs 一条路(不支持时 exportVideoMp4 内部会直接抛错)
     if (format === 'avi') {
       if (wantTransparent) {
         await exportVideoAvi(data, srcCanvas, renderFrame, totalFrames, fr, (p, detail) => {
@@ -5637,6 +6301,7 @@ async function exportVideo() {
         + '(画面静止段或运动极慢时属正常,不代表导出丢帧)';
     finishExportOverlay('done', '导出完成', '文件已开始下载' + dupNote);
     setStatus('导出完成' + dupNote);
+  // 取消与失败分开处理:取消是用户主动行为,静默收尾即可;失败要打完整堆栈并回显可读原因
   } catch (e) {
     if (e instanceof ExportCancelledError) {
       finishExportOverlay('cancel', '已取消导出', '未生成文件');
@@ -5646,6 +6311,8 @@ async function exportVideo() {
       finishExportOverlay('error', '导出失败', (e as Error).message);
       setStatus('导出失败: ' + (e as Error).message, true);
     }
+  // 收尾(成功 / 失败 / 取消都会走到):释放字体 blob URL、销毁导出专用渲染器与容器、解除按钮锁,
+  // 并恢复导出前的预览播放状态(导出开始时被主动暂停,见 previewWasPlaying)。
   } finally {
     releaseSvgRasterFontBlobUrls();
     if (renderAnim) { try { renderAnim.destroy(); } catch { /* ignore */ } }
@@ -5659,6 +6326,7 @@ async function exportVideo() {
   }
 }
 
+// 导出按钮:所有选项(格式 / 透明 / 背景色 / 弹窗)都在 exportVideo 内部实时读取
 btnExport.addEventListener('click', exportVideo);
 
 /* 动画选择器:切换撤离 / 位置暴露 / 核电站功率动画 */
@@ -5683,4 +6351,5 @@ async function bootApp() {
     });
   }
 }
+// 立即启动且不 await:数据包下载与首屏渲染互不阻塞,进度交给加载界面呈现
 void bootApp();

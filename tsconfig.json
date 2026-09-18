@@ -1,3 +1,21 @@
+/* TypeScript 配置。注意:JSON 带注释是被允许的,tsc 与编辑器都按 JSONC 解析本文件。
+ * 本项目 TS 只做类型检查不做转译:package.json 的 build 是「tsc && vite build」,
+ * 转译交给 Vite 的 esbuild,所以这里 noEmit: true,单独跑类型检查用 npx tsc --noEmit 即可。
+ * 各字段用途:
+ *  - target ES2022 + lib ES2022 / DOM / DOM.Iterable:产物面向现代浏览器
+ *    (依赖 WebCodecs、OffscreenCanvas、File System Access),不做低版本降级;
+ *    DOM.Iterable 是为了能直接 for...of 遍历 NodeList / HTMLCollection;
+ *  - module ESNext + moduleResolution bundler:按打包器语义解析裸模块与 package.json 的 exports,
+ *    因此允许省略扩展名的相对导入;
+ *  - strict:开启全部严格检查(null 检查、隐式 any 报错等);
+ *    main.ts 里有大量 DOM 查询与可空状态,靠它暴露漏判;
+ *  - skipLibCheck:跳过 node_modules 里 .d.ts 之间的互相检查,缩短检查时间,不影响自身代码;
+ *  - isolatedModules:要求每个文件都能独立转译(esbuild 逐文件处理的前提),
+ *    因此不能用 const enum、跨文件 re-export 类型这类需要全局信息的写法;
+ *  - esModuleInterop:让 import fs from 'node:fs' 这类 CJS 默认导入可用(vite.config.ts 就用到);
+ *  - useDefineForClassFields:类字段按 ES 标准用 defineProperty 定义,与 target ES2022 的原生语义一致。
+ * include 只收 src:src/vite-env.d.ts 提供 Vite 的资源类型声明;
+ * vite.config.ts 由 Vite 自己用 esbuild 加载,不参与这里的类型检查。 */
 {
   "compilerOptions": {
     "target": "ES2022",
