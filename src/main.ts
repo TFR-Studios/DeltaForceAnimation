@@ -30,6 +30,8 @@ import './style.css';
 /* 音效资源:独立小文件(?url 打包为静态资源),不进入大体积动画数据 chunk */
 import bundledAudioUrl from '../animation/gunmuchenggong.mp3?url';
 import exposedAudioUrl from '../animation_2/UI_C201_Energy_Scout_Bow_Scout_02.wav?url';
+/* 核电站功率动画音效(48kHz 立体声,约 6.0s,与 359 帧 @60fps 基本等长) */
+import blindsAudioUrl from '../animation_3/反应堆音效.wav?url';
 
 /* 共享字体资源的静态地址。
  * 不要写成 import ... from '*.ttf?url':Vite 7 的 dev server 对「模块请求 + ?url」
@@ -4156,7 +4158,11 @@ async function ensureExposedData(onProgress?: (p: number | null) => void): Promi
  * 为每一帧 PNG 建一条资源和一个图片层（src 逐帧关键帧）→ 按 place 插进图层数组。
  * 注意：原地修改并返回传入的 base（不深拷贝），且不做去重 —— 对同一份数据重复调用会重复
  * 追加图层与资源，因此只允许执行一次（由 ensureBlindsData 的缓存保证）。 */
-function buildBlindsComposite(base: any, seqs: { name: string; urls: string[]; place?: 'top' | 'belowDigits' }[]): any {
+function buildBlindsComposite(
+  base: any,
+  seqs: { name: string; urls: string[]; place?: 'top' | 'belowDigits' }[],
+  audioUrl: string,
+): any {
   const data = base;
   data.assets = data.assets ?? [];
   data.layers = data.layers ?? [];
@@ -4194,6 +4200,26 @@ function buildBlindsComposite(base: any, seqs: { name: string; urls: string[]; p
    * 图层 ind 从现有最大值继续递增，避免与内置图层撞号。 */
   const taken = new Set<string>(data.assets.map((a: any) => a.id));
   let maxInd = data.layers.reduce((m: number, l: any) => Math.max(m, l.ind ?? 0), 0);
+  /* 音效:animation_3 的 JSON 里原本没有音频层,这里注入「音频资源 + 音频层」——
+   * 结构与另外两套动画一致(资源 t:2 / 层 ty:6 + cl + refId),音量统一按站点音量 AUDIO_VOLUME。 */
+  if (audioUrl) {
+    data.assets.push({ id: 'audio_0', u: '', p: audioUrl, e: 1, t: 2 });
+    data.layers.push({
+      ddd: 0,
+      ind: ++maxInd,
+      ty: 6,
+      nm: '反应堆音效.wav',
+      cl: 'wav',
+      refId: 'audio_0',
+      sr: 1,
+      ao: 0,
+      au: { lv: { a: 0, k: [Math.round(AUDIO_VOLUME * 100)], ix: 1 } },
+      ip: data.ip ?? 0,
+      op: data.op ?? 359,
+      st: 0,
+      bm: 0,
+    });
+  }
   const injectedTop: any[] = [];       // 叠在最上层
   const injectedBelowDigits: any[] = []; // 紧跟五个数字位之下
   seqs.forEach((seq, si) => {
@@ -4262,8 +4288,10 @@ async function ensureBlindsData(onProgress?: (p: number | null) => void): Promis
   }
   blindsDataPromise = (async () => {
     try {
+      // 音效与数据包并行预取(不放到启动预载里:1.1MB,只有切到本动画才需要)
+      void audioFactory(blindsAudioUrl);
       const [raw] = await fetchJsonBundle([animation3DataUrl], onProgress);
-      blindsData = buildBlindsComposite(JSON.parse(raw), BLINDS_SEQUENCES);
+      blindsData = buildBlindsComposite(JSON.parse(raw), BLINDS_SEQUENCES, blindsAudioUrl);
     } catch (e) {
       console.error('[核电站功率动画数据解析失败]', e);
       setStatus('核电站功率动画数据解析失败: ' + (e as Error).message, true);
@@ -4515,7 +4543,7 @@ type AnimDef = { key: string; label: string; data: () => any; popup: () => any; 
 const ANIMATIONS: AnimDef[] = [
   { key: 'extraction', label: '撤离动画', data: () => bootAnimation, popup: () => popupData, audio: bundledAudioUrl },
   { key: 'exposed', label: '位置暴露动画', data: () => animation2Data, popup: () => null, audio: exposedAudioUrl },
-  { key: 'blinds', label: '核电站功率动画', data: () => blindsData, popup: () => null, audio: null },
+  { key: 'blinds', label: '核电站功率动画', data: () => blindsData, popup: () => null, audio: blindsAudioUrl },
 ];
 let currentAnimKey = 'extraction';
 

@@ -51,7 +51,7 @@
 |---|---|---|---|
 | 撤离动画 | `animation/animation_data.json` | `animation/gunmuchenggong.mp3` | 含弹窗叠加层,侧栏可编辑弹窗文字/颜色/宽度 |
 | 位置暴露动画 | `animation_2/animation_data.json`(+二次扫描段) | `animation_2/UI_C201_Energy_Scout_Bow_Scout_02.wav` | 主段 + 可选「二次扫描」段;两段图标可分别替换/隐藏、底框随文字自适应 |
-| 核电站功率动画 | `animation_3/animation_data.json` + `animation_3/png resources/{99999,百叶窗}/` | — | 底层 HUD 动画上叠加两条 359 帧 PNG 序列(默认开启);两条序列在侧栏「图片图层」里显示为**模糊效果**(99999)与**百叶窗**,可改色/调透明度;另有五个数字位文字层(第一位~第五位)颜色联动 |
+| 核电站功率动画 | `animation_3/animation_data.json` + `animation_3/png resources/{99999,百叶窗}/` | `animation_3/反应堆音效.wav` | 底层 HUD 动画上叠加两条 359 帧 PNG 序列(默认开启);两条序列在侧栏「图片图层」里显示为**模糊效果**(99999)与**百叶窗**,可改色/调透明度;另有五个数字位文字层(第一位~第五位)颜色联动 |
 
 三套动画均为 60fps;画布尺寸:撤离动画 1920×1080,位置暴露动画 3840×1080(内容按实测中心平移居中,导出分辨率与之相同),核电站功率动画 1920×1080。
 
