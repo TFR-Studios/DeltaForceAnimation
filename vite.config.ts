@@ -1,6 +1,6 @@
 /* Vite 配置(唯一构建入口,package.json 的 dev / build / preview 都走这里)。三块内容:
  *  1) server.port:固定开发端口;
- *  2) build.rollupOptions.output.manualChunks:把三套大体积动画 JSON 拆成独立 chunk,
+ *  2) build.rollupOptions.output.manualChunks:把各套动画的 JSON 拆成独立 chunk,
  *     否则全部打进主 chunk 会超过 Cloudflare Pages 单文件 25 MiB 的上限;
  *  3) plugins:只有一个开发专用中间件(/save-avi),只在 dev 下生效,不进产物。
  * 产物是纯静态站点(outDir、base 均沿用 Vite 默认值),可直接托管。 */
@@ -26,12 +26,14 @@ export default defineConfig({
         /* 规则按顺序判断,返回 chunk 名即把该模块归入该 chunk,返回 undefined 表示沿用默认分包。
          * id 先去掉 ?url / ?raw 之类的查询串并统一成 '/' 分隔:否则 Windows 下的反斜杠路径与带查询串的 id 会匹配不上,
          * 分包静默失效,构建又会撞回 25 MiB 上限。
-         * 三个分支分别是:撤离(animation/animation_data.json 与 windows animation/windows_animation.json)、
-         * 位置暴露(animation_2/ 下的 animation_data*.json)。 */
+         * 各分支分别是:撤离(animation/animation_data.json 与 windows animation/windows_animation.json)、
+         * 位置暴露(animation_2/ 下的 animation_data*.json)、任务弹窗(animation_4/animation_data.json)。 */
         manualChunks(id: string) {
           const q = id.split('?')[0].replace(/\\/g, '/');
           if (q.endsWith('animation/animation_data.json') || q.includes('windows animation/windows_animation.json')) return 'data-extraction';
           if (q.includes('/animation_2/') && /[\/]animation_data.*\.json$/.test(q)) return 'data-exposed';
+          // 任务弹窗动画的数据只有一个 JSON(62KB 左右),分包不影响上限,这里单独成 chunk 只为与其它动画一致
+          if (q.includes('/animation_4/') && /[\/]animation_data\.json$/.test(q)) return 'data-mission';
           return undefined;
         },
       },

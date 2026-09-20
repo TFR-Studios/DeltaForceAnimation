@@ -16,6 +16,9 @@ tools/*.avi
 # ç”¨æˆ·å¯¼å‡ºçš„è§†é¢‘(é¿å…æäº¤ GitHub)
 /*.avi
 
-# ´óÌå»ıµ÷ÊÔ×ª´¢(³¬ GitHub 100MB ÏŞÖÆ,²»Èë¿â)
+# ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½×ªï¿½ï¿½(ï¿½ï¿½ GitHub 100MB ï¿½ï¿½ï¿½ï¿½,ï¿½ï¿½ï¿½ï¿½ï¿½)
 tools/.frames.raw
 
+
+# AE video-layer footage inside animation_4 (unused by the site, can be GBs)
+animation_4/images/*.mp4

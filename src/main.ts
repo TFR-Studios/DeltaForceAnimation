@@ -13,11 +13,16 @@
  *   图片序列驱动(逐帧换 src / <image> href,并强制 lottie 重绘,否则静态层画过一次就不再更新)、
  *   叠加序列调色(feColorMatrix 做 colorize,滤镜宿主挂在 body 的隐藏 svg 上,预览与导出共用)。
  *
- * 三套动画(ANIMATIONS,按需加载):撤离动画(1920×1080)、位置暴露动画(画布加宽为 3840×1080,
- *   可把「二次扫描」第二段合并进同一条时间轴)、核电站功率动画(两条 359 帧透明序列叠加)。
+ * 四套动画(ANIMATIONS,按需加载):撤离动画(1920×1080)、位置暴露动画(画布加宽为 3840×1080,
+ *   可把「二次扫描」第二段合并进同一条时间轴)、核电站功率动画(两条 359 帧透明序列叠加)、
+ *   任务弹窗动画(1920×1080,自带一枚货币图标,可在「图标选择」里替换/上传并调不透明度)。
  *
- * 编辑面板:文字 / 形状 / 图片图层列表、图标替换、弹窗叠加层、动画时长(1–10s)与二次扫描时长。
- *   所有编辑都是就地改渲染用的 JSON,再走 reRenderPreservingState() 单飞重建并恢复播放位置。
+ * 编辑面板(所有编辑都是就地改渲染用的 JSON,再走 reRenderPreservingState() 单飞重建并恢复播放位置):
+ *   • 文字 / 形状 / 图片图层列表 —— 顶层与被引用的预合成(assets[] 里的合成)内部都列出,预合成项名字带「合成名 ›」前缀;
+ *     预合成内部的 ind 会和顶层撞号,载入时统一平移到独立号段(见 normalizePrecompInds);
+ *   • 主题颜色 —— 两个色块把「默认填充色 / 描边默认色」两族颜色值整族替换(按颜色值匹配,填充与描边一起换);
+ *   • 图标替换(位置暴露两段可分别设置;任务弹窗动画单图标位)、图标不透明度、弹窗叠加层、动画时长(1–10s)与二次扫描时长;
+ *   • 占位色不作为编辑项展示:纯红填充 #ff0000、纯白描边 #ffffff、预合成里的紫色描边 #5400ff(判据见 hideShapeFill / hideShapeStroke)。
  *
  * 导出管线:逐帧 renderer.renderFrame(n, true) 渲染 → WebCodecs H.264 编码 → mp4-muxer 封装 MP4;
  *   需要透明时走自封装 AVI(无压缩 BGRA + 预乘 alpha);浏览器不支持 WebCodecs 时回退 MJPEG AVI;
@@ -991,12 +996,24 @@ const imageSection = $<HTMLDivElement>('imageSection');
 const imageList = $<HTMLUListElement>('imageList');
 const imageCount = $<HTMLElement>('imageCount');
 
+const themeSection = $<HTMLDivElement>('themeSection');
+const themeCount = $<HTMLElement>('themeCount');
+const themeFill = $<HTMLInputElement>('themeFill');
+const themeStroke = $<HTMLInputElement>('themeStroke');
+const btnThemeReset = $<HTMLButtonElement>('themeReset');
+
 const iconSection = $<HTMLDivElement>('iconSection');
 const iconList = $<HTMLUListElement>('iconList');
 const iconCount = $<HTMLElement>('iconCount');
 const iconFile = $<HTMLInputElement>('iconFile');
 const chkIcon = $<HTMLInputElement>('chkIcon');
 const iconNudgeRow = $<HTMLDivElement>('iconNudgeRow'); // 居中微调行:仅「显示图标」取消勾选(图标隐藏)后显示
+const iconToggleRow = $<HTMLLabelElement>('iconToggleRow'); // 「显示图标」开关行:仅位置暴露动画显示
+const iconScopeTabs = $<HTMLDivElement>('iconScopeTabs'); // 分段选项卡容器:仅位置暴露动画显示
+/* 图标不透明度(仅任务弹窗动画):图标是普通位图图层,直接改图层不透明度 */
+const iconOpacityRow = $<HTMLDivElement>('iconOpacityRow');
+const iconOpacitySlider = $<HTMLInputElement>('iconOpacitySlider');
+const iconOpacityVal = $<HTMLSpanElement>('iconOpacityVal');
 /* 图标选择的分段选项卡:位置暴露(主段)/ 二次扫描(第二段)分别自定义图标 */
 const iconScopeMain = $<HTMLButtonElement>('iconScopeMain');
 const iconScopeNext = $<HTMLButtonElement>('iconScopeNext');
@@ -1074,9 +1091,13 @@ async function loadData(data: any, name: string) {
     defaultDurationApplied = true;
     applyMainDuration(data, 1.25);
   }
+  /* 预合成内部图层的 ind 挪到独立号段(幂等):侧栏要能编辑预合成里的文字/形状/图片,
+   * 而它们的 ind 只在各自合成内唯一,会与顶层撞号(详见 normalizePrecompInds 的注释)。
+   * 必须在任何「按 ind 快照/查找」之前执行,否则快照会记到错误图层上。 */
+  normalizePrecompInds(data);
   // 「原始状态」捕获必须放在时长压缩之后:applyMainDuration 会把各图层末尾淡出
   // 关键帧平移到压缩后的出点(如文字层由 47→61 帧改为 61→75 帧)。若在压缩前捕获,
-  // 点图层「重置」会恢复成压缩前的淡出时刻,导致该图层与其余图层渐隐不同步(乱套)。
+  // 点图层「重置」会恢复成压缩前的渐出时刻,导致该图层与其余图层渐隐不同步(乱套)。
   captureOriginalState(data);
   captureOriginalShapeState(data);
   captureOpacityState(data);
@@ -1092,8 +1113,9 @@ async function loadData(data: any, name: string) {
   setStatus('字体加载中…');
   await loadEmbeddedFonts(data);
   if (seq !== loadSeq) return; // 载入期间又发起了新的载入请求
-  // 「显示图标」开关未勾选时,对刚载入的数据应用隐藏(图标透明度置 0 + 文字居中)
-  if (!chkIcon.checked) setIconVisible(false, false);
+  // 「显示图标」开关未勾选时,对刚载入的数据应用隐藏(图标透明度置 0 + 文字居中)。
+  // 这套位移逻辑只对位置暴露动画成立(图层号、底框都在那段数据里写死),其它动画走「图标不透明度」。
+  if (!chkIcon.checked && iconToggleApplies()) setIconVisible(false, false);
   try {
     /* lottie 实例化:renderer 由下拉框决定(SVG / Canvas 是两条不同的渲染管线,patch 也不同);
      * autoplay 恒开 —— 是否循环由 chkLoop 控制;音效走上面注入的 audioFactory(修复 Howl 缺失导致的崩溃)。 */
@@ -1676,13 +1698,9 @@ function textOfLayer(l: any): string {
  * 因此藏在预合成里的文字也能被 findLayerByInd 找回来。 */
 function collectTextLayers(data: any): { nm: string; ind: number; text: string }[] {
   const out: { nm: string; ind: number; text: string }[] = [];
-  const walk = (layers: any[]) => {
-    for (const l of layers ?? []) {
-      if (l.ty === 5) out.push({ nm: l.nm ?? '(未命名)', ind: l.ind, text: textOfLayer(l) });
-      if (Array.isArray(l.layers)) walk(l.layers);
-    }
-  };
-  walk(data.layers);
+  walkEditableLayers(data, (l, precompName) => {
+    if (l.ty === 5) out.push({ nm: displayLayerName(l.nm, precompName), ind: l.ind, text: textOfLayer(l) });
+  });
   return out;
 }
 
@@ -1859,7 +1877,7 @@ const originalTextState = new Map<number, { text: string; fc: number[] }>();
 function captureOriginalState(data: any) {
   originalTextState.clear();
   for (const t of collectTextLayers(data)) {
-    const layer = findLayerByInd(data.layers, t.ind);
+    const layer = findLayerInData(data, t.ind);
     if (!layer) continue;
     const td = layer.t?.d?.k;
     const s = (Array.isArray(td) ? td[0]?.s : td?.s) || {};
@@ -1926,7 +1944,7 @@ function updateInfo(data: any) {
   let digitColorHostDone = false;
   textList.innerHTML = texts
     .map((t) => {
-      const layer = findLayerByInd(data.layers, t.ind);
+      const layer = findLayerInData(data, t.ind);
       const td = layer?.t?.d?.k;
       const s = (Array.isArray(td) ? td[0]?.s : td?.s) || {};
       const hex = fcToHex(s.fc);
@@ -2010,8 +2028,8 @@ function updateInfo(data: any) {
   }
 }
 
-/* ---------- 文字编辑 ---------- */
-/* 按图层 ind 深度查找图层(含预合成内部),找不到返回 null。
+/* ---------- 图层查找与「预合成内部图层」的编号 ---------- */
+/* 按图层 ind 深度查找图层(含图层自己内嵌的 layers 数组),找不到返回 null。
  * ind 在侧栏 HTML 里以 data-ind 传递(字符串),调用方需先 Number() 转换。
  * 不做 ind → layer 的常驻索引:每次编辑都会改写 JSON 结构,缓存容易失效,而层级本身很浅。 */
 function findLayerByInd(layers: any[], ind: number): any | null {
@@ -2024,6 +2042,123 @@ function findLayerByInd(layers: any[], ind: number): any | null {
   }
   return null;
 }
+
+/* ---------- 预合成内容(data.assets[] 里的合成) ----------
+ * Bodymovin 把预合成的内容放在 data.assets[] 里(顶层用 refId 引用),那些图层不在 data.layers 上,
+ * 而且它们的 ind 只在**自己那个合成内**唯一 —— 例:任务弹窗动画的预合成「框」里也有 ind 1/2/3,
+ * 与顶层 ind 直接撞号。侧栏所有编辑控件都用 data-ind 回查图层,撞号就会改错层。
+ * 因此载入时把「被引用到的预合成」内部图层 ind 整体平移到独立号段(PRECOMP_IND_BASE),
+ * 同一合成内的 parent(父子关系)与 tp(遮罩源)一起平移:这两者都只在合成内解析,
+ * lottie 的渲染结果不受影响(有逐像素对比验证)。平移是幂等的(已平移过就跳过)。 */
+const PRECOMP_IND_BASE = 100000;
+/* 图层名里标注来源合成,便于在侧栏区分(顶层图层保持原样) */
+const PRECOMP_NAME_SEP = ' › ';
+
+/* 被引用的预合成 id(递归:预合成里还能再引用预合成) */
+function referencedPrecompIds(data: any): Set<string> {
+  const ids = new Set<string>();
+  const byId = new Map<string, any>();
+  for (const a of data?.assets ?? []) if (Array.isArray(a?.layers)) byId.set(String(a.id), a);
+  const queue: any[] = [data?.layers ?? []];
+  while (queue.length) {
+    const layers = queue.pop() as any[];
+    for (const l of layers ?? []) {
+      if (Array.isArray(l?.layers)) queue.push(l.layers);
+      const ref = l?.refId;
+      if (typeof ref === 'string' && byId.has(ref) && !ids.has(ref)) {
+        ids.add(ref);
+        queue.push(byId.get(ref).layers);
+      }
+    }
+  }
+  return ids;
+}
+
+/* 被引用的预合成资源对象(顺序与 assets 一致) */
+function referencedPrecompAssets(data: any): any[] {
+  const ids = referencedPrecompIds(data);
+  return (data?.assets ?? []).filter((a: any) => Array.isArray(a?.layers) && ids.has(String(a.id)));
+}
+
+/* 平移一个集合内所有图层的 ind / parent / tp(递归图层的 layers 数组)。 */
+function offsetCompositionInds(layers: any[], delta: number) {
+  const map = new Map<number, number>();
+  const collect = (ls: any[]) => {
+    for (const l of ls ?? []) {
+      if (typeof l?.ind === 'number') map.set(l.ind, l.ind + delta);
+      if (Array.isArray(l?.layers)) collect(l.layers);
+    }
+  };
+  collect(layers);
+  const apply = (ls: any[]) => {
+    for (const l of ls ?? []) {
+      if (typeof l?.ind === 'number' && map.has(l.ind)) l.ind = map.get(l.ind) as number;
+      if (typeof l?.parent === 'number' && map.has(l.parent)) l.parent = map.get(l.parent) as number;
+      if (typeof l?.tp === 'number' && map.has(l.tp)) l.tp = map.get(l.tp) as number;
+      if (Array.isArray(l?.layers)) apply(l.layers);
+    }
+  };
+  apply(layers);
+}
+
+/* 载入时调用一次:把被引用的预合成内部 ind 挪到独立号段(幂等)。 */
+function normalizePrecompInds(data: any) {
+  for (const a of referencedPrecompAssets(data)) {
+    const layers: any[] = a.layers ?? [];
+    if (layers.some((l: any) => (l?.ind ?? 0) >= PRECOMP_IND_BASE)) continue; // 已平移过
+    offsetCompositionInds(layers, PRECOMP_IND_BASE);
+  }
+}
+
+/* 在「顶层 + 被引用的预合成」里按 ind 找图层 —— 侧栏编辑统一走这里。 */
+function findLayerInData(data: any, ind: number): any | null {
+  const hit = findLayerByInd(data?.layers, ind);
+  if (hit) return hit;
+  for (const a of referencedPrecompAssets(data)) {
+    const found = findLayerByInd(a.layers, ind);
+    if (found) return found;
+  }
+  return null;
+}
+
+/* 遍历「顶层 + 被引用的预合成」里的全部图层;回调第二参是该图层所属预合成的名字(顶层为空串)。
+ * 为什么必须去重:lottie 的 completeData 会把预合成的图层数组**内联**到引用它的图层上
+ * (顶层「框」图层会多出一个 layers 字段,指向 assets 里同一个数组、同一批对象),
+ * 不去重的话预合成内容会被走两遍 —— 列表出现重复项,而且一份带前缀一份不带。 */
+function walkEditableLayers(data: any, cb: (layer: any, precompName: string) => void) {
+  /* 先记录「哪些图层属于哪个预合成」:内联副本与 assets 里是同一批对象,所以按对象身份就能识别来源,
+   * 即使列表是从顶层开始遍历的,也能给它们带上正确的合成名前缀。 */
+  const precompOf = new Map<any, string>();
+  const mark = (layers: any[], id: string) => {
+    for (const l of layers ?? []) {
+      if (!l) continue;
+      if (!precompOf.has(l)) precompOf.set(l, id);
+      if (Array.isArray(l.layers)) mark(l.layers, id);
+    }
+  };
+  const assets = referencedPrecompAssets(data);
+  for (const a of assets) mark(a.layers ?? [], String(a.id));
+
+  const seen = new Set<any>();
+  const walk = (layers: any[]) => {
+    for (const l of layers ?? []) {
+      if (!l || seen.has(l)) continue;
+      seen.add(l);
+      cb(l, precompOf.get(l) ?? '');
+      if (Array.isArray(l?.layers)) walk(l.layers);
+    }
+  };
+  walk(data?.layers);
+  for (const a of assets) walk(a.layers);
+}
+
+/* 列表里显示的图层名:预合成内容加「合成名 › 」前缀,顶层保持原名。 */
+function displayLayerName(nm: string | undefined, precompName: string): string {
+  const base = nm || '(未命名)';
+  return precompName ? precompName + PRECOMP_NAME_SEP + base : base;
+}
+
+/* ---------- 文字编辑 ---------- */
 
 /* 文字对齐由动画数据的 j 字段原生处理(lottie 每帧按实际文字宽度对齐):
  * - j=2 居中:文本绕锚点(即父级定位点)居中,任意自定义文字宽度都保持居中;
@@ -2049,7 +2184,7 @@ let textEditTimer: number | undefined;
  * 重建由 reRenderPreservingState 负责保留当前帧/播放状态/缩放。 */
 function onTextEdited(ind: number, newText: string) {
   if (!currentData) return;
-  const layer = findLayerByInd(currentData.layers, ind);
+  const layer = findLayerInData(currentData, ind);
   if (!layer) return;
   setLayerText(layer, newText);
   adaptDikuangWidth(); // 文字宽度变化 → 底框宽度同步
@@ -2084,7 +2219,7 @@ function syncDigitColorInputs(hex: string, exceptInd?: number) {
   for (const ci of textList.querySelectorAll<HTMLInputElement>('.t-color')) {
     const ciInd = Number(ci.dataset.ind);
     if (ciInd === exceptInd) continue;
-    const l = currentData ? findLayerByInd(currentData.layers, ciInd) : null;
+    const l = currentData ? findLayerInData(currentData, ciInd) : null;
     if (l && isSingleDigitTextName(l.nm)) setColorPickerValue(ci, hex);
   }
 }
@@ -2094,7 +2229,7 @@ function syncDigitColorInputs(hex: string, exceptInd?: number) {
  * 与文字编辑共用 textEditTimer,两类编辑不会各自排队重复重建。 */
 function onColorChanged(ind: number, hex: string) {
   if (!currentData) return;
-  const layer = findLayerByInd(currentData.layers, ind);
+  const layer = findLayerInData(currentData, ind);
   if (!layer) return;
   // 数字位:一个改色 → 五个一起改(并同步侧栏其它行的取色器)
   const group = isSingleDigitTextName(layer.nm) ? digitTextLayers(currentData) : [layer];
@@ -2112,7 +2247,7 @@ function onResetText(ind: number) {
   if (!currentData) return;
   const orig = originalTextState.get(ind);
   if (!orig) return;
-  const layer = findLayerByInd(currentData.layers, ind);
+  const layer = findLayerInData(currentData, ind);
   if (!layer) return;
   setLayerText(layer, orig.text);
   // 数字位同组:颜色也一起还原,避免「重置一个」后五个颜色不一致
@@ -2136,6 +2271,129 @@ function onResetText(ind: number) {
   }, 250);
 }
 
+/* ---------- 主题颜色(两个颜色值统一替换) ----------
+ * 这套素材的配色归成两族(两个颜色值):A 族出厂 #77B0F0、B 族出厂 #78C5F3。
+ * 侧栏给两个色块,改一次就把**当前动画里等于该颜色值的所有出现**(不论它落在填充 fl 还是描边 st)
+ * 一起换掉,含预合成内部 —— 用于整体换主题色。
+ * 判据是「该族当前的颜色值」而不是写死的出厂值:改过一次之后数据里的颜色已经变了,
+ * 下一次替换要从新颜色继续,所以状态记在 themeFillCurrent / themeStrokeCurrent 里。
+ * 静态色与带关键帧的颜色都覆盖;文字颜色(fc)与图片调色不在这两族的范围内。 */
+const THEME_FILL_DEFAULT = '#77b0f0';
+const THEME_STROKE_DEFAULT = '#78c5f3';
+let themeFillCurrent = THEME_FILL_DEFAULT;
+let themeStrokeCurrent = THEME_STROKE_DEFAULT;
+
+/* 归一化:#RRGGBB → #rrggbb,便于比较(数据里大小写混用) */
+function normHex(hex: string | null | undefined): string {
+  return String(hex || '').trim().toLowerCase();
+}
+
+/* 把一处颜色属性里与 from 相同的静态色/关键帧色换成 to,返回替换次数。 */
+function replaceShapeColorValue(c: any, from: string, to: string): number {
+  if (!c) return 0;
+  let n = 0;
+  if (c.a === 0) {
+    if (Array.isArray(c.k) && c.k.length >= 3 && normHex(fcToHex(c.k)) === from) {
+      c.k = hexToFc(to, c.k);
+      n++;
+    }
+    return n;
+  }
+  if (Array.isArray(c.k)) {
+    for (const kf of c.k) {
+      const v = Array.isArray(kf?.s) ? kf.s : Array.isArray(kf?.e) ? kf.e : null;
+      if (v && v.length >= 3 && normHex(fcToHex(v)) === from) {
+        const next = hexToFc(to, v);
+        for (let i = 0; i < 3; i++) v[i] = next[i];
+        n++;
+      }
+    }
+  }
+  return n;
+}
+
+/* 统计当前动画里两族颜色各有多少处(用于显示计数与决定区块是否出现)。
+ * 按「颜色值」统计,不区分它落在填充还是描边上 —— 与替换的口径保持一致。 */
+function countThemeColors(data: any): { fill: number; stroke: number } {
+  let fill = 0;
+  let stroke = 0;
+  walkEditableLayers(data, (l) => {
+    // 蒙版源图层(td=1)不参与:它们不渲染,填充色往往是绿色占位色,扫进来只会在"主题色恰好是绿色"时误伤
+    if (l.ty !== 4 || l.td === 1) return;
+    const walkItems = (items: any[]) => {
+      for (const it of items ?? []) {
+        if (it.ty === 'fl' || it.ty === 'st') {
+          const c = it.c;
+          const vals: string[] = [];
+          if (c?.a === 0 && Array.isArray(c.k)) vals.push(normHex(fcToHex(c.k)));
+          else if (c?.a === 1 && Array.isArray(c.k)) for (const kf of c.k) { const v = Array.isArray(kf?.s) ? kf.s : null; if (v) vals.push(normHex(fcToHex(v))); }
+          for (const v of vals) {
+            if (v === themeFillCurrent) fill++;
+            else if (v === themeStrokeCurrent) stroke++;
+          }
+        }
+        if (Array.isArray(it.it)) walkItems(it.it);
+      }
+    };
+    walkItems(l.shapes);
+  });
+  return { fill, stroke };
+}
+
+/* 把某一族颜色值整族换掉(kind: 'fill' | 'stroke' 只是标识哪一族),返回替换处数。
+ * 注意:替换按**颜色值**匹配,填充与描边都换 —— 同一族颜色在这套素材里两种位置都出现过。 */
+function applyThemeColor(kind: 'fill' | 'stroke', hex: string): number {
+  if (!currentData) return 0;
+  const from = kind === 'fill' ? themeFillCurrent : themeStrokeCurrent;
+  const to = normHex(hex);
+  if (!/^#[0-9a-f]{6}$/.test(to) || to === from) return 0;
+  let n = 0;
+  walkEditableLayers(currentData, (l) => {
+    if (l.ty !== 4 || l.td === 1) return; // 蒙版源图层不渲染,跳过(理由见 countThemeColors)
+    const walkItems = (items: any[]) => {
+      for (const it of items ?? []) {
+        if (it.ty === 'fl' || it.ty === 'st') n += replaceShapeColorValue(it.c, from, to);
+        if (Array.isArray(it.it)) walkItems(it.it);
+      }
+    };
+    walkItems(l.shapes);
+  });
+  if (kind === 'fill') themeFillCurrent = to;
+  else themeStrokeCurrent = to;
+  return n;
+}
+
+/* 同步两个色块的显示值与计数(切换动画、改色之后都要刷新) */
+function syncThemeSection(data: any = currentData) {
+  setColorPickerValue(themeFill, themeFillCurrent);
+  setColorPickerValue(themeStroke, themeStrokeCurrent);
+  const c = data ? countThemeColors(data) : { fill: 0, stroke: 0 };
+  themeCount.textContent = '· 默认填充色 ' + c.fill + ' 处 / 描边默认色 ' + c.stroke + ' 处';
+  themeSection.hidden = !(c.fill || c.stroke);
+  void btnThemeReset;
+}
+
+/* 应用并重建(防抖:拖色块会连续触发,和文字/颜色编辑共用 textEditTimer) */
+let themeEditTimer: number | undefined;
+function onThemeColorChanged(kind: 'fill' | 'stroke', hex: string) {
+  const n = applyThemeColor(kind, hex);
+  if (!n) { syncThemeSection(); return; }
+  syncThemeSection();
+  setStatus((kind === 'fill' ? '默认填充颜色' : '描边默认颜色') + '已改为 ' + normHex(hex).toUpperCase() + '(共替换 ' + n + ' 处)');
+  window.clearTimeout(themeEditTimer);
+  themeEditTimer = window.setTimeout(() => reRenderPreservingState(), 250);
+}
+bindColorPicker(themeFill, (hex) => onThemeColorChanged('fill', hex));
+bindColorPicker(themeStroke, (hex) => onThemeColorChanged('stroke', hex));
+btnThemeReset.addEventListener('click', () => {
+  let n = 0;
+  n += applyThemeColor('fill', THEME_FILL_DEFAULT);
+  n += applyThemeColor('stroke', THEME_STROKE_DEFAULT);
+  syncThemeSection();
+  setStatus(n ? '主题颜色已恢复为 #77B0F0 / #78C5F3' : '主题颜色已经是默认值');
+  if (n) reRenderPreservingState();
+});
+
 /* ---------- 形状图层颜色 ---------- */
 /* 深度收集形状图层内的填充项(ty 'fl')与描边项(ty 'st'),含组内嵌套(it.it)。
  * 返回的是 JSON 里的原始对象引用,调用方直接原地改 c.k 即可。 */
@@ -2158,14 +2416,14 @@ function collectShapeFillsStrokes(shapes: any[]): { fills: any[]; strokes: any[]
  * 返回的 fill / stroke 是原始数组引用,null 表示该图层没有对应属性。 */
 function shapeLayerColorInfo(data: any): { ind: number; nm: string; fill: number[] | null; stroke: number[] | null }[] {
   const out: { ind: number; nm: string; fill: number[] | null; stroke: number[] | null }[] = [];
-  for (const l of data.layers ?? []) {
-    if (l.ty !== 4) continue;
-    if (l.td === 1) continue; // 轨道蒙版源图层不渲染,无需编辑颜色(如位置暴露动画的「底框」)
+  walkEditableLayers(data, (l, precompName) => {
+    if (l.ty !== 4) return;
+    if (l.td === 1) return; // 轨道蒙版源图层不渲染,无需编辑颜色(如位置暴露动画的「底框」)
     const { fills, strokes } = collectShapeFillsStrokes(l.shapes);
     const fill = fills.length > 0 && fills[0].c?.a === 0 ? fills[0].c.k : null;
     const stroke = strokes.length > 0 && strokes[0].c?.a === 0 ? strokes[0].c.k : null;
-    out.push({ ind: l.ind, nm: l.nm || '(未命名)', fill, stroke });
-  }
+    out.push({ ind: l.ind, nm: displayLayerName(l.nm, precompName), fill, stroke });
+  });
   return out;
 }
 
@@ -2193,15 +2451,12 @@ const originalOpacityState = new Map<number, { a: number; k: any }>();
  * 连续拖动滑块就会在「上一次的结果」上反复缩放,越改越偏。 */
 function captureOpacityState(data: any) {
   originalOpacityState.clear();
-  const walk = (layers: any[]) => {
-    for (const l of layers ?? []) {
-      if (l.ks?.o) {
-        originalOpacityState.set(l.ind, { a: l.ks.o.a, k: JSON.parse(JSON.stringify(l.ks.o.k)) });
-      }
-      if (Array.isArray(l.layers)) walk(l.layers);
+  // 顶层 + 被引用的预合成内部都要快照:预合成里的图层同样有透明度滑块
+  walkEditableLayers(data, (l) => {
+    if (l.ks?.o) {
+      originalOpacityState.set(l.ind, { a: l.ks.o.a, k: JSON.parse(JSON.stringify(l.ks.o.k)) });
     }
-  };
-  walk(data.layers);
+  });
 }
 
 /* 读取图层当前的不透明度(0~100 的整数),用作滑块初值。
@@ -2257,7 +2512,7 @@ function setLayerOpacity(layer: any, value: number) {
  * 按 data-ind 定位当前可见的那个滑块。 */
 function resetLayerOpacity(ind: number) {
   if (!currentData) return;
-  const layer = findLayerByInd(currentData.layers, ind);
+  const layer = findLayerInData(currentData, ind);
   if (!layer) return;
   const orig = originalOpacityState.get(ind);
   if (!orig) return;
@@ -2296,7 +2551,7 @@ function bindOpacitySliders(root: HTMLElement) {
       const valEl = sl.parentElement?.querySelector('.o-val');
       if (valEl) valEl.textContent = val + '%';
       if (!currentData) return;
-      const layer = findLayerByInd(currentData.layers, ind);
+      const layer = findLayerInData(currentData, ind);
       if (!layer) return;
       setLayerOpacity(layer, val);
       window.clearTimeout(textEditTimer);
@@ -2321,7 +2576,7 @@ function setShapeStrokeColor(layer: any, hex: string) {
 /* 形状颜色编辑入口:kind 区分填充/描边,改完 250ms 防抖后重建动画。 */
 function onShapeColorChanged(ind: number, hex: string, kind: 'fill' | 'stroke') {
   if (!currentData) return;
-  const layer = findLayerByInd(currentData.layers, ind);
+  const layer = findLayerInData(currentData, ind);
   if (!layer) return;
   if (kind === 'fill') setShapeFillColor(layer, hex);
   else setShapeStrokeColor(layer, hex);
@@ -2334,7 +2589,7 @@ function onShapeReset(ind: number) {
   if (!currentData) return;
   const orig = originalShapeState.get(ind);
   if (!orig) return;
-  const layer = findLayerByInd(currentData.layers, ind);
+  const layer = findLayerInData(currentData, ind);
   if (!layer) return;
   if (orig.fill) setShapeFillColor(layer, fcToHex(orig.fill));
   if (orig.stroke) setShapeStrokeColor(layer, fcToHex(orig.stroke));
@@ -2347,12 +2602,29 @@ function onShapeReset(ind: number) {
   textEditTimer = window.setTimeout(() => reRenderPreservingState(), 250);
 }
 
-/* 核电站功率动画里这几个形状图层的「填充」不作为可编辑属性展示
- * (它们只是给描边/纹理垫底的占位色),侧栏只保留描边色,避免误导。名称按去空格比对。 */
+/* 「形状图层」列表里隐藏颜色取色器的规则 —— 判据都是「这个颜色在这套素材里是占位色,不是设计色」,
+ * 给用户一个改了也看不出效果的入口只会误导,所以干脆不展示(描边与填充各判各的):
+ *  ① 填充为**纯红 #ff0000**:AE 里常用来做「不可见底 / 遮罩占位」,不是设计色;判定用纯红而非红系,
+ *     红系里的 #d92c36 这类真正的设计红不受影响;
+ *  ② 描边为**纯白 #ffffff**:本套素材里的白描边是 AE 默认描边(渲染上被填充盖住 / 只是占位),
+ *     同理不展示;描边为**#5400ff**(任务弹窗动画预合成「框 › 形状图层 5」的紫色描边,全仓库只有这一层)
+ *     同样只作占位、不参与画面配色,也不展示;
+ *  ③ 核电站功率动画里几个形状图层的填充只是给描边/纹理垫底的占位色 —— 按图层名(去空格)排除。 */
 const HIDE_FILL_SHAPE_NAMES = new Set(['形状图层2', '形状图层3', '形状图层8', '形状图层6', '形状图层4']);
-function hideShapeFill(nm: string): boolean {
+/* 占位色(0~1 归一化写进 JSON 时:#ff0000 → [1,0,0,1],#ffffff → [1,1,1,1]) */
+const PLACEHOLDER_FILL_HEX = '#ff0000';
+/* 不作为可编辑属性展示的描边色:#ffffff(AE 默认白描边)、#5400ff(预合成里的紫色占位描边) */
+const PLACEHOLDER_STROKE_HEXES = new Set(['#ffffff', '#5400ff']);
+function hideShapeFill(nm: string, fillHex: string | null = null): boolean {
+  // 纯红填充:所有动画通用(不区分当前是哪套动画)
+  if (fillHex === PLACEHOLDER_FILL_HEX) return true;
   if (currentAnimKey !== 'blinds') return false;
   return HIDE_FILL_SHAPE_NAMES.has(String(nm || '').replace(/\s+/g, ''));
+}
+/* 白描边 / 紫色占位描边同样不作为可编辑属性展示(原因见上)。
+ * 统一转小写再比对,免得数据里写成 #FFFFFF 或 #5400FF 时漏判。 */
+function hideShapeStroke(strokeHex: string | null = null): boolean {
+  return !!strokeHex && PLACEHOLDER_STROKE_HEXES.has(strokeHex.toLowerCase());
 }
 
 /* 渲染「形状图层」列表 HTML 并绑定控件(颜色、重置、图层不透明度)。
@@ -2367,8 +2639,8 @@ function renderShapeList(data: any) {
       const fillHex = s.fill ? fcToHex(s.fill) : null;
       const strokeHex = s.stroke ? fcToHex(s.stroke) : null;
       let colorHtml = '';
-      if (fillHex && !hideShapeFill(s.nm)) colorHtml += '<label class="t-color-label">填充 <input type="color" class="s-fill" data-ind="' + s.ind + '" value="' + fillHex + '" /><input type="text" class="hex-input" value="' + fillHex + '" spellcheck="false" placeholder="#rrggbb" /></label>';
-      if (strokeHex) colorHtml += '<label class="t-color-label">描边 <input type="color" class="s-stroke" data-ind="' + s.ind + '" value="' + strokeHex + '" /><input type="text" class="hex-input" value="' + strokeHex + '" spellcheck="false" placeholder="#rrggbb" /></label>';
+      if (fillHex && !hideShapeFill(s.nm, fillHex)) colorHtml += '<label class="t-color-label">填充 <input type="color" class="s-fill" data-ind="' + s.ind + '" value="' + fillHex + '" /><input type="text" class="hex-input" value="' + fillHex + '" spellcheck="false" placeholder="#rrggbb" /></label>';
+      if (strokeHex && !hideShapeStroke(strokeHex)) colorHtml += '<label class="t-color-label">描边 <input type="color" class="s-stroke" data-ind="' + s.ind + '" value="' + strokeHex + '" /><input type="text" class="hex-input" value="' + strokeHex + '" spellcheck="false" placeholder="#rrggbb" /></label>';
       const rectOpacityHtml =
         dikuangVisibleInds.includes(s.ind)
           ? '<label class="t-opacity">矩形不透明度 <input type="range" class="dr-slider" data-ind="' + s.ind + '" min="0" max="100" step="1" value="' + getDikuangRectOpacity(s.ind) + '" /><span class="o-val">' + getDikuangRectOpacity(s.ind) + '%</span><button class="t-reset dr-reset" data-ind="' + s.ind + '" type="button" title="重置矩形不透明度">' + ICON_RESET + '</button></label>'
@@ -2380,7 +2652,7 @@ function renderShapeList(data: any) {
         '<button class="t-reset s-reset" data-ind="' + s.ind + '" type="button" title="重置颜色">' + ICON_RESET + '重置</button>' +
         '</div>' +
         '<div class="shape-colors">' + colorHtml + '</div>' +
-        opacitySliderHtml(s.ind, findLayerByInd(data.layers, s.ind)) +
+        opacitySliderHtml(s.ind, findLayerInData(data, s.ind)) +
         rectOpacityHtml +
         '</li>'
       );
@@ -2428,11 +2700,22 @@ function isSeqLayer(l: any): boolean {
   return !!(l && l.ty === 2 && l.ks && l.ks.src && Array.isArray(l.ks.src.k) && l.ks.src.k.length >= 2);
 }
 
-/* 侧栏「图片图层」要列的图层(可调色的纹理图 + 可调色的叠加序列) */
+/* 侧栏「图片图层」要列的图层(可调色的纹理图 + 可调色的叠加序列)。
+ * 顶层与被引用的预合成内部都收 —— 预合成里的纹理图同样可以调色/调透明度。 */
 function tintableImageLayers(data: any): any[] {
-  return (data?.layers ?? []).filter(
-    (l: any) => l.ty === 2 && (l.nm === '百叶窗.png' || l.nm === '百叶窗2.png' || l.nm === '光.png' || isSeqLayer(l)),
-  );
+  const out: any[] = [];
+  walkEditableLayers(data, (l) => {
+    if (l.ty === 2 && (l.nm === '百叶窗.png' || l.nm === '百叶窗2.png' || l.nm === '光.png' || isSeqLayer(l))) out.push(l);
+  });
+  return out;
+}
+/* 图片图层在侧栏显示的图层名(预合成内容加「合成名 ›」前缀) */
+function imageLayerDisplayName(data: any, layer: any): string {
+  let name = layer?.nm || '(未命名)';
+  for (const a of referencedPrecompAssets(data)) {
+    if (findLayerByInd(a.layers, layer.ind)) return String(a.id) + PRECOMP_NAME_SEP + name;
+  }
+  return name;
 }
 
 /* 叠加序列在列表里的取色标识:用 'seq:<ind>' 与纹理图的资源 id 区分开 */
@@ -2479,7 +2762,7 @@ function renderImageList(data: any) {
       return (
         '<li class="text-item">' +
         '<div class="text-item-head">' +
-        '<span class="t-name">' + esc(l.nm || '(未命名)') + '</span>' +
+        '<span class="t-name">' + esc(imageLayerDisplayName(data, l)) + '</span>' +
         '<button class="t-reset i-reset" data-ref="' + esc(ref) + '" type="button" title="重置颜色">' + ICON_RESET + '重置</button>' +
         '</div>' +
         '<div class="shape-colors">' +
@@ -3864,6 +4147,20 @@ import windowsAnimationUrl from '../animation/windows animation/windows_animatio
 import animation2DataUrl from '../animation_2/animation_data.json?url';
 import animation2NextUrl from '../animation_2/animation_data_next_fixed.json?url';
 import animation3DataUrl from '../animation_3/animation_data.json?url';
+import missionDataUrl from '../animation_4/animation_data.json?url';
+/* 任务弹窗动画自带的哈夫币图标:JSON 里是相对路径(u:"images/", p:"MallIcon_HafuCoins.png"),
+ * 站点里没有 images/ 目录,必须把它按静态资源打包后改写资源地址(见 ensureMissionData)。
+ * 它同时是「图标选择」列表里的默认/内置图标,所以这里导入一次、两处共用。 */
+import missionIconUrl from '../animation_4/images/MallIcon_HafuCoins.png?url';
+
+/* 任务弹窗动画的「图标选择」列表:用 animation_4/icon/ 下的图标(MallIcon_*.png),
+ * 与 animation_2/icon/ 的干员技能图标分开 —— 两套动画的图标素材不同,不能混在同一个列表里。
+ * 目录不存在/为空时回落到打包的动画自带图标(见 MISSION_ICON_OPTIONS 的合并逻辑)。 */
+const missionIconModules = import.meta.glob('../animation_4/icon/*.{png,webp}', {
+  eager: true,
+  query: '?url',
+  import: 'default',
+}) as Record<string, string>;
 
 /* 核电站功率动画的叠加序列:animation_3/png resources/ 下的两个文件夹,各 359 帧 1920×1080 透明 PNG。
  * (README.txt:两条都是 60fps 图像序列,直接叠加使用,默认开启,且可更改颜色。)
@@ -4060,6 +4357,9 @@ let exposedDataPromise: Promise<void> | null = null;
 /* 核电站功率动画(animation_3):底层动画数据 + 两条逐帧 PNG 叠加序列(默认开启,无开关) */
 let blindsData: any = null;
 let blindsDataPromise: Promise<void> | null = null;
+/* 任务弹窗动画(animation_4):单段数据 + 一张哈夫币位图,没有音频/叠加序列 */
+let missionData: any = null;
+let missionDataPromise: Promise<void> | null = null;
 let baiyechuangOriginalData: string | null = null; // 百叶窗原始图片 data URI,供调色重置
 let baiyechuang2OriginalData: string | null = null; // 百叶窗2(二次扫描)原始图片 data URI,供调色重置
 let guangOriginalData: string | null = null; // 光.png(二次扫描)原始图片 data URI,供调色重置
@@ -4302,6 +4602,81 @@ async function ensureBlindsData(onProgress?: (p: number | null) => void): Promis
   return blindsDataPromise;
 }
 
+/* ---------- 任务弹窗动画(animation_4)----------
+ * 数据 = animation_4/animation_data.json(1920×1080 / 60fps / 单段、无音频;出点以数据里的 op 为准),
+ * 画面内容:行动开始 / 任务名 / 预期报酬 / 数字 四个文字层 + 一枚哈夫币图标(MallIcon_HafuCoins.png)。
+ * 载入时要处理两件与其它动画不同的事:
+ *  ① **图片资源带目录前缀(按"是不是图标"判断,不写死文件名)**:Bodymovin 把 AE 的素材写成
+ *     u:"images/(子目录/)" + p:"文件名",而站点产物里没有 images/ 目录,原样渲染会 404(SVG/Canvas 都是空白图)。
+ *     这里把这类资源改写成打包后的静态资源地址(p 指向 ?url 导入的产物、u 置空、e 置 1,lottie 才会把 p
+ *     当完整地址)。判断方式是「p 不是完整地址(data:/http/绝对路径)且文件名叫 MallIcon_HafuCoins.png」
+ *     —— 用文件名的**基名**比对:重新导出时 AE 可能把素材归到子目录(如 images/MallIcon/MallIcon_HafuCoins.png),
+ *     只比对完整 p 就会漏改。之后用户在「图标选择」里换图标 / 上传自定义图标时,写的也是同一条资源(见 applyIconUrlToScope)。
+ *  ② 数据里带了一个 AE「视频图层」(ty:9,引用 images/<文件名>.mp4):lottie-web 不支持视频图层,
+ *     它的处理方式是把它当成图片层挂上去、href 指向那个相对路径(站点里并不存在该文件);
+ *     而且 AE 工程里这一层本来就是隐藏的(hd:true)、配套素材动辄上 GB。这里直接把这类图层连同
+ *     只被它引用的视频资源一起丢掉,避免多出一次必然 404 的请求,也让「资源数」等信息更准确。 */
+async function ensureMissionData(onProgress?: (p: number | null) => void): Promise<void> {
+  if (missionData) return;
+  if (missionDataPromise) {
+    if (onProgress) onProgress(null); // 已在加载中:以不确定进度显示
+    return missionDataPromise;
+  }
+  missionDataPromise = (async () => {
+    try {
+      const [raw] = await fetchJsonBundle([missionDataUrl], onProgress);
+      const data = JSON.parse(raw);
+      /* 图标资源的 u/p 拼接改成完整静态资源地址(与 animation_2 图标同做法)。
+       * 只认「相对路径」的资源:重新导出时若 Bodymovin 直接输出 data: URI,或导成了别的绝对地址,就别去动它。 */
+      const isAbsoluteAssetUrl = (p: string) => /^(data:|https?:|\/\/|\/|\.\.?[\/\\])/i.test(p);
+      for (const a of data.assets ?? []) {
+        if (typeof a?.p !== 'string' || isAbsoluteAssetUrl(a.p)) continue;
+        if (a.p.split(/[\/\\]/).pop() === 'MallIcon_HafuCoins.png') {
+          a.p = missionIconUrl;
+          a.u = '';
+          a.e = 1;
+        }
+      }
+      /* 丢掉视频图层(ty:9)与它独占的资源:先收集被丢图层的 refId,再删掉没人再引用的视频资源。
+       * 递归处理预合成内部,避免嵌套里的视频层被漏掉。 */
+      const droppedRefs = new Set<string>();
+      const dropVideoLayers = (layers: any[]): any[] => {
+        const kept: any[] = [];
+        for (const l of layers ?? []) {
+          if (l && l.ty === 9) {
+            if (typeof l.refId === 'string') droppedRefs.add(l.refId);
+            continue;
+          }
+          if (Array.isArray(l?.layers)) l.layers = dropVideoLayers(l.layers);
+          kept.push(l);
+        }
+        return kept;
+      };
+      data.layers = dropVideoLayers(data.layers);
+      for (const a of data.assets ?? []) if (Array.isArray(a.layers)) a.layers = dropVideoLayers(a.layers);
+      if (droppedRefs.size) {
+        const stillUsed = new Set<string>();
+        const collect = (layers: any[]) => {
+          for (const l of layers ?? []) {
+            if (typeof l?.refId === 'string') stillUsed.add(l.refId);
+            if (Array.isArray(l?.layers)) collect(l.layers);
+          }
+        };
+        collect(data.layers);
+        for (const a of data.assets ?? []) if (Array.isArray(a.layers)) collect(a.layers);
+        data.assets = (data.assets ?? []).filter((a: any) => !(droppedRefs.has(a.id) && !stillUsed.has(a.id)));
+      }
+      missionData = data;
+    } catch (e) {
+      console.error('[任务弹窗动画数据解析失败]', e);
+      setStatus('任务弹窗动画数据解析失败: ' + (e as Error).message, true);
+    }
+    // 失败时允许下次重试
+    if (!missionData) missionDataPromise = null;
+  })();
+  return missionDataPromise;
+}
+
 /* 递归偏移对象中所有动画属性({a:1, k:[{t,...}]})的关键帧时刻 t */
 /* 说明：只平移动画属性（{a:1}）里关键帧的 t（帧号，60fps 下一帧 = 1）；数组直接递归；
  * 遇到 a===1 的 k 数组后不再向下递归，避免把关键帧的 s/e 值当成嵌套属性处理；
@@ -4538,12 +4913,14 @@ function offsetSecondSegment(data: any, delta: number) {
 
 /* 动画注册表:每个动画独立的数据 / 弹窗 / 音频。
  * 数据改为按需加载后,bootAnimation/animation2Data 在启动时可能尚未就绪,
- * 因此以 getter 形式提供;使用前需先 await ensureExtractionData()/ensureExposedData()。 */
+ * 因此以 getter 形式提供;使用前需先 await ensureExtractionData()/ensureExposedData()/…。
+ * audio 为 null 表示该动画没有音效(任务弹窗动画即是)—— 导出时不会挂音轨,预览也不播声音。 */
 type AnimDef = { key: string; label: string; data: () => any; popup: () => any; audio: string | null };
 const ANIMATIONS: AnimDef[] = [
   { key: 'extraction', label: '撤离动画', data: () => bootAnimation, popup: () => popupData, audio: bundledAudioUrl },
   { key: 'exposed', label: '位置暴露动画', data: () => animation2Data, popup: () => null, audio: exposedAudioUrl },
   { key: 'blinds', label: '核电站功率动画', data: () => blindsData, popup: () => null, audio: blindsAudioUrl },
+  { key: 'mission', label: '任务弹窗动画', data: () => missionData, popup: () => null, audio: null },
 ];
 let currentAnimKey = 'extraction';
 
@@ -4551,20 +4928,65 @@ let currentAnimKey = 'extraction';
 let showNextScan = false; // 是否显示二次扫描(主动画后紧接着播第二段)
 let nextDuration = 3.2; // 第二段时长(秒,默认 3.2s)
 
-/* ---------- 位置暴露动画图标选择(位置暴露 / 二次扫描 可分别自定义) ----------
- * 两段的图标各自是一个独立图片资源,因此可以分别指定:
+/* ---------- 图标选择(位置暴露 / 任务弹窗动画) ----------
+ * 位置暴露动画两段的图标各自是一个独立图片资源,因此可以分别指定:
  *   • 位置暴露(主段):animation2Data 的 image_0(图层 ind 5,恒存在);
  *   • 二次扫描(第二段):animation2NextData 的 image_0 —— 该段被 mergeNextInto/
  *     prepareNextData 合并时会整体重命名为 image_0_n(图层 ind 105),所以合并后的
  *     数据里要写 image_0_n,而原始第二段数据里要写 image_0。
  * 每段都同时写入「源数据」与「当前(可能已合并)数据」,这样开启/关闭「二次扫描」来回
- * 切换、以及重新合并时都不会退回内置 PNG。 */
+ * 切换、以及重新合并时都不会退回内置 PNG。
+ *
+ * 任务弹窗动画只有一个图标位(数据里唯一的那张位图图层,资源 id 为 image_0),
+ * 因此它没有选项卡与「跟随」开关,选中项记在 iconMissionName 里;两套动画的图标选择互不影响。 */
 type IconScope = 'main' | 'next';
 let iconScope: IconScope = 'main'; // 当前选项卡:正在为哪一段挑图标
 let iconMainName = DEFAULT_ICON_NAME; // 位置暴露图标
 let iconNextName = DEFAULT_ICON_NAME; // 二次扫描图标(默认与位置暴露相同)
 let followMainIcon = true; // 二次扫描是否跟随位置暴露(默认跟随,与旧版「两段共用图标」一致)
 let customIcons: { name: string; url: string }[] = []; // 用户上传的自定义图标(会话内有效)
+/* 任务弹窗动画的内置图标:就是动画自带的哈夫币位图(animation_4/images/MallIcon_HafuCoins.png)。
+ * 名字沿用资源文件名,列表里显示为「MallIcon_HafuCoins」(iconDisplayName 会去掉扩展名)。 */
+const MISSION_ICON_OPTION = { name: 'MallIcon_HafuCoins.png', url: missionIconUrl };
+/* animation_4/icon/ 下的图标列表(按名称自然序);同名时优先 WebP(与 animation_2/icon 同规则)。
+ * 目录为空时只有下面这一项回落项,保证列表永远非空、默认图标永远可选。 */
+const MISSION_ICON_OPTIONS: { name: string; url: string }[] = (() => {
+  const byBase = new Map<string, { name: string; url: string }>();
+  for (const [path, url] of Object.entries(missionIconModules)) {
+    const name = path.split('/').pop() ?? '';
+    const base = name.replace(/\.[^.]+$/, '');
+    const prev = byBase.get(base);
+    const isWebp = /\.webp$/i.test(name);
+    if (prev && !(isWebp && !/\.webp$/i.test(prev.name))) continue;
+    byBase.set(base, { name, url });
+  }
+  const list = [...byBase.values()].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  return list.length ? list : [MISSION_ICON_OPTION];
+})();
+/* 默认图标:优先 icon/ 目录里同名的 HafuCoins(素材就放在那儿),否则用目录首项。
+ * 目录里那份与动画自带的 images/ 版视觉一致(仅编码差异),所以默认画面不变。 */
+const MISSION_ICON_DEFAULT_NAME =
+  MISSION_ICON_OPTIONS.find((o) => o.name.replace(/\.[^.]+$/, '') === 'MallIcon_HafuCoins')?.name ??
+  MISSION_ICON_OPTIONS[0]?.name ??
+  MISSION_ICON_OPTION.name;
+let iconMissionName = MISSION_ICON_DEFAULT_NAME; // 任务弹窗动画当前选用的图标
+
+/* 定位当前动画的「图标图层」——用于判断该动画有没有图标位、以及不透明度滑块该挂在哪一层上。
+ *   • 位置暴露:按图层名「图标_可替换」找(数据里就是这个名字,主段 ind 5 / 二次扫描 ind 105);
+ *   • 任务弹窗:数据里唯一的那张位图图层(叠加序列图层不算,它们逐帧换图,没有单一资源)。
+ * 其它动画(撤离 / 核电站功率)没有图标位,返回 null,「图标选择」区块整块隐藏。 */
+function iconLayerOf(data: any, key: string = currentAnimKey): any | null {
+  const layers: any[] = data?.layers ?? [];
+  if (key === 'mission') return layers.find((l: any) => l.ty === 2 && !isSeqLayer(l)) ?? null;
+  if (key === 'exposed') return layers.find((l: any) => l.ty === 2 && l.nm === '图标_可替换') ?? null;
+  return null;
+}
+
+/* 「显示图标」开关只对位置暴露动画有意义(它同时要挪文字与底框,见 setIconVisible);
+ * 其余动画的图标显隐走「图标不透明度」滑块,不能套用这套位移逻辑。 */
+function iconToggleApplies(key: string = currentAnimKey): boolean {
+  return key === 'exposed';
+}
 
 /* ---------- 图标显示开关 ----------
  * 「显示图标」开关(默认勾选):取消后主段与二次扫描段的图标图层透明度动画
@@ -4700,6 +5122,10 @@ function setIconVisible(visible: boolean, rerender = true) {
 
 chkIcon.addEventListener('change', () => setIconVisible(chkIcon.checked));
 
+/* 「图标不透明度」滑块(任务弹窗动画):复用图片/文字/形状列表那套 .o-slider 处理,
+ * 只把根节点换成图标区块 —— 滑块是静态 DOM,模块加载时绑定一次即可,不会重复挂监听。 */
+bindOpacitySliders(iconOpacityRow);
+
 /* 居中微调按钮:±1px(合成单位),重置归零 */
 document.getElementById('btnNudgeL')?.addEventListener('click', () => changeIconNudge(-1));
 document.getElementById('btnNudgeR')?.addEventListener('click', () => changeIconNudge(1));
@@ -4710,9 +5136,16 @@ document.getElementById('btnNudgeReset')?.addEventListener('click', () => change
   if (v) v.textContent = iconCenterNudge + ' px';
 }
 
-// 自定义上传的图标排在内置素材之前，便于用户一眼看到自己加的那张
+/* 内置图标素材按动画区分:
+ *  • 位置暴露动画用 animation_2/icon 下的干员技能图标(ICON_OPTIONS);
+ *  • 任务弹窗动画用动画自带的哈夫币图标(排在最前),后接同一套技能图标,方便换用其它图标。
+ * 用户上传的自定义图标对两套动画都可见,排在前面便于一眼看到自己加的那张。 */
+function builtinIconOptions(): { name: string; url: string }[] {
+  // 任务弹窗动画用 animation_4/icon/ 的图标;位置暴露动画用 animation_2/icon/ 的干员技能图标
+  return currentAnimKey === 'mission' ? MISSION_ICON_OPTIONS : ICON_OPTIONS;
+}
 function allIconOptions() {
-  return [...customIcons, ...ICON_OPTIONS];
+  return [...customIcons, ...builtinIconOptions()];
 }
 
 /* 图标显示名:去掉扩展名(Hero_Sp_03.webp → Hero_Sp_03) */
@@ -4724,8 +5157,10 @@ function findIconOption(name: string) {
   return allIconOptions().find((o) => o.name === name);
 }
 
-/* 某段实际生效的图标名:二次扫描在「跟随位置暴露」时取位置暴露的值 */
+/* 某段实际生效的图标名:二次扫描在「跟随位置暴露」时取位置暴露的值;
+ * 任务弹窗动画与分段无关,恒取它自己的选择。 */
 function effectiveIconName(scope: IconScope): string {
+  if (currentAnimKey === 'mission') return iconMissionName;
   if (scope === 'main') return iconMainName;
   return followMainIcon ? iconMainName : iconNextName;
 }
@@ -4754,6 +5189,12 @@ function setAssetImageUrl(data: any, id: string, url: string): boolean {
 function applyIconUrlToScope(scope: IconScope, url: string): boolean {
   if (!url) return false;
   let updated = false;
+  // 任务弹窗动画只有一个图标位:写到它自己数据里那张位图图层引用的资源上
+  if (currentAnimKey === 'mission') {
+    const layer = iconLayerOf(missionData, 'mission');
+    if (layer?.refId && setAssetImageUrl(missionData, layer.refId, url)) updated = true;
+    return updated;
+  }
   if (scope === 'main') {
     // 位置暴露(主段):资源恒为 image_0。注意不能顺带写 image_0_n ——那是第二段的资源
     if (setAssetImageUrl(animation2Data, 'image_0', url)) updated = true;
@@ -4769,6 +5210,8 @@ function applyIconUrlToScope(scope: IconScope, url: string): boolean {
 /* 按当前状态刷新两段图标资源。两段都写:即便处于「跟随」状态,二次扫描资源也要对齐,
  * 否则取消跟随、或关闭再开启二次扫描时第二段会退回内置 PNG。 */
 function applyIconsToData(): boolean {
+  // 任务弹窗动画只有一个图标位,写一次即可
+  if (currentAnimKey === 'mission') return applyIconUrlToScope('main', effectiveIconUrl('main'));
   let updated = false;
   if (applyIconUrlToScope('main', effectiveIconUrl('main'))) updated = true;
   if (applyIconUrlToScope('next', effectiveIconUrl('next'))) updated = true;
@@ -4778,7 +5221,9 @@ function applyIconsToData(): boolean {
 /* 选中某段的图标。在「二次扫描」页点选图标即视为单独指定,自动取消「跟随位置暴露」 */
 function setIconForScope(scope: IconScope, name: string) {
   if (!findIconOption(name)) return;
-  if (scope === 'main') {
+  if (currentAnimKey === 'mission') {
+    iconMissionName = name;
+  } else if (scope === 'main') {
     iconMainName = name;
     if (followMainIcon) iconNextName = name; // 跟随中:顺带记录,取消跟随后仍显示同一图标
   } else {
@@ -4800,15 +5245,48 @@ function setIconScope(scope: IconScope) {
   syncIconScopeUI();
 }
 
+/* 同步「图标不透明度」行(仅任务弹窗动画):图标是普通位图图层,滑块直接改它的图层不透明度。
+ * data-ind 每次按当前图层重写 —— 滑块是静态 DOM(不随列表重建),靠它把两次载入区分开;
+ * .o-slider 的输入处理由 bindOpacitySliders 统一绑定(模块加载时绑一次即可)。 */
+function syncIconOpacityRow(data: any = currentData) {
+  // 只对任务弹窗动画生效:位置暴露动画的位图图层(百叶窗.png 等)走「图片图层」列表,
+  // 不能凭「数据里有位图图层」就把这一行显示出来。
+  if (currentAnimKey !== 'mission') {
+    iconOpacityRow.hidden = true;
+    return;
+  }
+  const layer = iconLayerOf(data, 'mission');
+  iconOpacityRow.hidden = !layer;
+  if (!layer) return;
+  const v = getLayerOpacity(layer);
+  iconOpacitySlider.dataset.ind = String(layer.ind);
+  iconOpacitySlider.value = String(v);
+  iconOpacityVal.textContent = v + '%';
+}
+
 /* 同步选项卡 / 缩略图 / 跟随开关 / 二次扫描提示,并重绘图标网格。
  * data 可显式传入「正在载入的数据」,避免切换动画瞬间用旧数据判断二次扫描是否已开启。 */
 function syncIconScopeUI(data: any = currentData) {
+  /* 位置暴露动画有两个图标位(选项卡 + 跟随开关),任务弹窗动画只有一个:UI 按当前动画整体切换。
+   * 「显示图标」开关与居中微调只服务于位置暴露(隐藏图标要连带挪文字与底框),对其余动画隐藏。 */
+  const multiScope = iconToggleApplies();
+  iconToggleRow.hidden = !multiScope;
+  iconScopeTabs.hidden = !multiScope;
+  iconScopeHint.hidden = true;
+  if (!multiScope) {
+    iconFollowRow.hidden = true;
+    iconNudgeRow.hidden = true;
+    /* 注意:这里不动 chkIcon 的勾选状态。「显示图标」是位置暴露动画自己的设置,取消勾选后
+     * 数据会被就地改成「图标透明 + 文字回中」;若在别的动画里把它重置成勾选态,切回位置暴露时
+     * loadData 就不会再应用隐藏(见那里的 iconToggleApplies 判断),数据和开关就会对不上。
+     * 保持原样即可:这个开关对其它动画不显示、也不生效。 */
+  }
   const isNext = iconScope === 'next';
   iconScopeMain.classList.toggle('is-active', !isNext);
   iconScopeNext.classList.toggle('is-active', isNext);
   iconScopeMain.setAttribute('aria-selected', String(!isNext));
   iconScopeNext.setAttribute('aria-selected', String(isNext));
-  iconFollowRow.hidden = !isNext;
+  if (multiScope) iconFollowRow.hidden = !isNext;
   chkFollowMainIcon.checked = followMainIcon;
   // 缩略图与名称就地更新：src 相同时不重复赋值，避免浏览器重新加载同一张图造成闪烁
   const setPick = (thumb: HTMLImageElement, label: HTMLElement, name: string) => {
@@ -4821,19 +5299,20 @@ function syncIconScopeUI(data: any = currentData) {
   setPick(iconScopeThumbNext, iconScopeNameNext, effectiveIconName('next'));
   // 二次扫描尚未开启(数据未合并)时给出提示:设置会保留,开启后自动生效
   const nextReady = isMergedNext(data);
-  iconScopeHint.hidden = !(isNext && !nextReady);
-  if (isNext && !nextReady) {
+  if (multiScope && isNext && !nextReady) {
+    iconScopeHint.hidden = false;
     iconScopeHint.textContent = '二次扫描尚未开启:这里的选择会保留,在上方「动画时长 → 二次扫描」勾选后自动生效。';
   }
+  syncIconOpacityRow(data);
   renderIconList();
 }
 
-// 重绘图标网格:位置暴露与二次扫描共用同一份列表,当前生效项标 is-active。
+// 重绘图标网格:列表随动画切换(位置暴露=技能图标;任务弹窗=哈夫币图标+技能图标),当前生效项标 is-active。
 // 用 innerHTML 整体重建而不是局部 diff —— 条目数量级很小(内置 + 用户上传),重建成本可忽略。
 function renderIconList() {
   const opts = allIconOptions();
   const activeName = effectiveIconName(iconScope);
-  const following = iconScope === 'next' && followMainIcon;
+  const following = currentAnimKey !== 'mission' && iconScope === 'next' && followMainIcon;
   iconCount.textContent = '· ' + opts.length + ' 个' + (following ? ' · 跟随位置暴露' : '');
   iconList.innerHTML = opts
     .map(
@@ -4848,8 +5327,11 @@ function renderIconList() {
     li.addEventListener('click', () => {
       const name = li.dataset.name;
       if (!name) return;
-      // 二次扫描页在「跟随」状态下点中同一个图标也要落成单独指定(用户意图是固定下来)
-      if (name === effectiveIconName(iconScope) && !(iconScope === 'next' && followMainIcon)) return;
+      // 二次扫描页在「跟随」状态下点中同一个图标也要落成单独指定(用户意图是固定下来);
+      // 任务弹窗动画没有「跟随」概念,点中当前生效的那一项直接忽略。
+      const alreadyActive = name === effectiveIconName(iconScope);
+      const landingOnFollow = iconToggleApplies() && iconScope === 'next' && followMainIcon;
+      if (alreadyActive && !landingOnFollow) return;
       setIconForScope(iconScope, name);
     });
   });
@@ -4895,13 +5377,14 @@ iconFile.addEventListener('change', () => {
     while (taken.has(iconDisplayName(name))) name = base + ' (' + n++ + ')';
     customIcons.unshift({ name, url });
     setIconForScope(iconScope, name);
-    setStatus('已应用自定义图标「' + iconDisplayName(name) + '」到' + (iconScope === 'next' ? '二次扫描' : '位置暴露'));
+    const where = currentAnimKey === 'mission' ? '任务弹窗动画' : iconScope === 'next' ? '二次扫描' : '位置暴露';
+    setStatus('已应用自定义图标「' + iconDisplayName(name) + '」到' + where);
   };
   reader.onerror = () => setStatus('读取图片失败', true);
   reader.readAsDataURL(file);
 });
 
-/* 切换动画(撤离 / 位置暴露 / 核电站功率)。
+/* 切换动画(撤离 / 位置暴露 / 核电站功率 / 任务弹窗)。
  * 数据包按需加载:仅首次进入该动画时才下载,期间显示加载浮层与实时进度,结束后关闭。
  * 弹窗数据随动画一起换,并强制关闭弹窗、隐藏无关区块(弹窗 / 图片调色 / 图标 / 时长)。
  * 载入前先把「图标、图片调色」等用户设置写回数据,保证随后 loadData 构建出的动画直接用对资源。 */
@@ -4914,13 +5397,17 @@ async function switchAnimation(key: string) {
     ? (!animation2Data || !animation2NextData)
     : key === 'blinds'
       ? !blindsData
-      : (!bootAnimation || !popupData);
+      : key === 'mission'
+        ? !missionData
+        : (!bootAnimation || !popupData);
   if (needLoad) showDataLoading(def.label);
   try {
     if (key === 'exposed') {
       await ensureExposedData((p) => setDataLoadingProgress(p));
     } else if (key === 'blinds') {
       await ensureBlindsData((p) => setDataLoadingProgress(p));
+    } else if (key === 'mission') {
+      await ensureMissionData((p) => setDataLoadingProgress(p));
     } else {
       await ensureExtractionData((p) => setDataLoadingProgress(p));
     }
@@ -4954,20 +5441,23 @@ async function switchAnimation(key: string) {
   if (needsSvgRasterExport(data)) {
     setStatus('该动画含共用轨道遮罩:导出将自动使用 SVG 逐帧光栅化,画面与预览一致');
   }
+  // 主题颜色区块:当前动画里存在这两族颜色(填充族/描边族)时显示,并回填当前色与计数
+  syncThemeSection(data);
   // 图片图层区块:含可调色纹理(百叶窗.png 等)或叠加序列时显示
   const hasTintable = tintableImageLayers(data).length > 0;
   imageSection.hidden = !hasTintable;
   if (hasTintable) renderImageList(data);
   else imageList.innerHTML = '';
-  // 图标选择区块:仅位置暴露动画显示。载入前先按用户选择(位置暴露 / 二次扫描各自的图标)
-  // 刷新两段资源,保证随后 loadData 构建的动画直接用上正确的图标。
-  const hasIcon = (data.layers ?? []).some((l: any) => l.ty === 2 && l.nm === '图标_可替换');
+  // 图标选择区块:位置暴露动画(两段图标)与任务弹窗动画(单张图标)显示。载入前先按用户选择
+  // 刷新图标资源,保证随后 loadData 构建的动画直接用上正确的图标(位置暴露两段都写,见 applyIconsToData)。
+  const hasIcon = !!iconLayerOf(data, key);
   iconSection.hidden = !hasIcon;
   if (hasIcon) {
     applyIconsToData();
     syncIconScopeUI(data);
   } else {
     iconList.innerHTML = '';
+    iconOpacityRow.hidden = true;
   }
   // 动画时长区块(时长 + 二次扫描开关 + 二次扫描时长):仅位置暴露动画显示
   const isExposed = key === 'exposed';

@@ -56,7 +56,7 @@
           <path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293zm-9.761 5.175-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325"/>
         </svg><span class="craft-note-text">网站内动画均由人工使用<b>AE</b>制作，<em>未使用AI辅助</em></span>
       </span>
-      <!-- 动画选择器:option 的 value 就是三套数据包的标识(extraction / exposed / blinds),切换交给 main.ts 的 switchAnimation -->
+      <!-- 动画选择器:option 的 value 就是四套数据包的标识(extraction / exposed / blinds / mission),切换交给 main.ts 的 switchAnimation -->
       <!-- 首次切到某套动画需要下载对应的动画 JSON,期间由 dataLoading 浮层显示进度 -->
       <label class="anim-switch" title="切换要编辑的动画">
         <span class="anim-switch-label">动画</span>
@@ -64,6 +64,7 @@
           <option value="extraction">撤离动画</option>
           <option value="exposed">位置暴露动画</option>
           <option value="blinds">核电站功率动画</option>
+          <option value="mission">任务弹窗动画</option>
         </select>
       </label>
     </header>
@@ -170,18 +171,40 @@
         <ul id="textList"></ul>
         <h3>形状图层 <span id="shapeCount"></span></h3>
         <ul id="shapeList"></ul>
+        <!-- 主题颜色(默认 hidden):把动画里所有 #77B0F0 的填充、所有 #78C5F3 的描边统一换成指定颜色。
+             判据是「当前这一族颜色」而非写死 #77B0F0/#78C5F3 —— 改过一次之后,下一次是拿新颜色继续替换,
+             所以重复修改、连续改色都能正确接续;「重置」把这一族换回出厂色。 -->
+        <div id="themeSection" hidden>
+        <h3>主题颜色 <span id="themeCount"></span></h3>
+        <div class="theme-colors">
+          <label class="t-color-label" title="动画里所有该色(默认 #77B0F0)的填充会一起换成这个颜色">
+            默认填充颜色
+            <input type="color" id="themeFill" value="#77b0f0" />
+            <input type="text" class="hex-input" id="themeFillHex" value="#77B0F0" spellcheck="false" placeholder="#rrggbb" />
+          </label>
+          <label class="t-color-label" title="动画里所有该色(默认 #78C5F3)的描边会一起换成这个颜色">
+            描边默认颜色
+            <input type="color" id="themeStroke" value="#78c5f3" />
+            <input type="text" class="hex-input" id="themeStrokeHex" value="#78C5F3" spellcheck="false" placeholder="#rrggbb" />
+          </label>
+        </div>
+        <button id="themeReset" type="button" title="把这一族颜色恢复为出厂的 #77B0F0 / #78C5F3">重置为默认色</button>
+        <p class="theme-note">改动立刻套用到当前动画里**所有等于该颜色值的填充与描边**(含预合成内部);之后再用其它颜色改,是在新颜色上继续替换。</p>
+        </div>
         <!-- 图片图层(默认 hidden):仅当动画里存在可调色的图片图层时由 main.ts 打开,例如位置暴露的图标位图 -->
         <div id="imageSection" hidden>
         <h3>图片图层 <span id="imageCount"></span></h3>
         <ul id="imageList"></ul>
         </div>
-        <!-- 图标选择(默认 hidden,仅位置暴露动画显示):分段选项卡分别给「位置暴露」与「二次扫描」指定图标 -->
+        <!-- 图标选择(默认 hidden,位置暴露 / 任务弹窗动画显示):位置暴露用分段选项卡分别给「位置暴露」与「二次扫描」指定图标,任务弹窗动画只有一个图标位 -->
         <!-- 勾选「跟随位置暴露」时第二段复用第一段的图标,取消勾选后可为第二段单独选择或上传 -->
         <!-- 「居中微调」在隐藏图标后可用:字体字形的墨迹存在固有光学偏差,用 ±8(合成坐标)手动调正 -->
         <!-- 上传限制:PNG / JPG / WebP / GIF 且不超过 2MB,超限会在状态栏报错(校验在 main.ts) -->
         <div id="iconSection" hidden>
         <h3>图标选择 <span id="iconCount"></span></h3>
-        <label class="popup-toggle" title="取消勾选后隐藏图标(主段与二次扫描同步),文字与底框一起回到画面中心">
+        <!-- 「显示图标」开关只对位置暴露动画有意义:隐藏时文字与底框要一起回中,逻辑写死在 setIconVisible 里;
+             任务弹窗动画的图标用下面「图标不透明度」控制,因此该行与居中微调、分段选项卡都会对它隐藏 -->
+        <label class="popup-toggle" id="iconToggleRow" title="取消勾选后隐藏图标(主段与二次扫描同步),文字与底框一起回到画面中心">
           <input type="checkbox" id="chkIcon" checked /> 显示图标
         </label>
         <div class="icon-nudge" id="iconNudgeRow" hidden title="隐藏图标后,文字(及底框)的左右微调:某些字体字形存在固有光学偏差,预览时调到观感正中即可(SVG/Canvas、导出均生效)">
@@ -199,7 +222,8 @@
           </button>
           <button type="button" id="btnNudgeReset" class="nudge-btn" title="重置为 0">重置</button>
         </div>
-        <div class="icon-scope" role="tablist" aria-label="选择要自定义图标的扫描段">
+        <!-- 分段选项卡(仅位置暴露动画显示):任务弹窗动画只有一个图标位,不需要分段 -->
+        <div class="icon-scope" id="iconScopeTabs" role="tablist" aria-label="选择要自定义图标的扫描段">
           <button type="button" class="icon-scope-btn is-active" id="iconScopeMain" data-scope="main" role="tab" aria-selected="true" title="自定义位置暴露(第一段)的图标">
             <span class="icon-scope-label">位置暴露</span>
             <span class="icon-scope-pick">
@@ -219,7 +243,7 @@
           <input type="checkbox" id="chkFollowMainIcon" checked /> 二次扫描跟随位置暴露
         </label>
         <p class="icon-scope-hint" id="iconScopeHint" hidden></p>
-        <label class="icon-upload" title="上传本地图片作为图标(PNG/JPG/WebP,≤2MB),应用到当前选项卡的扫描段">
+        <label class="icon-upload" title="上传本地图片作为图标(PNG/JPG/WebP,≤2MB),应用到当前动画的图标位">
           <input type="file" id="iconFile" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
           <span>
             <svg class="bi" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
@@ -228,6 +252,15 @@
             上传自定义图标
           </span>
         </label>
+        <!-- 图标不透明度(仅任务弹窗动画显示):图标是一张普通位图图层,直接改它的图层不透明度,
+             与「图片图层」列表共用同一套 .o-slider 处理(main.ts 的 bindOpacitySliders) -->
+        <div id="iconOpacityRow" hidden>
+          <label class="t-opacity" title="调整图标的不透明度">
+            <span class="timing-name">图标不透明度</span>
+            <input type="range" class="o-slider" id="iconOpacitySlider" data-ind="0" min="0" max="100" step="1" value="100" />
+            <span class="o-val" id="iconOpacityVal">100%</span>
+          </label>
+        </div>
         <ul id="iconList"></ul>
         </div>
         <!-- 弹窗图层:控制 windows_animation.json 弹窗的显隐,并编辑弹窗文字与颜色 -->
