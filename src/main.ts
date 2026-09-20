@@ -1095,6 +1095,9 @@ async function loadData(data: any, name: string) {
    * 而它们的 ind 只在各自合成内唯一,会与顶层撞号(详见 normalizePrecompInds 的注释)。
    * 必须在任何「按 ind 快照/查找」之前执行,否则快照会记到错误图层上。 */
   normalizePrecompInds(data);
+  /* 字形表只烘焙了导出时的那些字:一旦用户改成表外的字就会渲染成空路径(文字消失)。
+   * 盖不住时丢掉 chars、退回浏览器文本引擎;必须在 lottie.loadAnimation 之前判定。 */
+  dropCharsIfUncovered(data);
   // 「原始状态」捕获必须放在时长压缩之后:applyMainDuration 会把各图层末尾淡出
   // 关键帧平移到压缩后的出点(如文字层由 47→61 帧改为 61→75 帧)。若在压缩前捕获,
   // 点图层「重置」会恢复成压缩前的渐出时刻,导致该图层与其余图层渐隐不同步(乱套)。
@@ -2108,6 +2111,45 @@ function normalizePrecompInds(data: any) {
     if (layers.some((l: any) => (l?.ind ?? 0) >= PRECOMP_IND_BASE)) continue; // 已平移过
     offsetCompositionInds(layers, PRECOMP_IND_BASE);
   }
+}
+
+/* ---------- 字形表(chars)兜底 ----------
+ * 部分导出会带上「字形轮廓表」(Bodymovin 的 Include Glyphs 选项),里面**只烘焙了导出那一刻用到的字**。
+ * lottie 一旦发现有 chars 就走「按字查表、画轮廓」这条路(见 lottie.js 的 usesGlyphs):
+ * 查不到的字由 getCharData 返回 emptyChar → 画成空路径 —— 表现就是**用户一改字,新字整段消失**。
+ * 站点已经把工程字体注册好了(见 loadEmbeddedFonts),所以这里做一次判定:
+ *   • 字表盖得住当前所有文字 → 保留 chars(字形与 AE 完全一致,不改现状);
+ *   • 盖不住(用户改了字) → 丢掉 chars,退回浏览器文本引擎(同一套字体,肉眼一致,且随便改字都不会消失)。
+ * 每次 loadData 都会重新判定一次:第一次改字丢掉后,后续重建都直接走浏览器文本,不会来回闪。 */
+function dropCharsIfUncovered(data: any): boolean {
+  const list: any[] = Array.isArray(data?.chars) ? data.chars : [];
+  if (!list.length) return false;
+  const covered = new Set(list.map((c: any) => c.ch + '|' + c.style + '|' + c.fFamily));
+  const styleOf = new Map<string, string>();
+  const familyOf = new Map<string, string>();
+  for (const f of data?.fonts?.list ?? []) {
+    if (f?.fName) { styleOf.set(f.fName, f.fStyle); familyOf.set(f.fName, f.fFamily); }
+    if (f?.fFamily && !familyOf.has(f.fFamily)) { familyOf.set(f.fFamily, f.fFamily); styleOf.set(f.fFamily, f.fStyle); }
+  }
+  let uncovered = false;
+  walkEditableLayers(data, (l) => {
+    if (uncovered || l.ty !== 5) return;
+    const k = l.t?.d?.k;
+    const docs = Array.isArray(k) ? k.map((kf: any) => kf?.s) : [k?.s];
+    for (const doc of docs) {
+      if (!doc || typeof doc.t !== 'string') continue;
+      const style = styleOf.get(doc.f) ?? doc.f;
+      const family = familyOf.get(doc.f) ?? doc.f;
+      for (const ch of doc.t) {
+        if (ch === '\r' || ch === '\n' || ch === '\u0003') continue; // 换行符不查表
+        if (!covered.has(ch + '|' + style + '|' + family)) { uncovered = true; return; }
+      }
+    }
+  });
+  if (!uncovered) return false;
+  delete data.chars;
+  console.info('[text] 字形表盖不住当前文字,已退回浏览器字体渲染(改字不会再消失)');
+  return true;
 }
 
 /* 在「顶层 + 被引用的预合成」里按 ind 找图层 —— 侧栏编辑统一走这里。 */
@@ -4073,6 +4115,9 @@ function reRenderPreservingStateCore(onSettled?: () => void) {
   const watchdog = window.setTimeout(() => {
     if (serial !== buildSerial) settle();
   }, 900);
+  /* 改字触发的重建走的是这条路径(不经过 loadData),所以字形表判定必须在这里也做一次:
+   * 用户改成表外的字时丢掉 chars、退回浏览器文本引擎,否则新字会被渲染成空路径(文字消失)。 */
+  dropCharsIfUncovered(currentData);
   let newAnim: AnimationItem;
   /* loadAnimation 也可能同步抛错（数据异常 / 容器异常）：这条路径必须清掉看门狗并放行
    * 单飞队列，否则后续所有重建请求都会被 rerenderBusy 挡住。 */
