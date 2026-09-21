@@ -1,13 +1,13 @@
-// 将 animation/ccreptile/ 的 PNG 序列打包进 animation_data.json:
+// 将 animations/animation_1/ccreptile/ 的 PNG 序列打包进 animation_data.json:
 // 1) 删除名为「左中上」的图片图层及其 asset(image_2)(若已删除则跳过)
 // 2) 在相同层级位置插入/更新 ccreptile 序列图层(ty=2, ks.src 关键帧 0..608)
 // 3) 追加 609 个 image_ccr_* 的 base64 asset(保持原始 PNG,不修改不透明度)
 import fs from 'node:fs';
 import path from 'node:path';
 
-const SRC = 'I:/Delta Force custom animation/animation/animation_data.json';
-const BACKUP = 'I:/Delta Force custom animation/animation/animation_data.pre-ccreptile-seq.json';
-const SEQ_DIR = 'I:/Delta Force custom animation/animation/ccreptile';
+const SRC = 'I:/Delta Force custom animation/animations/animation_1/animation_data.json';
+const BACKUP = 'I:/Delta Force custom animation/animations/animation_1/animation_data.pre-ccreptile-seq.json';
+const SEQ_DIR = 'I:/Delta Force custom animation/animations/animation_1/ccreptile';
 
 fs.copyFileSync(SRC, BACKUP);
 

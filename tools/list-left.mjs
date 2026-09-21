@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-const j = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animation/animation_data.json','utf8'));
+const j = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animations/animation_1/animation_data.json','utf8'));
 // 内容中心 X = pos.x + scale.x*anchor.x (无旋转),用于判断图层内容的实际水平位置
 function contentX(l) {
   try {

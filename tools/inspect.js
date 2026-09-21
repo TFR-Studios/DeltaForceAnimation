@@ -1,5 +1,5 @@
 const fs = require("fs");
-const p = "I:/Delta Force custom animation/animation/animation_data.json";
+const p = "I:/Delta Force custom animation/animations/animation_1/animation_data.json";
 const j = JSON.parse(fs.readFileSync(p, "utf8"));
 console.log("version:", j.v);
 console.log("size:", j.w + "x" + j.h, " fr:", j.fr, " ip:", j.ip, " op:", j.op);

@@ -50,7 +50,7 @@ await page.evaluate(() => {
   new MutationObserver(() => window.__statusLog.push(el.textContent)).observe(el, { childList: true, characterData: true, subtree: true });
 });
 const input = await page.$('#iconFile');
-await input.uploadFile('I:/Delta Force custom animation/animation_2/icon/Hero_Sp_08.webp');
+await input.uploadFile('I:/Delta Force custom animation/animations/animation_2/icon/Hero_Sp_08.webp');
 await sleep(3500);
 const s2 = await state();
 const a2 = await assets();

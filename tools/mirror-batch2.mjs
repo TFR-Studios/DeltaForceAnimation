@@ -1,6 +1,6 @@
 import fs from 'node:fs';
-const BASE = 'I:/Delta Force custom animation/animation/animation_data.mirrored.json';
-const OUT = 'I:/Delta Force custom animation/animation/animation_data.json';
+const BASE = 'I:/Delta Force custom animation/animations/animation_1/animation_data.mirrored.json';
+const OUT = 'I:/Delta Force custom animation/animations/animation_1/animation_data.json';
 const W = 1920;
 
 const j = JSON.parse(fs.readFileSync(BASE, 'utf8'));

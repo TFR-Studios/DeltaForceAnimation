@@ -9,7 +9,7 @@ fs.mkdirSync(TMP, { recursive: true });
 const OUT = TMP + '/animation.mp4';
 
 // 序列帧 304 的 raw(参考)
-execFileSync('ffmpeg', ['-y', '-v', 'error', '-i', 'I:/Delta Force custom animation/animation/ccreptile/ccreptitle_00304.png', '-f', 'rawvideo', '-pix_fmt', 'rgba', TMP + '/seq304.raw']);
+execFileSync('ffmpeg', ['-y', '-v', 'error', '-i', 'I:/Delta Force custom animation/animations/animation_1/ccreptile/ccreptitle_00304.png', '-f', 'rawvideo', '-pix_fmt', 'rgba', TMP + '/seq304.raw']);
 const seq304 = fs.readFileSync(TMP + '/seq304.raw');
 
 const browser = await puppeteer.launch({

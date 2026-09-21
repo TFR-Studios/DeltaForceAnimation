@@ -1,5 +1,5 @@
 <!-- 三角洲行动动画编辑器 · 单页入口(Vite 构建,纯静态部署) -->
-<!-- 结构顺序:启动加载层 -> 顶栏 -> 主区(预览 + 侧栏) -> 数据加载浮层 -> 导出浮层 -> 状态栏 -->
+<!-- 结构顺序:启动加载层 -> 顶栏 -> 主区(预览 + 侧栏) -> 数据加载浮层 -> 导出浮层 -> 动画画廊 -> 状态栏 -->
 <!-- 样式来自 src/style.css,由 src/main.ts 顶部 import 引入,所以这里没有外部样式表链接 -->
 <!-- 只有启动加载层的样式内联在 head 的 style 标签里:它必须在样式表就绪之前就能渲染,否则会白屏 -->
 <!-- 本文件里的 id 与 main.ts 顶部的 $() 常量一一对应,改名必须两边同步,否则取到 null 后静默失效 -->
@@ -56,17 +56,29 @@
           <path d="M12.146.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1 0 .708l-10 10a.5.5 0 0 1-.168.11l-5 2a.5.5 0 0 1-.65-.65l2-5a.5.5 0 0 1 .11-.168zM11.207 2.5 13.5 4.793 14.793 3.5 12.5 1.207zm1.586 3L10.5 3.207 4 9.707V10h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.293zm-9.761 5.175-.106.106-1.528 3.821 3.821-1.528.106-.106A.5.5 0 0 1 5 12.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.468-.325"/>
         </svg><span class="craft-note-text">网站内动画均由人工使用<b>AE</b>制作，<em>未使用AI辅助</em></span>
       </span>
-      <!-- 动画选择器:option 的 value 就是四套数据包的标识(extraction / exposed / blinds / mission),切换交给 main.ts 的 switchAnimation -->
-      <!-- 首次切到某套动画需要下载对应的动画 JSON,期间由 dataLoading 浮层显示进度 -->
-      <label class="anim-switch" title="切换要编辑的动画">
+      <!-- 动画选择器(顶栏只放「当前动画」这一条,完整列表在下面的动画画廊里) -->
+      <!-- 之所以不再用原生 select:动画变多以后,下拉列表只能显示纯文本、无法分组/搜索/预览,
+           而且会把顶栏宽度撑得忽长忽短。这里改成一个触发器按钮,点击打开 #animPicker 画廊。 -->
+      <!-- 触发器上的缩略图 / 名称 / 规格 / 数量都由 main.ts 的 syncAnimTrigger 写入 -->
+      <div class="anim-switch">
         <span class="anim-switch-label">动画</span>
-        <select id="selAnim">
-          <option value="extraction">撤离动画</option>
-          <option value="exposed">位置暴露动画</option>
-          <option value="blinds">核电站功率动画</option>
-          <option value="mission">任务弹窗动画</option>
-        </select>
-      </label>
+        <button type="button" class="anim-trigger" id="animTrigger" aria-haspopup="dialog" aria-expanded="false"
+                title="选择要编辑的动画(快捷键:斜杠 / 或 Ctrl+K)">
+          <img class="anim-trigger-thumb" id="animTriggerThumb" alt="" aria-hidden="true" />
+          <span class="anim-trigger-text">
+            <span class="anim-trigger-name" id="animTriggerName">撤离动画</span>
+            <span class="anim-trigger-meta" id="animTriggerMeta"></span>
+          </span>
+          <span class="anim-trigger-count" id="animTriggerCount"></span>
+          <svg class="bi anim-trigger-caret" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+            <path d="M8 11.2 2.6 5.8l1.13-1.13L8 8.94l4.27-4.27 1.13 1.13z"/>
+          </svg>
+        </button>
+        <!-- 兼容层:历史校验脚本用 page.select('#selAnim', key) 驱动切换(tools/verify-*.mjs),
+             保留一个隐藏的原生 select 作为「程序化切换入口」,options 由 main.ts 按注册表生成。
+             对用户不可见、不参与 Tab 顺序,只负责 set value + dispatch change 这条老路径。 -->
+        <select id="selAnim" class="anim-compat" tabindex="-1" aria-hidden="true"></select>
+      </div>
     </header>
 
     <!-- 主区:左列预览面板 + 右侧固定 320px 侧栏;两侧各自滚动,页面本身不滚动 -->
@@ -315,6 +327,60 @@
         <div class="export-warn" id="exportWarn" hidden></div>
         <div class="export-actions">
           <button id="btnExportCancel" type="button">取消导出</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 动画画廊(选择动画的主入口):搜索框 + 卡片网格 -->
+    <!-- 这里只搭静态骨架,动态部分全在 main.ts 的「动画选择器」区块 —— 下面每个 id 都对应那里的一个 $() 引用,
+         改名必须两边同步,否则取到 null 后静默失效(与本文件顶部那条约定一致)。 -->
+    <!-- 骨架里没有的东西,都是有意的:没有分组筛选条、没有收藏星标、卡片上也没有简介。
+         要加回其中任何一样,除了这里补 DOM,还要动 main.ts 的 renderAnimGallery 与 style.css 的
+         「动画画廊」段;tools/verify-anim-picker.mjs 里有一条检查专门盯着「这三样不该存在」。 -->
+    <!-- 交互约定(实现都在 main.ts):点卡片任意位置 = 切换;Esc / 点背景 / 点关闭按钮 = 关闭;
+         方向键移动、Enter 切换、数字 1–9 直选、Home/End 跳首尾;鼠标移到卡片上方向键光标会跟着走;
+         滚轮落在面板任意位置都能滚动网格;选完动画会把焦点交还给页面,所以紧接着按空格是播放/暂停。 -->
+    <!-- 若要新增/增删卡片上的字段,只需要改 main.ts 的 renderAnimGallery —— 卡片是整段 innerHTML 重画的,
+         这里不用加任何节点。卡片数量随 ANIMATIONS 注册表自动增长,顶栏那条触发器长度不变。 -->
+    <div class="anim-picker" id="animPicker" hidden role="dialog" aria-modal="true" aria-labelledby="animPickerTitle">
+      <div class="ap-backdrop" id="animPickerBackdrop"></div>
+      <div class="ap-panel">
+        <div class="ap-head">
+          <div class="ap-title-wrap">
+            <h2 class="ap-title" id="animPickerTitle">选择动画</h2>
+            <p class="ap-sub" id="animPickerSub"></p>
+          </div>
+          <div class="ap-search">
+            <svg class="bi ap-search-ico" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path d="M11.74 10.34a6.5 6.5 0 1 0-1.397 1.398l.098.115 3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z"/>
+            </svg>
+            <input type="search" id="animSearch" placeholder="搜索动画名称 / 关键词…" autocomplete="off" spellcheck="false" aria-label="搜索动画" />
+            <button type="button" class="ap-search-clear" id="animSearchClear" title="清空搜索" aria-label="清空搜索" hidden>
+              <svg class="bi" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                <path d="M4.65 4.65a.8.8 0 0 1 1.13 0L8 6.87l2.22-2.22a.8.8 0 1 1 1.13 1.13L9.13 8l2.22 2.22a.8.8 0 0 1-1.13 1.13L8 9.13l-2.22 2.22a.8.8 0 0 1-1.13-1.13L6.87 8 4.65 5.78a.8.8 0 0 1 0-1.13z"/>
+              </svg>
+            </button>
+          </div>
+          <button type="button" class="ap-close" id="animPickerClose" title="关闭(Esc)" aria-label="关闭">
+            <svg class="bi" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path d="M4.65 4.65a.8.8 0 0 1 1.13 0L8 6.87l2.22-2.22a.8.8 0 1 1 1.13 1.13L9.13 8l2.22 2.22a.8.8 0 0 1-1.13 1.13L8 9.13l-2.22 2.22a.8.8 0 0 1-1.13-1.13L6.87 8 4.65 5.78a.8.8 0 0 1 0-1.13z"/>
+            </svg>
+          </button>
+        </div>
+        <!-- 卡片网格。这是面板里唯一的滚动区(main.ts 把落在面板别处的滚轮转发到它身上);
+             #animGrid 内的卡片由 main.ts 的 renderAnimGallery 整段重写,#animEmpty 是无匹配时的空状态 -->
+        <div class="ap-body" id="animPickerBody">
+          <div class="ap-grid" id="animGrid"></div>
+          <div class="ap-empty" id="animEmpty" hidden>
+            <svg class="bi bi-xl" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path d="M11.74 10.34a6.5 6.5 0 1 0-1.397 1.398l.098.115 3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z"/>
+            </svg>
+            <p id="animEmptyText">没有匹配的动画</p>
+          </div>
+        </div>
+        <div class="ap-foot">
+          <span class="ap-hint"><kbd>↑</kbd><kbd>↓</kbd><kbd>←</kbd><kbd>→</kbd> 移动 · <kbd>Enter</kbd> 切换 · <kbd>1</kbd>–<kbd>9</kbd> 直选 · <kbd>Esc</kbd> 关闭</span>
+          <span class="ap-hint">点卡片任意位置即可切换,最近用过的排在前面</span>
         </div>
       </div>
     </div>

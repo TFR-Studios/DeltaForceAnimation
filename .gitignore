@@ -8,7 +8,7 @@ dist/
 Thumbs.db
 
 # 动画备份文件(仅保留主文件 animation_data.json)
-animation/animation_data.*.json
+animations/animation_1/animation_data.*.json
 
 # 验证脚本生成的测试视频
 tools/*.avi
@@ -20,5 +20,5 @@ tools/*.avi
 tools/.frames.raw
 
 
-# AE video-layer footage inside animation_4 (unused by the site, can be GBs)
-animation_4/images/*.mp4
+# AE video-layer footage inside animations/animation_4 (unused by the site, can be GBs)
+animations/animation_4/images/*.mp4

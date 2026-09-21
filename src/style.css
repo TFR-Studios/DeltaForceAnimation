@@ -1,7 +1,8 @@
 /* 三角洲行动动画编辑器 · 全局样式表
  * 纯静态单页,无预处理器、无 CSS 框架,样式全部集中在本文件(由 src/main.ts 顶部 import 后进产物)。
  * 阅读顺序:设计令牌 -> 顶栏(含「制作声明」徽标的全套动效) -> 主区(预览舞台、时间轴、播放控制条)
- *           -> 侧栏(动画信息、时长、文字/形状/图片/图标/弹窗图层) -> 状态栏 -> 导出浮层 -> 数据加载浮层。
+ *           -> 侧栏(动画信息、时长、文字/形状/图片/图标/弹窗图层) -> 状态栏 -> 导出浮层 -> 数据加载浮层
+ *           -> 动画画廊(顶栏触发器的展开面板:搜索 + 分组 + 卡片网格)。
  * 约定:index.html 只搭骨架,里面的 .craft-ready / .is-active / .panning / .indet / .error / .done
  * 等状态类都由 main.ts 在运行时增删;改类名必须两边同步,写错不会报错,只会静默失去样式。 */
 :root {
@@ -223,7 +224,9 @@ html.craft-ready .craft-note::before {
   margin-left: 8px;
   vertical-align: 1px;
 }
-/* 动画切换选择器 */
+/* 动画切换器(顶栏)
+ * 顶栏只保留「当前动画」这一条触发器,宽度写死上限 —— 动画数量增长只影响画廊里的卡片数,
+ * 顶栏的长度永远不变(旧版用的原生 select 会随最长选项名把顶栏撑得忽长忽短)。 */
 .anim-switch {
   display: flex;
   align-items: center;
@@ -232,15 +235,52 @@ html.craft-ready .craft-note::before {
   color: var(--dim);
   font-size: 13px;
   white-space: nowrap;
-}
-.anim-switch-label { font-size: 12px; }
-/* 固定 150px 且 flex:none:三个动画名长度不同(撤离动画 / 位置暴露动画 / 核电站功率动画),
- * 若让宽度自适应,切换动画时整条顶栏会左右抖动。 */
-.anim-switch select {
   min-width: 0;
-  width: 150px;
-  flex: none;
 }
+.anim-switch-label { font-size: 12px; flex: none; }
+/* 触发器:缩略图 + 名称 + 规格 + 总数徽标 + 箭头,整块可点 */
+.anim-trigger {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 4px 9px 4px 5px;
+  min-width: 0;
+  max-width: 320px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel-2);
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease;
+}
+.anim-trigger:hover,
+.anim-trigger[aria-expanded="true"] { border-color: var(--accent); background: #202531; }
+.anim-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* 缩略图:16:9 小图,没有预览图时用 --ap-accent(内联变量)铺一层渐变兜底 */
+.anim-trigger-thumb {
+  width: 36px;
+  height: 21px;
+  flex: none;
+  border-radius: 4px;
+  object-fit: contain;
+  background: linear-gradient(135deg, var(--ap-accent, #2a3142), #12151b);
+}
+.anim-trigger-thumb:not([src]), .anim-trigger-thumb[src=""] { visibility: hidden; }
+.anim-trigger-text { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; min-width: 0; line-height: 1.3; }
+.anim-trigger-name { font-size: 13px; font-weight: 600; max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.anim-trigger-meta { font-size: 10.5px; color: var(--dim); white-space: nowrap; }
+.anim-trigger-count {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--dim);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 6px;
+}
+.anim-trigger-caret { color: var(--dim); transition: transform 0.18s ease; }
+.anim-trigger[aria-expanded="true"] .anim-trigger-caret { transform: rotate(180deg); }
+/* 兼容层:隐藏但仍在 DOM 里,供历史校验脚本 set value + dispatch change 驱动切换 */
+.anim-compat { display: none; }
 /* 历史遗留:旧版「文件选择区」的容器样式,当前 index.html 与 src 下没有任何地方使用(全仓库仅此一处)。
  * 先保留不动,确认没有外部引用后再删。 */
 .picker { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 320px; }
@@ -1013,3 +1053,333 @@ input[type="color"] { padding: 0; width: 34px; height: 26px; }
   color: #6b7280;
   line-height: 1.5;
 }
+/* ==================== 动画画廊(选择动画的主入口) ====================
+ * 骨架在 index.html 的 #animPicker,卡片由 main.ts 的 renderAnimGallery 生成 —— 本段只管外观。
+ *
+ * 类名地图(按 DOM 从外到内):
+ *   .anim-picker          全屏浮层(定位 + 居中)
+ *     .ap-backdrop        遮罩(点击关闭,事件在 main.ts)
+ *     .ap-panel           面板:头部 / 网格 / 底部三段,内容高度自适应,max-height 封顶
+ *       .ap-head          头部:标题 + 搜索框 + 关闭按钮(窄屏时自动换行)
+ *         .ap-title/.ap-sub
+ *         .ap-search + .ap-search-ico / .ap-search-clear
+ *         .ap-close
+ *       .ap-body          网格的滚动容器(唯一滚动区)
+ *         .ap-grid        卡片网格;搜索时会被 main.ts 挂上 .is-searching(用于隐藏序号角标)
+ *           .ap-card      一张卡片;.is-current = 当前动画,.is-cursor = 键盘/鼠标光标所在
+ *             .ap-card-pick  整张卡片的按钮
+ *               .ap-card-cover 封面(预览图 + 左上序号 .ap-card-num + 右上「当前」.ap-card-badge)
+ *               .ap-card-info  名称 / 规格 .ap-card-specs / 特性 .ap-feat
+ *       .ap-foot          底部快捷键提示
+ *
+ * 层级 200:高于导出浮层(100),低于两个加载浮层(9999)—— 切换动画时画廊先淡出,再让加载层盖住。
+ *
+ * 想调外观时的常用入口:
+ *   • 卡片大小 / 一屏几张     → .ap-grid 的 grid-template-columns(最小列宽)
+ *   • 面板宽高              → .ap-panel 的 width / max-height
+ *   • 配色                  → 卡片主色来自注册项的 accent,运行时写进行内变量 --ap-accent / --ap-glow
+ *   • 关闭全部动效          → 文件末尾的 prefers-reduced-motion 媒体查询里已统一关掉 */
+.anim-picker {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.anim-picker[hidden] { display: none; }
+.ap-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(6, 8, 12, 0.72);
+  backdrop-filter: blur(6px);
+  animation: apFade 0.12s ease both;
+}
+.ap-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(1140px, 100%);
+  max-height: min(86vh, 880px);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: 0 26px 80px rgba(0, 0, 0, 0.62);
+  overflow: hidden;
+  /* 入场刻意做短(0.14s):这是一个"随手打开随手关"的选择面板,
+   * 动效存在的意义只是让出现不突兀,不该让用户等它演完。 */
+  animation: apRise 0.14s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes apFade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes apRise {
+  from { opacity: 0; transform: translateY(8px) scale(0.99); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* ---- 头部:标题 + 搜索 + 关闭 ---- */
+.ap-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 16px 13px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.ap-title-wrap { min-width: 0; }
+.ap-title { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: 0.3px; }
+.ap-sub { margin: 3px 0 0; font-size: 11.5px; color: var(--dim); }
+.ap-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 260px;
+  min-width: 200px;
+  max-width: 420px;
+  margin-left: auto;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--panel-2);
+}
+.ap-search:focus-within { border-color: var(--accent); }
+.ap-search-ico { color: var(--dim); }
+/* 搜索框:覆盖全局 input 的默认外观,只留一条无边框的输入区 */
+.ap-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  padding: 9px 0;
+}
+.ap-search input::-webkit-search-cancel-button { display: none; }
+.ap-search-clear {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--dim);
+  cursor: pointer;
+}
+.ap-search-clear:hover { color: var(--text); background: rgba(255, 255, 255, 0.08); }
+.ap-close {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  flex: none;
+  border-radius: 8px;
+  color: var(--dim);
+}
+.ap-close:hover { color: var(--text); border-color: var(--accent); }
+.ap-close .bi { width: 15px; height: 15px; }
+
+/* ---- 卡片网格 ---- */
+/* 网格是面板里唯一滚动的地方;滚动条做细一点,免得在一个"浮层"里出现粗重的系统滚动条 */
+.ap-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: #333a47 transparent;
+}
+.ap-body::-webkit-scrollbar { width: 9px; }
+.ap-body::-webkit-scrollbar-thumb { background: #333a47; border-radius: 999px; border: 2px solid transparent; background-clip: padding-box; }
+.ap-body::-webkit-scrollbar-thumb:hover { background: #455065; background-clip: padding-box; }
+.ap-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(224px, 1fr));
+  gap: 12px;
+  padding: 14px 16px 18px;
+  align-content: start;
+}
+.ap-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel-2);
+  overflow: hidden;
+  transition: transform 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.ap-card:hover { transform: translateY(-2px); border-color: #3d4657; box-shadow: 0 12px 28px rgba(0, 0, 0, 0.42); }
+/* 按下即回弹:点下去马上有触感反馈,配合"立刻关闭 + 开始切换",不会有"点了没反应"的怀疑 */
+.ap-card:active { transform: translateY(0) scale(0.985); }
+.ap-card.is-current { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 12px 28px rgba(59, 130, 246, 0.2); }
+/* 键盘光标(方向键移动):与 hover 区分开,用外描边而不是位移 */
+/* 键盘光标(鼠标移动也会同步过来,所以滚轮浏览时它就跟着走):
+ * 用外描边而不是位移/边框色,和 hover 的抬起效果叠加也不会糊成一片。 */
+.ap-card.is-cursor { outline: 2px solid rgba(96, 165, 250, 0.7); outline-offset: 2px; }
+/* 卡片主体本身就是按钮:覆盖全局 button 的边框/背景/内边距,只保留可点击语义 */
+.ap-card-pick {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.ap-card-pick:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ap-card-cover {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: linear-gradient(135deg, var(--ap-accent, #2a3142), #12151b);
+  overflow: hidden;
+}
+/* 封面图缩放用 contain 而不是 cover:预览图由 tools/build-anim-posters.mjs 统一产出 16:9,
+ * 两者结果一致;万一有人手工丢进一张别的比例,contain 只会留边,不会把画面裁掉。 */
+.ap-card-cover img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transition: transform 0.3s ease;
+}
+.ap-card:hover .ap-card-cover img { transform: scale(1.04); }
+/* 封面右上一角压一层主色:预览图多为纯黑背景,靠这层颜色区分不同动画 */
+.ap-card-cover::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(200deg, var(--ap-glow, transparent) 0%, transparent 58%);
+}
+/* 序号角标 = 数字键直选的提示(1–9)。做成半透明圆片压在封面左上角,
+ * 不抢封面视线,但一眼能对上键盘上按几。 */
+.ap-card-num {
+  position: absolute;
+  left: 7px;
+  top: 7px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  background: rgba(9, 11, 15, 0.62);
+  color: #cbd5e1;
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 11px;
+  line-height: 1;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
+}
+/* 搜索态下隐藏序号:那时数字键还给搜索框,界面不能给出"可以按数字"的暗示 */
+.ap-grid.is-searching .ap-card-num { display: none; }
+/* 「当前」角标放右上角,和左上角的序号各占一角 */
+.ap-card-badge {
+  position: absolute;
+  right: 7px;
+  top: 7px;
+  z-index: 1;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.92);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+/* 信息区:名称 / 规格 / 特性标签三行,行距收紧 —— 没有简介之后卡片矮了一截,
+ * 一屏能看到的动画更多,滚动也就更少。 */
+.ap-card-info { display: flex; flex-direction: column; gap: 4px; padding: 9px 11px 11px; }
+.ap-card-name {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ap-card-specs { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 10.5px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.ap-card-specs i { font-style: normal; opacity: 0.4; }
+.ap-card-feats { display: flex; gap: 5px; flex-wrap: wrap; }
+.ap-feat {
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 10.5px;
+  color: var(--dim);
+}
+.ap-feat.is-audio { color: #7fa9f5; border-color: rgba(59, 130, 246, 0.4); }
+.ap-feat.is-mute { color: #6b7280; }
+
+/* ---- 空状态 ---- */
+.ap-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 62px 20px;
+  color: var(--dim);
+  font-size: 13px;
+}
+.ap-empty[hidden] { display: none; }
+.bi-xl { width: 30px; height: 30px; opacity: 0.35; }
+
+/* ---- 底部:快捷键提示 ---- */
+.ap-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 10px 18px;
+  border-top: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.015);
+}
+.ap-hint { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: #6b7280; }
+.ap-hint .bi { width: 12px; height: 12px; color: #fbbf24; }
+.ap-hint kbd {
+  display: inline-block;
+  min-width: 17px;
+  padding: 1px 4px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--panel-2);
+  color: var(--dim);
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 10px;
+  text-align: center;
+}
+
+/* ---- 窄屏:面板铺满、网格收窄 ---- */
+@media (max-width: 720px) {
+  .anim-picker { padding: 0; }
+  .ap-panel { width: 100%; max-height: 100%; height: 100%; border-radius: 0; border: 0; }
+  .ap-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; padding: 12px; }
+  .ap-head { padding: 12px; }
+  .ap-search { margin-left: 0; flex-basis: 100%; max-width: none; }
+  .ap-foot { justify-content: center; padding: 8px 12px; }
+  .ap-foot .ap-hint:last-child { display: none; }
+  .anim-trigger-name { max-width: 96px; }
+  .anim-trigger-meta, .anim-trigger-count { display: none; }
+}
+/* 系统开启「减少动态效果」:只保留终态,不做淡入/上浮/放大 */
+@media (prefers-reduced-motion: reduce) {
+  .ap-backdrop, .ap-panel { animation: none; }
+  .ap-card, .ap-card-cover img, .anim-trigger-caret { transition: none; }
+  .ap-card:hover { transform: none; }
+  .ap-card:hover .ap-card-cover img { transform: none; }
+}
+

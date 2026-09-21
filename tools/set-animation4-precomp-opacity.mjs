@@ -1,7 +1,7 @@
 /* 把「任务弹窗动画」预合成里「形状图层 6」的默认不透明度设为 80%。
  * 该层的不透明度是「31 帧 0 → 42 帧 100」的关键帧动画,按比例缩放关键帧(峰值 100 → 80),
  * 淡入过程保持原样,与站点侧不透明度滑块(按峰值等比缩放)完全一致。
- * 就地改 animation_4/animation_data.json,首次运行前备份;--dry-run 预览,--revert 还原。
+ * 就地改 animations/animation_4/animation_data.json,首次运行前备份;--dry-run 预览,--revert 还原。
  *
  * 用法:node tools/set-animation4-precomp-opacity.mjs [--dry-run|--revert]
  */
@@ -9,8 +9,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
-const FILE = path.join(ROOT, 'animation_4', 'animation_data.json');
-const BACKUP = path.join(ROOT, 'animation_4', 'animation_data.pre-precomp-opacity.json');
+const FILE = path.join(ROOT, 'animations/animation_4', 'animation_data.json');
+const BACKUP = path.join(ROOT, 'animations/animation_4', 'animation_data.pre-precomp-opacity.json');
 const TARGET_LAYER = '形状图层 6';
 const TARGET_OPACITY = 80;
 

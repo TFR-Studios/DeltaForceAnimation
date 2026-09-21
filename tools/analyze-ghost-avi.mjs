@@ -40,7 +40,7 @@ const materialCache = {};
 for (const f of sampleFrames) {
   const n = String(f).padStart(5, '0');
   try {
-    execFileSync('ffmpeg', ['-y', '-v', 'error', '-i', `I:/Delta Force custom animation/animation/ccreptile/ccreptitle_${n}.png`, '-f', 'rawvideo', '-pix_fmt', 'rgba', `${TMP}/m${f}.raw`]);
+    execFileSync('ffmpeg', ['-y', '-v', 'error', '-i', `I:/Delta Force custom animation/animations/animation_1/ccreptile/ccreptitle_${n}.png`, '-f', 'rawvideo', '-pix_fmt', 'rgba', `${TMP}/m${f}.raw`]);
     materialCache[f] = fs.readFileSync(`${TMP}/m${f}.raw`);
   } catch { /* 帧素材缺失 */ }
 }

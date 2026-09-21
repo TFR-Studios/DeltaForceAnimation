@@ -1,7 +1,7 @@
 /* 验证主题颜色与图标选择两项功能:
  * A. 主题颜色区:两个色块(默认填充颜色 / 描边默认颜色),改一次把「等于该颜色值」的填充与描边全部替换
  *    (含预合成内部),计数更新,可连续二次修改,「重置为默认色」回到 #77B0F0 / #78C5F3;
- * B. 图标选择:任务弹窗动画用 animation_4/icon/ 的 MallIcon_*,位置暴露动画仍是 Hero_Sp_*。 */
+ * B. 图标选择:任务弹窗动画用 animations/animation_4/icon/ 的 MallIcon_*,位置暴露动画仍是 Hero_Sp_*。 */
 import puppeteer from 'puppeteer-core';
 const URL = 'http://127.0.0.1:5173/';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -84,10 +84,10 @@ try {
 
   const icons = await page.evaluate(() => [...document.querySelectorAll('#iconList .icon-name')].map((n) => n.textContent));
   console.log('任务弹窗图标列表(' + icons.length + '): ' + icons.join(', '));
-  check('图标来自 animation_4/icon/(全部 MallIcon_*)', icons.length >= 8 && icons.every((n) => n.startsWith('MallIcon_')), icons.join(','));
+  check('图标来自 animations/animation_4/icon/(全部 MallIcon_*)', icons.length >= 8 && icons.every((n) => n.startsWith('MallIcon_')), icons.join(','));
   check('不再混入 Hero_Sp_*', !icons.some((n) => n.startsWith('Hero_Sp')), icons.filter((n) => n.startsWith('Hero_Sp')).join(','));
   const thumb = await page.evaluate(() => { const el = document.querySelector('#iconList .icon-item.is-active .icon-thumb') || document.querySelector('#iconList .icon-thumb'); return el ? el.getAttribute('src') : null; });
-  check('缩略图来自 animation_4/icon/', (thumb || '').includes('/animation_4/icon/'), String(thumb));
+  check('缩略图来自 animations/animation_4/icon/', (thumb || '').includes('/animations/animation_4/icon/'), String(thumb));
 
   await page.select('#selAnim', 'exposed');
   for (let i = 0; i < 60; i++) { const ok = await page.evaluate(() => document.getElementById('statusbar').textContent.includes('位置暴露动画')); if (ok) break; await sleep(500); }

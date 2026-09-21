@@ -1,6 +1,6 @@
 /* 统计:按「纯红填充隐藏」规则,每套动画各有多少形状图层的填充编辑会被隐藏(静态核对,不依赖浏览器)。 */
 const fs = require('fs');
-const list = { '撤离动画': 'animation/animation_data.json', '位置暴露动画': 'animation_2/animation_data.json', '核电站功率动画': 'animation_3/animation_data.json', '任务弹窗动画': 'animation_4/animation_data.json' };
+const list = { '撤离动画': 'animations/animation_1/animation_data.json', '位置暴露动画': 'animations/animation_2/animation_data.json', '核电站功率动画': 'animations/animation_3/animation_data.json', '任务弹窗动画': 'animations/animation_4/animation_data.json' };
 const hex = (fc) => '#' + fc.slice(0, 3).map((v) => Math.max(0, Math.min(255, Math.round(v * 255))).toString(16).padStart(2, '0')).join('');
 for (const [name, p] of Object.entries(list)) {
   const d = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/' + p, 'utf8'));

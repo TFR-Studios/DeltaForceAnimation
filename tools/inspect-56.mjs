@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-const j = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animation/animation_data.json','utf8'));
+const j = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animations/animation_1/animation_data.json','utf8'));
 const l = j.layers.find(x => x.ind === 56);
 const ks = l.ks || {};
 console.log('图层 ind56 [' + l.nm.trim() + '] ty=' + l.ty + ' refId=' + l.refId + ' parent=' + (l.parent ?? '(无)'));

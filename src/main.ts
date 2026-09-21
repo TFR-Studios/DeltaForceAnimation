@@ -5,7 +5,7 @@
  * 素材打包:动画 JSON、字体、音效、PNG 序列全部作为「静态资源」进产物 ——
  *   JSON 用 ?url 按需 fetch(避免首屏拖十几 MB 的 chunk);字体用 new URL(字面量, import.meta.url);
  *   图片序列用 import.meta.glob({ eager: true, query: '?url' })。Bodymovin 内嵌的 TTF 已剥离为
- *   animation/fonts/ 下的共享文件,由本文件在运行时注册(否则只有装过该字体的机器显示正常)。
+ *   animations/animation_1/fonts/ 下的共享文件,由本文件在运行时注册(否则只有装过该字体的机器显示正常)。
  *
  * 渲染管线:lottie-web 两套渲染器(SVG / Canvas)可切换,渲染器在构造时确定,切换即整段重建。
  *   本文件在渲染器树上打三类补丁(见各 patch 区块):
@@ -13,9 +13,10 @@
  *   图片序列驱动(逐帧换 src / <image> href,并强制 lottie 重绘,否则静态层画过一次就不再更新)、
  *   叠加序列调色(feColorMatrix 做 colorize,滤镜宿主挂在 body 的隐藏 svg 上,预览与导出共用)。
  *
- * 四套动画(ANIMATIONS,按需加载):撤离动画(1920×1080)、位置暴露动画(画布加宽为 3840×1080,
+ * 五套动画(ANIMATIONS,按需加载):撤离动画(1920×1080)、位置暴露动画(画布加宽为 3840×1080,
  *   可把「二次扫描」第二段合并进同一条时间轴)、核电站功率动画(两条 359 帧透明序列叠加)、
- *   任务弹窗动画(1920×1080,自带一枚货币图标,可在「图标选择」里替换/上传并调不透明度)。
+ *   任务弹窗动画(1920×1080,自带一枚货币图标,可在「图标选择」里替换/上传并调不透明度)、
+ *   地图标题动画(方形 1024×1024,纯文字 + 形状的「地图名称 / 地图地点」标题卡)。
  *
  * 编辑面板(所有编辑都是就地改渲染用的 JSON,再走 reRenderPreservingState() 单飞重建并恢复播放位置):
  *   • 文字 / 形状 / 图片图层列表 —— 顶层与被引用的预合成(assets[] 里的合成)内部都列出,预合成项名字带「合成名 ›」前缀;
@@ -33,10 +34,10 @@ import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import './style.css';
 
 /* 音效资源:独立小文件(?url 打包为静态资源),不进入大体积动画数据 chunk */
-import bundledAudioUrl from '../animation/gunmuchenggong.mp3?url';
-import exposedAudioUrl from '../animation_2/UI_C201_Energy_Scout_Bow_Scout_02.wav?url';
+import bundledAudioUrl from '../animations/animation_1/gunmuchenggong.mp3?url';
+import exposedAudioUrl from '../animations/animation_2/UI_C201_Energy_Scout_Bow_Scout_02.wav?url';
 /* 核电站功率动画音效(48kHz 立体声,约 6.0s,与 359 帧 @60fps 基本等长) */
-import blindsAudioUrl from '../animation_3/反应堆音效.wav?url';
+import blindsAudioUrl from '../animations/animation_3/反应堆音效.wav?url';
 
 /* 共享字体资源的静态地址。
  * 不要写成 import ... from '*.ttf?url':Vite 7 的 dev server 对「模块请求 + ?url」
@@ -48,15 +49,15 @@ import blindsAudioUrl from '../animation_3/反应堆音效.wav?url';
  * build 下由 Vite 静态分析后输出带 hash 的静态资源。两个写法上的硬约束:
  *  1) 路径必须是字符串字面量,且 new URL 的调用要直接写在 new 表达式里 ——
  *     包进普通函数(如 assetUrl(path))Vite 就无法静态分析,build 阶段不会产出字体
- *     文件,产物里会残留 '../animation/fonts/*.ttf' 这种源码相对路径,build 后 404;
+ *     文件,产物里会残留 '../animations/animation_1/fonts/*.ttf' 这种源码相对路径,build 后 404;
  *  2) 用相对路径而非 '/xxx' 绝对路径,部署到子路径时同样可用。 */
-const FONT_MEDIUM_URL = new URL('../animation/fonts/ProjectDType-Medium.ttf', import.meta.url).href;
-const FONT_CURVE_URL = new URL('../animation/fonts/ProjectDTypeCurve-Bold.ttf', import.meta.url).href;
+const FONT_MEDIUM_URL = new URL('../animations/animation_1/fonts/ProjectDType-Medium.ttf', import.meta.url).href;
+const FONT_CURVE_URL = new URL('../animations/animation_1/fonts/ProjectDTypeCurve-Bold.ttf', import.meta.url).href;
 
 /* 同一字体的 WOFF2 版本:仅供「SVG 逐帧光栅化导出」内联使用(体积约为 TTF 的一半,
  * 每帧都要重新解析一次内联字体,所以这里省下的是实打实的导出时间)。 */
-const FONT_MEDIUM_WOFF2_URL = new URL('../animation/fonts/ProjectDType-Medium.woff2', import.meta.url).href;
-const FONT_CURVE_WOFF2_URL = new URL('../animation/fonts/ProjectDTypeCurve-Bold.woff2', import.meta.url).href;
+const FONT_MEDIUM_WOFF2_URL = new URL('../animations/animation_1/fonts/ProjectDType-Medium.woff2', import.meta.url).href;
+const FONT_CURVE_WOFF2_URL = new URL('../animations/animation_1/fonts/ProjectDTypeCurve-Bold.woff2', import.meta.url).href;
 
 /* ---------- 启动加载界面 ----------
  * #app-loading 的样式是内联在 index.html 中的(不依赖本文件 import 的 style.css),
@@ -227,7 +228,7 @@ function patchAudioDestroy(animItem: any) {
 
 /* ---------- 字体预加载 ----------
  * Bodymovin 可把 TTF 以 base64 内嵌在 fonts.list[].fPath 中;为减小数据包体积,
- * 各动画 JSON 内的字体已剥离为仓库唯一的共享字体文件(animation/fonts/)。
+ * 各动画 JSON 内的字体已剥离为仓库唯一的共享字体文件(animations/animation_1/fonts/)。
  * 因此必须由站点自己把字体注册给浏览器,否则只有「本机装过该字体」的人才能看到
  * 正确字形,其他人会静默回退到系统默认字体。
  *
@@ -365,7 +366,7 @@ function registerFontFamily(fam: string, source: ArrayBuffer): Promise<boolean> 
 
 /* 为一份动画 JSON 注册它用到的全部字体。fonts.list 每项两种情况:
  *  • 仍有 fPath(旧数据:TTF base64 内嵌在 fPath 里)—— 直接按 CSS url(...) 交给 FontFace;
- *  • fPath 已被剥离 —— 用 resolveFontUrl 查到 animation/fonts/ 下的共享文件,取二进制后校验魔数再注册。
+ *  • fPath 已被剥离 —— 用 resolveFontUrl 查到 animations/animation_1/fonts/ 下的共享文件,取二进制后校验魔数再注册。
  * 查不到 / 魔数不对 / 注册抛错都只记 warning 并标 failed,绝不阻断动画渲染(回退系统字体)。
  * 全部完成后 await document.fonts.ready,保证首帧渲染时字形已经可用;
  * DEV 下把状态挂到 window.__fontDebug,方便确认用的是「本站注册的字体」而不是本机同名系统字体。 */
@@ -488,6 +489,14 @@ function patchCanvasTextElement(el: any) {
         this.textAnimator.renderedLetters || [])
       : [];
     const canPerLetter = !!(letters && renderedLetters.length > 0);
+    /* 是否需要我们「自己重算」逐字母 advance:只有当 lottie 拿不到字形数据时才需要。
+     * JSON 内嵌了 chars 的动画(地图标题动画 chars=5、任务弹窗动画 chars=13)lottie 会按
+     * 字形轮廓算出正确的 letters[i].l(l 即该字的前进宽度),此时 renderedLetters 的 p[12]
+     * 已经是正确间距;再补偿一次等于把字距翻倍 —— 表现为文字被撑到画布外(地图标题动画
+     * 实测:文字宽度由 347 → 约 694 合成单位,盖过底框并被画布裁掉)。
+     * 反之 chars 为空的动画(撤离/位置暴露/核电站)l 恒为 0,p[12] 只剩 tracking,必须补偿。
+     * 同一条文字里 l 要么全有要么全无,所以判定放在循环外即可。 */
+    const advanceMissing = !!letters && letters.some((lt: any) => !lt.n && !lt.l);
     if (canPerLetter) {
       // 逐字母绘制:复用 lottie 文字动画器的逐字母矩阵/透明度/颜色。
       // 注意:字形数据缺失时 lottie 计算的逐字母 advance(letters[i].l)为 0,
@@ -529,7 +538,7 @@ function patchCanvasTextElement(el: any) {
         const rl = renderedLetters[i];
         if (!rl) continue;
         const ln = letters[i].line;
-        const dx = xPos + justifyX(ln) - (xPosBroken + justifyXBroken(ln));
+        const dx = advanceMissing ? (xPos + justifyX(ln) - (xPosBroken + justifyXBroken(ln))) : 0;
         renderer.save();
         // rl.p 是 16 元素变换矩阵(列主序),p[12]/p[13] 是平移分量;复制一份再改,避免污染 lottie 缓存的矩阵
         const p = Array.from(rl.p || []);
@@ -740,7 +749,10 @@ function patchSeqCanvasElement(el: any, entry: SeqEntry) {
           mySlot.onload = () => {
             const anim = (window as any).__anim;
             if (anim && anim.isLoaded && anim.renderer) {
-              try { (anim.renderer as any).renderFrame(anim.currentFrame, true); } catch { /* ignore */ }
+              /* renderer.renderFrame 收的是**绝对帧**(lottie 内部会传 currentFrame + firstFrame),
+               * 而 anim.currentFrame 是相对帧;ip>0 的动画这里要补回 firstFrame,否则补渲会偏到别的帧。
+               * 现有素材 ip 都是 0(且带序列图的动画本就没有 ip>0 的),属于预防性修正。 */
+              try { (anim.renderer as any).renderFrame(anim.currentFrame + (anim.firstFrame ?? 0), true); } catch { /* ignore */ }
             }
           };
         }
@@ -1086,10 +1098,12 @@ async function loadData(data: any, name: string) {
   destroyAnim();
   currentData = data;
   currentName = name;
-  // 位置暴露动画默认时长 1.25s(内容时长),总播放 = 内容时长 + 5 帧;仅首次载入时应用
-  if (name === '位置暴露动画' && !defaultDurationApplied) {
+  /* 默认时长(注册项 caps.defaultDuration):位置暴露动画载入时压缩到 1.25s 内容时长,
+   * 总播放 = 内容时长 + 5 帧;仅首次载入时应用,之后交给用户的时长滑杆。 */
+  const defaultDur = animDef()?.caps.defaultDuration;
+  if (defaultDur && !defaultDurationApplied) {
     defaultDurationApplied = true;
-    applyMainDuration(data, 1.25);
+    applyMainDuration(data, defaultDur);
   }
   /* 预合成内部图层的 ind 挪到独立号段(幂等):侧栏要能编辑预合成里的文字/形状/图片,
    * 而它们的 ind 只在各自合成内唯一,会与顶层撞号(详见 normalizePrecompInds 的注释)。
@@ -1184,14 +1198,23 @@ function onAnimReady() {
 }
 
 /* ---------- 播放控制 ---------- */
-/* 动画的首帧 / 末帧:lottie 的 totalFrames 是「帧数」,末帧下标为 totalFrames-1。
+/* 帧号约定(踩过坑,改动前务必先读):
+ * lottie 的 currentFrame / currentRawFrame 是**相对帧号** —— 0 就代表合成的 ip,
+ * 它内部渲染时会再补上一次 animationData.ip(见 AnimationItem.renderFrame 的
+ * renderer.renderFrame(this.currentFrame + this.firstFrame))。因此:
+ *   • 本应用里「首帧」恒为 0(first 参数是相对帧);把 a.firstFrame(= ip)当首帧传回
+ *     goToAndStop(.., true) 会让 ip>0 的动画凭空多跳过 ip 帧 —— 地图标题动画的 ip=4,
+ *     「重新播放」于是落到相对帧 4(合成帧 8),此时「地图名称」的不透明度已淡入到 88.9%,
+ *     表现就是「一开场就没有透明度、看不到淡入」。其它动画 ip=0,所以这个坑长期没暴露。
+ *     (该动画的 ip 已在素材侧归一为 0,见 README;此处保留 ip>0 的正确处理,以防日后
+ *      再接入 ip≠0 的素材 —— 这类素材很常见,不能依赖"大家都从 0 开始"。)
+ *   • 同理,末帧(相对)恒为 totalFrames-1,不能再加 firstFrame,否则 ip>0 时
+ *     currentFrame 永远够不到 326 这种值,「停在末帧」判定失效,播完再点播放会没反应。
  * 用 0.5 帧容差,避免浮点帧号(如 608.9999)判不出来。 */
-function firstFrameOf(a: AnimationItem): number {
-  return a.firstFrame ?? (currentData?.ip ?? 0);
-}
+const FIRST_REL_FRAME = 0;
 
 function isAtLastFrame(a: AnimationItem): boolean {
-  const last = (a.firstFrame ?? 0) + Math.max(0, (a.totalFrames ?? 1) - 1);
+  const last = Math.max(0, (a.totalFrames ?? 1) - 1);
   return a.currentFrame >= last - 0.5;
 }
 
@@ -1259,7 +1282,7 @@ btnPlay.addEventListener('click', () => {
   if (anim.isPaused) {
     // 停在最后一帧时 lottie 认为「没有可播的帧」,play() 不会有任何反应(表现为按钮点了没动静)。
     // 这种情况按用户预期从头开始播。
-    if (isAtLastFrame(anim)) anim.goToAndStop(firstFrameOf(anim), true);
+    if (isAtLastFrame(anim)) anim.goToAndStop(FIRST_REL_FRAME, true);
     anim.play();
   } else {
     anim.pause();
@@ -1272,7 +1295,7 @@ btnRestart.addEventListener('click', () => {
   // 无论之前在播放还是暂停,「回到开头」一律定格到第 0 帧(播放中也暂停)。
   // 注意:曾用「先存 !isPaused、goToAndStop 后再选择性 play」的写法,但 goToAndStop
   // 自身会把动画置为暂停,导致播放状态下按钮误判、画面停止而图标仍显示播放中。
-  anim.goToAndStop(firstFrameOf(anim), true);
+  anim.goToAndStop(FIRST_REL_FRAME, true);
   updateTransport(); // 同步图标/标题/aria:定格后一律显示播放三角
 });
 
@@ -1445,7 +1468,7 @@ rngNextDuration.addEventListener('input', () => {
 chkNextScan.addEventListener('change', () => {
   showNextScan = chkNextScan.checked;
   nextDurationRow.hidden = !showNextScan;
-  if (!currentData || currentName !== '位置暴露动画') return;
+  if (!currentData || !animDef()?.caps.nextScan) return;
   if (showNextScan) {
     if (!isMergedNext(animation2Data)) {
       animation2Data = mergeNextInto(animation2Data);
@@ -1484,6 +1507,8 @@ selRenderer.addEventListener('change', () => {
 // 空格 = 播放/暂停;焦点在输入控件上时不抢按键(否则输入框里打不出空格,按钮也无法用空格触发)
 window.addEventListener('keydown', (e) => {
   if (e.code !== 'Space') return;
+  // 动画画廊打开时焦点可能落在面板空白处,这时空格不应该穿透到播放/暂停
+  if (animPickerOpen()) return;
   const t = e.target as HTMLElement | null;
   if (t && ['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(t.tagName)) return;
   e.preventDefault();
@@ -1914,7 +1939,7 @@ function updateInfo(data: any) {
   const fonts: string[] = fontDefs.map((f: any) => f.fName).filter(Boolean);
   const embeddedFontCount = fontDefs.filter((f: any) => typeof f.fPath === 'string' && f.fPath.length > 0).length;
   /* 字体状态看「注册结果」,而不是「JSON 里有没有 fPath」:
-   * 本仓库字体已按体积考虑从 JSON 剥离成 animation/fonts/*.ttf,旧写法只查 fPath,
+   * 本仓库字体已按体积考虑从 JSON 剥离成 animations/animation_1/fonts/*.ttf,旧写法只查 fPath,
    * 于是永远显示「未内嵌」,与实际渲染能力无关,反而误导排查方向。 */
   const fontStates: FontLoadState[] = fontDefs.flatMap((f: any) =>
     [f.fFamily, f.fName].filter(Boolean).map((n: string) => fontLoadState.get(n) ?? 'pending')
@@ -2651,21 +2676,40 @@ function onShapeReset(ind: number) {
  *  ② 描边为**纯白 #ffffff**:本套素材里的白描边是 AE 默认描边(渲染上被填充盖住 / 只是占位),
  *     同理不展示;描边为**#5400ff**(任务弹窗动画预合成「框 › 形状图层 5」的紫色描边,全仓库只有这一层)
  *     同样只作占位、不参与画面配色,也不展示;
- *  ③ 核电站功率动画里几个形状图层的填充只是给描边/纹理垫底的占位色 —— 按图层名(去空格)排除。 */
+ *  ③ 核电站功率动画里几个形状图层的填充只是给描边/纹理垫底的占位色 —— 按图层名(去空格)排除;
+ *  ④ 【例外】地图标题动画的「描边」图层反过来:白描边是设计色要放开,黑填充才是衬底要隐藏
+ *     (与上面按颜色值的规则不同,这条按「动画 + 图层名」判定,详见 isMaptitleStrokeLayer)。 */
 const HIDE_FILL_SHAPE_NAMES = new Set(['形状图层2', '形状图层3', '形状图层8', '形状图层6', '形状图层4']);
 /* 占位色(0~1 归一化写进 JSON 时:#ff0000 → [1,0,0,1],#ffffff → [1,1,1,1]) */
 const PLACEHOLDER_FILL_HEX = '#ff0000';
 /* 不作为可编辑属性展示的描边色:#ffffff(AE 默认白描边)、#5400ff(预合成里的紫色占位描边) */
 const PLACEHOLDER_STROKE_HEXES = new Set(['#ffffff', '#5400ff']);
-function hideShapeFill(nm: string, fillHex: string | null = null): boolean {
+function hideShapeFill(nm: string, fillHex: string | null = null, shape?: { nm: string; fill: number[] | null; stroke: number[] | null }): boolean {
   // 纯红填充:所有动画通用(不区分当前是哪套动画)
   if (fillHex === PLACEHOLDER_FILL_HEX) return true;
+  // 地图标题动画的「描边」图层:只保留描边入口(原因见 isMaptitleStrokeLayer)
+  if (shape && isMaptitleStrokeLayer(shape)) return true;
   if (currentAnimKey !== 'blinds') return false;
   return HIDE_FILL_SHAPE_NAMES.has(String(nm || '').replace(/\s+/g, ''));
 }
-/* 白描边 / 紫色占位描边同样不作为可编辑属性展示(原因见上)。
+/* 【特例图层】地图标题动画的「描边」图层:黑白两层同尺寸矩形,黑填充做衬底、
+ * 1.5 宽的白色轮廓才是真正的视觉效果(两层靠「描边」图层多出来的 tm 修剪路径错开,
+ * 白框才露得出来)。因此这一个图层上:
+ *   • 白描边要**放开**编辑 —— 它沿用全局「纯白 = 占位描边」规则会被隐藏,侧栏就只剩填充入口;
+ *   • 黑填充要**反过来隐藏** —— 它只是衬底,改它看不太出效果,露出来反而误导
+ *     (与全局唯一会隐藏的「纯红占位填充」不是一回事,所以单独走一条规则)。
+ * 判据必须同时限定「当前动画 + 图层名 + 该图层确实同时有填充与描边」:
+ * 同动画的「底框」图层也有白描边,但它的白描边与黑填充完全重合(被黑填充盖住),
+ * 把它露出来同样是个改了没效果的入口 —— 「有填充」正是区分这两层的依据。 */
+function isMaptitleStrokeLayer(s: { nm: string; fill: number[] | null; stroke: number[] | null }): boolean {
+  return currentAnimKey === 'maptitle'
+    && String(s.nm || '').replace(/\s+/g, '') === '描边'
+    && !!s.fill && !!s.stroke;
+}
+/* 白描边 / 紫色占位描边同样不作为可编辑属性展示(原因见上;地图标题动画的「描边」图层例外)。
  * 统一转小写再比对,免得数据里写成 #FFFFFF 或 #5400FF 时漏判。 */
-function hideShapeStroke(strokeHex: string | null = null): boolean {
+function hideShapeStroke(strokeHex: string | null = null, shape?: { nm: string; fill: number[] | null; stroke: number[] | null }): boolean {
+  if (shape && isMaptitleStrokeLayer(shape)) return false;
   return !!strokeHex && PLACEHOLDER_STROKE_HEXES.has(strokeHex.toLowerCase());
 }
 
@@ -2681,8 +2725,8 @@ function renderShapeList(data: any) {
       const fillHex = s.fill ? fcToHex(s.fill) : null;
       const strokeHex = s.stroke ? fcToHex(s.stroke) : null;
       let colorHtml = '';
-      if (fillHex && !hideShapeFill(s.nm, fillHex)) colorHtml += '<label class="t-color-label">填充 <input type="color" class="s-fill" data-ind="' + s.ind + '" value="' + fillHex + '" /><input type="text" class="hex-input" value="' + fillHex + '" spellcheck="false" placeholder="#rrggbb" /></label>';
-      if (strokeHex && !hideShapeStroke(strokeHex)) colorHtml += '<label class="t-color-label">描边 <input type="color" class="s-stroke" data-ind="' + s.ind + '" value="' + strokeHex + '" /><input type="text" class="hex-input" value="' + strokeHex + '" spellcheck="false" placeholder="#rrggbb" /></label>';
+      if (fillHex && !hideShapeFill(s.nm, fillHex, s)) colorHtml += '<label class="t-color-label">填充 <input type="color" class="s-fill" data-ind="' + s.ind + '" value="' + fillHex + '" /><input type="text" class="hex-input" value="' + fillHex + '" spellcheck="false" placeholder="#rrggbb" /></label>';
+      if (strokeHex && !hideShapeStroke(strokeHex, s)) colorHtml += '<label class="t-color-label">描边 <input type="color" class="s-stroke" data-ind="' + s.ind + '" value="' + strokeHex + '" /><input type="text" class="hex-input" value="' + strokeHex + '" spellcheck="false" placeholder="#rrggbb" /></label>';
       const rectOpacityHtml =
         dikuangVisibleInds.includes(s.ind)
           ? '<label class="t-opacity">矩形不透明度 <input type="range" class="dr-slider" data-ind="' + s.ind + '" min="0" max="100" step="1" value="' + getDikuangRectOpacity(s.ind) + '" /><span class="o-val">' + getDikuangRectOpacity(s.ind) + '%</span><button class="t-reset dr-reset" data-ind="' + s.ind + '" type="button" title="重置矩形不透明度">' + ICON_RESET + '</button></label>'
@@ -3502,6 +3546,13 @@ function captureDikuangBaseState() {
   dikuangVisibleInds = [];
   dikuangRectBaseOpacity = 100;
   if (!currentData) return;
+  /* 这套自适应只对「位置暴露动画」成立:段定义里的文字/图标/父级图层号(4 / 5 / 3)与「底框」
+   * 都是那段数据里写死的,位移量 PLATE_PARENT_X_SHIFT 也是按它的静止帧实测标定的。
+   * 其它动画即使恰好有同名图层也不该套用 —— 例如地图标题动画的「底框」,它旁边还有一层
+   * 同样尺寸的「描边」衬板,而 DIKUANG_NAMES 只认「底框」,套用后会出现「底框变宽、描边没变」
+   * 的错位;它的文字层缩放是静态值,capture 到的 textScale 也取不到 22.094% 这个真实比例。
+   * 这里显式收窄到 exposed,避免新动画继承这套按图层号硬编码的假设。 */
+  if (currentAnimKey !== 'exposed') return;
   /* 段定义:二次扫描段固定用 ind 104 / 105 / 103,是合并时把第二段图层的 ind 整体 +100 得到的;
    * 未合并的动画没有这一段,只建主段。 */
   const defs: { seg: 'main' | 'next'; textInd: number; iconInd: number; parentInd: number; inSeg: (ind: number) => boolean }[] = [
@@ -4187,33 +4238,34 @@ function reRenderPreservingStateCore(onSettled?: () => void) {
  * (?url)打包,不进首屏 JS:页面打开只拉默认动画;切换动画时才按需下载另一份
  * 数据包,并弹出加载浮层 + 实时进度条(浏览器缓存,二次切换不再下载)。
  * 音频已在启动时预载(prefetchAudios);音频不使用 JSON 内嵌版本。 */
-import animationDataUrl from '../animation/animation_data.json?url';
-import windowsAnimationUrl from '../animation/windows animation/windows_animation.json?url';
-import animation2DataUrl from '../animation_2/animation_data.json?url';
-import animation2NextUrl from '../animation_2/animation_data_next_fixed.json?url';
-import animation3DataUrl from '../animation_3/animation_data.json?url';
-import missionDataUrl from '../animation_4/animation_data.json?url';
+import animationDataUrl from '../animations/animation_1/animation_data.json?url';
+import windowsAnimationUrl from '../animations/animation_1/windows animation/windows_animation.json?url';
+import animation2DataUrl from '../animations/animation_2/animation_data.json?url';
+import animation2NextUrl from '../animations/animation_2/animation_data_next_fixed.json?url';
+import animation3DataUrl from '../animations/animation_3/animation_data.json?url';
+import missionDataUrl from '../animations/animation_4/animation_data.json?url';
+import mapTitleDataUrl from '../animations/animation_5/animation_data.json?url';
 /* 任务弹窗动画自带的哈夫币图标:JSON 里是相对路径(u:"images/", p:"MallIcon_HafuCoins.png"),
  * 站点里没有 images/ 目录,必须把它按静态资源打包后改写资源地址(见 ensureMissionData)。
  * 它同时是「图标选择」列表里的默认/内置图标,所以这里导入一次、两处共用。 */
-import missionIconUrl from '../animation_4/images/MallIcon_HafuCoins.png?url';
+import missionIconUrl from '../animations/animation_4/images/MallIcon_HafuCoins.png?url';
 
-/* 任务弹窗动画的「图标选择」列表:用 animation_4/icon/ 下的图标(MallIcon_*.png),
- * 与 animation_2/icon/ 的干员技能图标分开 —— 两套动画的图标素材不同,不能混在同一个列表里。
+/* 任务弹窗动画的「图标选择」列表:用 animations/animation_4/icon/ 下的图标(MallIcon_*.png),
+ * 与 animations/animation_2/icon/ 的干员技能图标分开 —— 两套动画的图标素材不同,不能混在同一个列表里。
  * 目录不存在/为空时回落到打包的动画自带图标(见 MISSION_ICON_OPTIONS 的合并逻辑)。 */
-const missionIconModules = import.meta.glob('../animation_4/icon/*.{png,webp}', {
+const missionIconModules = import.meta.glob('../animations/animation_4/icon/*.{png,webp}', {
   eager: true,
   query: '?url',
   import: 'default',
 }) as Record<string, string>;
 
-/* 核电站功率动画的叠加序列:animation_3/png resources/ 下的两个文件夹,各 359 帧 1920×1080 透明 PNG。
+/* 核电站功率动画的叠加序列:animations/animation_3/png resources/ 下的两个文件夹,各 359 帧 1920×1080 透明 PNG。
  * (README.txt:两条都是 60fps 图像序列,直接叠加使用,默认开启,且可更改颜色。)
  * 文件名形如「99999_00000.png」「百叶窗_00000.png」,帧号补零到 5 位,按文件名升序即帧序。
- * 用 ?url 打包:dev 由站点直接提供,build 时随构建产出静态资源(与 animation_2/icon 同做法)。 */
+ * 用 ?url 打包:dev 由站点直接提供,build 时随构建产出静态资源(与 animations/animation_2/icon 同做法)。 */
 const blindsSeqModules: Record<string, string>[] = [
-  import.meta.glob('../animation_3/png resources/99999/*.png', { eager: true, query: '?url', import: 'default' }) as Record<string, string>,
-  import.meta.glob('../animation_3/png resources/百叶窗/*.png', { eager: true, query: '?url', import: 'default' }) as Record<string, string>,
+  import.meta.glob('../animations/animation_3/png resources/99999/*.png', { eager: true, query: '?url', import: 'default' }) as Record<string, string>,
+  import.meta.glob('../animations/animation_3/png resources/百叶窗/*.png', { eager: true, query: '?url', import: 'default' }) as Record<string, string>,
 ];
 /* 把 glob 得到的「路径 → url」映射按键名升序取出 url 数组：文件名帧号补零到 5 位，字典序即帧序 */
 const seqUrlsOf = (mods: Record<string, string>): string[] => Object.keys(mods).sort().map((k) => mods[k]);
@@ -4315,10 +4367,10 @@ async function fetchJsonBundle(urls: string[], onProgress?: (p: number | null) =
   return outs;
 }
 
-/* 位置暴露动画可选图标:animation_2/icon/*.webp(仓库现以 WebP 存放,体积约为 PNG 的 43%;
+/* 位置暴露动画可选图标:animations/animation_2/icon/*.webp(仓库现以 WebP 存放,体积约为 PNG 的 43%;
  * 用 PNG 存放同样识别)。打包进网站,供用户选择替换图标图层;两种扩展名都收,
  * 避免素材换格式后列表变空 */
-const iconModules = import.meta.glob('../animation_2/icon/*.{png,webp}', {
+const iconModules = import.meta.glob('../animations/animation_2/icon/*.{png,webp}', {
   eager: true,
   query: '?url',
   import: 'default',
@@ -4399,12 +4451,15 @@ async function ensureExtractionData(onProgress?: (p: number | null) => void): Pr
 let animation2Data: any = null;
 let animation2NextData: any = null;
 let exposedDataPromise: Promise<void> | null = null;
-/* 核电站功率动画(animation_3):底层动画数据 + 两条逐帧 PNG 叠加序列(默认开启,无开关) */
+/* 核电站功率动画(animations/animation_3):底层动画数据 + 两条逐帧 PNG 叠加序列(默认开启,无开关) */
 let blindsData: any = null;
 let blindsDataPromise: Promise<void> | null = null;
-/* 任务弹窗动画(animation_4):单段数据 + 一张哈夫币位图,没有音频/叠加序列 */
+/* 任务弹窗动画(animations/animation_4):单段数据 + 一张哈夫币位图,没有音频/叠加序列 */
 let missionData: any = null;
 let missionDataPromise: Promise<void> | null = null;
+/* 地图标题动画(animations/animation_5):纯文字 + 形状,没有图片资源/音频/叠加序列 */
+let mapTitleData: any = null;
+let mapTitleDataPromise: Promise<void> | null = null;
 let baiyechuangOriginalData: string | null = null; // 百叶窗原始图片 data URI,供调色重置
 let baiyechuang2OriginalData: string | null = null; // 百叶窗2(二次扫描)原始图片 data URI,供调色重置
 let guangOriginalData: string | null = null; // 光.png(二次扫描)原始图片 data URI,供调色重置
@@ -4489,9 +4544,9 @@ async function ensureExposedData(onProgress?: (p: number | null) => void): Promi
   })();
   return exposedDataPromise;
 }
-/* ---------- 核电站功率动画(animation_3)----------
- * 数据 = animation_3/animation_data.json(底层 HUD 动画,1920×1080 / 60fps / 359 帧)
- *      + animation_3/png resources/ 下的两条 359 帧透明 PNG 序列(99999 / 百叶窗),叠在最上层。
+/* ---------- 核电站功率动画(animations/animation_3)----------
+ * 数据 = animations/animation_3/animation_data.json(底层 HUD 动画,1920×1080 / 60fps / 359 帧)
+ *      + animations/animation_3/png resources/ 下的两条 359 帧透明 PNG 序列(99999 / 百叶窗),叠在最上层。
  * 为什么叠加而不是直接渲染 JSON:AE 的「百叶窗(Venetian Blinds)」效果 lottie-web 不支持
  * (JSON 里只有效果参数 ADBE Venetian Blinds,渲染不出纹理),所以纹理在 AE 里逐帧渲染成
  * PNG 序列,这里按「图片序列图层」叠回动画之上——底层 JSON 里的百叶窗效果层保持原样
@@ -4545,7 +4600,7 @@ function buildBlindsComposite(
    * 图层 ind 从现有最大值继续递增，避免与内置图层撞号。 */
   const taken = new Set<string>(data.assets.map((a: any) => a.id));
   let maxInd = data.layers.reduce((m: number, l: any) => Math.max(m, l.ind ?? 0), 0);
-  /* 音效:animation_3 的 JSON 里原本没有音频层,这里注入「音频资源 + 音频层」——
+  /* 音效:animations/animation_3 的 JSON 里原本没有音频层,这里注入「音频资源 + 音频层」——
    * 结构与另外两套动画一致(资源 t:2 / 层 ty:6 + cl + refId),音量统一按站点音量 AUDIO_VOLUME。 */
   if (audioUrl) {
     data.assets.push({ id: 'audio_0', u: '', p: audioUrl, e: 1, t: 2 });
@@ -4647,8 +4702,8 @@ async function ensureBlindsData(onProgress?: (p: number | null) => void): Promis
   return blindsDataPromise;
 }
 
-/* ---------- 任务弹窗动画(animation_4)----------
- * 数据 = animation_4/animation_data.json(1920×1080 / 60fps / 单段、无音频;出点以数据里的 op 为准),
+/* ---------- 任务弹窗动画(animations/animation_4)----------
+ * 数据 = animations/animation_4/animation_data.json(1920×1080 / 60fps / 单段、无音频;出点以数据里的 op 为准),
  * 画面内容:行动开始 / 任务名 / 预期报酬 / 数字 四个文字层 + 一枚哈夫币图标(MallIcon_HafuCoins.png)。
  * 载入时要处理两件与其它动画不同的事:
  *  ① **图片资源带目录前缀(按"是不是图标"判断,不写死文件名)**:Bodymovin 把 AE 的素材写成
@@ -4671,7 +4726,7 @@ async function ensureMissionData(onProgress?: (p: number | null) => void): Promi
     try {
       const [raw] = await fetchJsonBundle([missionDataUrl], onProgress);
       const data = JSON.parse(raw);
-      /* 图标资源的 u/p 拼接改成完整静态资源地址(与 animation_2 图标同做法)。
+      /* 图标资源的 u/p 拼接改成完整静态资源地址(与 animations/animation_2 图标同做法)。
        * 只认「相对路径」的资源:重新导出时若 Bodymovin 直接输出 data: URI,或导成了别的绝对地址,就别去动它。 */
       const isAbsoluteAssetUrl = (p: string) => /^(data:|https?:|\/\/|\/|\.\.?[\/\\])/i.test(p);
       for (const a of data.assets ?? []) {
@@ -4720,6 +4775,35 @@ async function ensureMissionData(onProgress?: (p: number | null) => void): Promi
     if (!missionData) missionDataPromise = null;
   })();
   return missionDataPromise;
+}
+
+/* ---------- 地图标题动画(animations/animation_5)----------
+ * 数据 = animations/animation_5/animation_data.json(1024×1024 / 60fps / op=327,即 327 帧 ≈ 5.45s;
+ * 方形画布,内容占画布宽度约 80% —— 由根空对象 ind=1 的缩放/位置实现,关键帧未改动;
+ * 原始导出里 ip=4,会把「地图名称」从第 0 帧开始的淡入切掉前 4 帧,已本地归一为 ip=0,见 README),
+ * 画面内容:上方「地图名称」+ 下方「地图地点」(带一条底框 + 描边衬板,两层都有闪烁的不透明度关键帧),
+ * 两个 NULL CONTROL 负责整组的位移。没有音频、没有位图资源、没有叠加序列,
+ * 所以载入就是纯 JSON 解析 —— 不需要像任务弹窗动画那样改写资源地址,也不需要注入音频层。
+ * 字体与其它动画一致:JSON 里的 fPath 已被剥离,运行时按 fName 从 animations/animation_1/fonts/ 解析;
+ * chars 只烘焙了「地图点名称」五个字,用户改成表外字时由 dropCharsIfUncovered 自动退回浏览器文本引擎。 */
+async function ensureMapTitleData(onProgress?: (p: number | null) => void): Promise<void> {
+  if (mapTitleData) return;
+  if (mapTitleDataPromise) {
+    if (onProgress) onProgress(null); // 已在加载中:以不确定进度显示
+    return mapTitleDataPromise;
+  }
+  mapTitleDataPromise = (async () => {
+    try {
+      const [raw] = await fetchJsonBundle([mapTitleDataUrl], onProgress);
+      mapTitleData = JSON.parse(raw);
+    } catch (e) {
+      console.error('[地图标题动画数据解析失败]', e);
+      setStatus('地图标题动画数据解析失败: ' + (e as Error).message, true);
+    }
+    // 失败时允许下次重试
+    if (!mapTitleData) mapTitleDataPromise = null;
+  })();
+  return mapTitleDataPromise;
 }
 
 /* 递归偏移对象中所有动画属性({a:1, k:[{t,...}]})的关键帧时刻 t */
@@ -4956,18 +5040,158 @@ function offsetSecondSegment(data: any, delta: number) {
   walk(data.layers);
 }
 
-/* 动画注册表:每个动画独立的数据 / 弹窗 / 音频。
- * 数据改为按需加载后,bootAnimation/animation2Data 在启动时可能尚未就绪,
- * 因此以 getter 形式提供;使用前需先 await ensureExtractionData()/ensureExposedData()/…。
- * audio 为 null 表示该动画没有音效(任务弹窗动画即是)—— 导出时不会挂音轨,预览也不播声音。 */
-type AnimDef = { key: string; label: string; data: () => any; popup: () => any; audio: string | null };
+/* ---------- 动画注册表 ----------
+ * 「新增一套动画」只需要在 ANIMATIONS 里加一项,顶栏触发器 / 选择画廊 / 侧栏能力开关
+ * 全部由这一项的字段驱动,不需要再去 switchAnimation 里补分支。
+ *
+ * 字段分四组:
+ *  1) 身份:key(唯一标识,也是隐藏 select 的 value)、label(中文全名);
+ *  2) 元信息 meta:画廊卡片在「不下载数据」的前提下要显示的全部内容(规格 + 特性标签 + 搜索词)——
+ *     一旦按需加载改成首屏就拉全部数据,这些信息都要等下载完才能显示,所以必须是静态声明;
+ *     真实数据载入后会用实测值覆盖(见 animMetaOf),因此尺寸/帧率只要求「大致准确」;
+ *  3) 数据:data()/popup() 以 getter 形式提供(bootAnimation/animation2Data 在启动时可能尚未就绪)、
+ *     audioUrl 为 null 表示没有音效(任务弹窗动画即是,导出时不挂音轨、预览也不播声音)、
+ *     loaded() 判断数据是否已在内存、load(onProgress) 负责首次下载;
+ *  4) caps 能力开关:侧栏哪些区块对这套动画开放(见 AnimCaps)。 */
+type AnimCaps = {
+  /** 「动画时长」区块(时长滑杆;配合 nextScan 时还有二次扫描开关与时长) */
+  timing?: boolean;
+  /** 「二次扫描」开关(第二段合并进同一条时间轴) */
+  nextScan?: boolean;
+  /** 首次载入时套用的默认时长(秒),不写则不压缩 */
+  defaultDuration?: number;
+};
+type AnimMeta = {
+  /** 搜索关键词(名称之外还能被搜到的词:别名、英文 key、内容关键词) */
+  tags: string[];
+  /** 封面兜底主色:没有预览图时卡片用它生成渐变,保证列表永远好看且可区分 */
+  accent: string;
+  /* 画布尺寸 / 帧率 / 总帧数:卡片信息条用;载入后会被实测值覆盖 */
+  w: number; h: number; fps: number; frames: number;
+  /** 卡片底部的特性标签(只显示前 2 个,再多会把卡片撑高) */
+  features: string[];
+};
+type AnimDef = {
+  key: string;
+  label: string;
+  meta: AnimMeta;
+  /** 预览图 URL(打包资源);空串时卡片用 accent 渐变兜底 */
+  poster: string;
+  data: () => any;
+  popup: () => any;
+  audioUrl: string | null;
+  loaded: () => boolean;
+  load: (onProgress?: (p: number | null) => void) => Promise<void>;
+  caps: AnimCaps;
+};
+
+/* 预览图:posters/<key>.(webp|png|jpg),由 tools/build-anim-posters.mjs 从真实渲染里截取。
+ * 用 import.meta.glob + ?url 而不是写死路径 —— 缺图时不会构建失败,卡片自动退回渐变封面;
+ * 新增动画只要把预览图丢进 posters/ 并跑一次脚本即可。 */
+const POSTER_MODULES = import.meta.glob('../posters/*.{webp,png,jpg}', {
+  eager: true, query: '?url', import: 'default',
+}) as Record<string, string>;
+function posterOf(key: string): string {
+  for (const [path, url] of Object.entries(POSTER_MODULES)) {
+    const base = (path.split('/').pop() ?? '').replace(/\.[^.]+$/, '');
+    if (base === key) return url;
+  }
+  return '';
+}
+
 const ANIMATIONS: AnimDef[] = [
-  { key: 'extraction', label: '撤离动画', data: () => bootAnimation, popup: () => popupData, audio: bundledAudioUrl },
-  { key: 'exposed', label: '位置暴露动画', data: () => animation2Data, popup: () => null, audio: exposedAudioUrl },
-  { key: 'blinds', label: '核电站功率动画', data: () => blindsData, popup: () => null, audio: blindsAudioUrl },
-  { key: 'mission', label: '任务弹窗动画', data: () => missionData, popup: () => null, audio: null },
+  {
+    key: 'extraction',
+    label: '撤离动画',
+    meta: {
+      tags: ['撤离', '结算', '撤离成功', '弹窗', 'extraction'],
+      accent: '#3b82f6',
+      w: 1920, h: 1080, fps: 60, frames: 609,
+      features: ['弹窗叠加', '文字可编辑'],
+    },
+    poster: posterOf('extraction'),
+    data: () => bootAnimation,
+    popup: () => popupData,
+    audioUrl: bundledAudioUrl,
+    loaded: () => !!bootAnimation && !!popupData,
+    load: (p) => ensureExtractionData(p),
+    caps: {},
+  },
+  {
+    key: 'exposed',
+    label: '位置暴露动画',
+    meta: {
+      tags: ['位置暴露', '扫描', '二次扫描', '技能', '图标', 'exposed'],
+      accent: '#22c55e',
+      w: 3840, h: 1080, fps: 60, frames: 601,
+      features: ['二次扫描', '图标可换', '时长可调'],
+    },
+    poster: posterOf('exposed'),
+    data: () => animation2Data,
+    popup: () => null,
+    audioUrl: exposedAudioUrl,
+    loaded: () => !!animation2Data && !!animation2NextData,
+    load: (p) => ensureExposedData(p),
+    caps: { timing: true, nextScan: true, defaultDuration: 1.25 },
+  },
+  {
+    key: 'blinds',
+    label: '核电站功率动画',
+    meta: {
+      tags: ['核电站', '功率', '反应堆', '百叶窗', '序列', 'blinds'],
+      accent: '#f59e0b',
+      w: 1920, h: 1080, fps: 60, frames: 359,
+      features: ['PNG 序列', '数字位联动'],
+    },
+    poster: posterOf('blinds'),
+    data: () => blindsData,
+    popup: () => null,
+    audioUrl: blindsAudioUrl,
+    loaded: () => !!blindsData,
+    load: (p) => ensureBlindsData(p),
+    caps: {},
+  },
+  {
+    key: 'mission',
+    label: '任务弹窗动画',
+    meta: {
+      tags: ['任务', '弹窗', '报酬', '哈夫币', 'mission'],
+      accent: '#a855f7',
+      w: 1920, h: 1080, fps: 60, frames: 214,
+      features: ['图标可换', '文字可改'],
+    },
+    poster: posterOf('mission'),
+    data: () => missionData,
+    popup: () => null,
+    audioUrl: null,
+    loaded: () => !!missionData,
+    load: (p) => ensureMissionData(p),
+    caps: {},
+  },
+  {
+    key: 'maptitle',
+    label: '地图标题动画',
+    meta: {
+      tags: ['地图', '地点', '地名', '标题', '位置', '坐标', 'maptitle'],
+      accent: '#14b8a6',
+      w: 1024, h: 1024, fps: 60, frames: 327,
+      features: ['文字可编辑', '底框可调'],
+    },
+    poster: posterOf('maptitle'),
+    data: () => mapTitleData,
+    popup: () => null,
+    audioUrl: null,
+    loaded: () => !!mapTitleData,
+    load: (p) => ensureMapTitleData(p),
+    caps: {},
+  },
 ];
 let currentAnimKey = 'extraction';
+/* 当前动画的注册项。所有「按 key 走特殊逻辑」的地方都改成查这张表,
+ * 新增动画时漏配字段的后果只是某个区块不显示,而不是抛错。 */
+function animDef(key: string = currentAnimKey): AnimDef | undefined {
+  return ANIMATIONS.find((a) => a.key === key);
+}
 
 /* ---------- 二次扫描开关状态 ---------- */
 let showNextScan = false; // 是否显示二次扫描(主动画后紧接着播第二段)
@@ -4990,10 +5214,10 @@ let iconMainName = DEFAULT_ICON_NAME; // 位置暴露图标
 let iconNextName = DEFAULT_ICON_NAME; // 二次扫描图标(默认与位置暴露相同)
 let followMainIcon = true; // 二次扫描是否跟随位置暴露(默认跟随,与旧版「两段共用图标」一致)
 let customIcons: { name: string; url: string }[] = []; // 用户上传的自定义图标(会话内有效)
-/* 任务弹窗动画的内置图标:就是动画自带的哈夫币位图(animation_4/images/MallIcon_HafuCoins.png)。
+/* 任务弹窗动画的内置图标:就是动画自带的哈夫币位图(animations/animation_4/images/MallIcon_HafuCoins.png)。
  * 名字沿用资源文件名,列表里显示为「MallIcon_HafuCoins」(iconDisplayName 会去掉扩展名)。 */
 const MISSION_ICON_OPTION = { name: 'MallIcon_HafuCoins.png', url: missionIconUrl };
-/* animation_4/icon/ 下的图标列表(按名称自然序);同名时优先 WebP(与 animation_2/icon 同规则)。
+/* animations/animation_4/icon/ 下的图标列表(按名称自然序);同名时优先 WebP(与 animations/animation_2/icon 同规则)。
  * 目录为空时只有下面这一项回落项,保证列表永远非空、默认图标永远可选。 */
 const MISSION_ICON_OPTIONS: { name: string; url: string }[] = (() => {
   const byBase = new Map<string, { name: string; url: string }>();
@@ -5182,11 +5406,11 @@ document.getElementById('btnNudgeReset')?.addEventListener('click', () => change
 }
 
 /* 内置图标素材按动画区分:
- *  • 位置暴露动画用 animation_2/icon 下的干员技能图标(ICON_OPTIONS);
+ *  • 位置暴露动画用 animations/animation_2/icon 下的干员技能图标(ICON_OPTIONS);
  *  • 任务弹窗动画用动画自带的哈夫币图标(排在最前),后接同一套技能图标,方便换用其它图标。
  * 用户上传的自定义图标对两套动画都可见,排在前面便于一眼看到自己加的那张。 */
 function builtinIconOptions(): { name: string; url: string }[] {
-  // 任务弹窗动画用 animation_4/icon/ 的图标;位置暴露动画用 animation_2/icon/ 的干员技能图标
+  // 任务弹窗动画用 animations/animation_4/icon/ 的图标;位置暴露动画用 animations/animation_2/icon/ 的干员技能图标
   return currentAnimKey === 'mission' ? MISSION_ICON_OPTIONS : ICON_OPTIONS;
 }
 function allIconOptions() {
@@ -5429,38 +5653,27 @@ iconFile.addEventListener('change', () => {
   reader.readAsDataURL(file);
 });
 
-/* 切换动画(撤离 / 位置暴露 / 核电站功率 / 任务弹窗)。
+/* 切换动画。
  * 数据包按需加载:仅首次进入该动画时才下载,期间显示加载浮层与实时进度,结束后关闭。
+ * 加载方式完全来自注册项的 load()/loaded(),这里不再按 key 分支 —— 新增动画不需要动本函数。
  * 弹窗数据随动画一起换,并强制关闭弹窗、隐藏无关区块(弹窗 / 图片调色 / 图标 / 时长)。
  * 载入前先把「图标、图片调色」等用户设置写回数据,保证随后 loadData 构建出的动画直接用对资源。 */
 async function switchAnimation(key: string) {
-  const def = ANIMATIONS.find((a) => a.key === key);
+  const def = animDef(key);
   if (!def) return;
   // 数据按需加载:仅首次进入该动画时才动态下载其数据包(已加载则直接复用)。
   // 需要真正下载时显示加载浮层与实时进度条,完成后关闭。
-  const needLoad = key === 'exposed'
-    ? (!animation2Data || !animation2NextData)
-    : key === 'blinds'
-      ? !blindsData
-      : key === 'mission'
-        ? !missionData
-        : (!bootAnimation || !popupData);
-  if (needLoad) showDataLoading(def.label);
+  if (!def.loaded()) showDataLoading(def.label);
   try {
-    if (key === 'exposed') {
-      await ensureExposedData((p) => setDataLoadingProgress(p));
-    } else if (key === 'blinds') {
-      await ensureBlindsData((p) => setDataLoadingProgress(p));
-    } else if (key === 'mission') {
-      await ensureMissionData((p) => setDataLoadingProgress(p));
-    } else {
-      await ensureExtractionData((p) => setDataLoadingProgress(p));
-    }
+    await def.load((p) => setDataLoadingProgress(p));
   } finally {
     hideDataLoading();
   }
   if (!def.data()) return;
   currentAnimKey = key;
+  // 记录「最近使用」并按实测数据校准卡片规格(都只影响选择器的展示)
+  noteAnimUsed(key);
+  measureAnim(def);
   // 弹窗数据随动画切换;切换后默认关闭弹窗
   popupData = def.popup();
   popupVisible = false;
@@ -5479,8 +5692,9 @@ async function switchAnimation(key: string) {
     popupTextList.innerHTML = '';
     popupShapeList.innerHTML = '';
   }
-  // 位置暴露动画:数据始终用 animation2Data 当前值(可能已合并二次扫描/含编辑状态)
-  const data = key === 'exposed' ? animation2Data : def.data();
+  /* 当前动画的「可编辑数据」:注册项的 data() 本身就是内存里的那份引用
+   * (位置暴露返回的 animation2Data 可能已合并二次扫描/含用户编辑状态),直接取用即可。 */
+  const data = def.data();
   // 遮罩源被多个图层共用的动画(tt 层数 > 遮罩源数)在 canvas 渲染器下遮罩合成会偏暗/丢内容,
   // 导出时自动改走 SVG 逐帧光栅化(见 needsSvgRasterExport / rasterizeSvgFrameToCtx),无需用户干预
   if (needsSvgRasterExport(data)) {
@@ -5504,10 +5718,14 @@ async function switchAnimation(key: string) {
     iconList.innerHTML = '';
     iconOpacityRow.hidden = true;
   }
-  // 动画时长区块(时长 + 二次扫描开关 + 二次扫描时长):仅位置暴露动画显示
-  const isExposed = key === 'exposed';
-  timingSection.hidden = !isExposed;
-  if (isExposed) syncNextDurationSlider();
+  // 动画时长区块(时长 + 二次扫描开关 + 二次扫描时长):由注册项的 caps.timing 决定
+  timingSection.hidden = !def.caps.timing;
+  // 二次扫描行只在「支持二次扫描」且开关已打开时出现(开关状态是全局的,切回来要保持)
+  nextDurationRow.hidden = !(def.caps.nextScan && showNextScan);
+  if (def.caps.nextScan) chkNextScan.checked = showNextScan;
+  if (def.caps.timing) syncNextDurationSlider();
+  // 选择器(顶栏触发器 + 画廊里的「当前」标记)随动画一起刷新
+  syncAnimTrigger();
   void loadData(data, def.label);
 }
 /* ---------- 视频导出 ---------- */
@@ -5777,7 +5995,7 @@ async function runWebCodecsExport(
 /* 音频来源:按当前动画返回其音频文件(已打包进网站),不再使用 JSON 内嵌音频 */
 function findAudioAsset(): string | null {
   const def = ANIMATIONS.find((a) => a.key === currentAnimKey);
-  return (def && def.audio) || null;
+  return def?.audioUrl ?? null;
 }
 
 /* 解码音效文件为浮点 PCM:每声道一个 Float32Array,取值 -1..1。
@@ -6892,9 +7110,360 @@ async function exportVideo() {
 // 导出按钮:所有选项(格式 / 透明 / 背景色 / 弹窗)都在 exportVideo 内部实时读取
 btnExport.addEventListener('click', exportVideo);
 
-/* 动画选择器:切换撤离 / 位置暴露 / 核电站功率动画 */
-const selAnim = $<HTMLSelectElement>('selAnim');
+/* ==================== 动画选择器(顶栏触发器 + 画廊浮层) ====================
+ *
+ * 要改选择动画的界面,只有三个地方需要看:
+ *   1) 动画有哪些、各自叫什么/什么规格  —— 文件上方的 ANIMATIONS 注册表(新增动画只加一项);
+ *   2) 动态部分(卡片怎么生成、搜索/键盘怎么响应) —— 就是本区块,函数顺序如下;
+ *   3) 外观(尺寸、配色、动效) —— style.css 里「动画画廊」那一段(以 .anim-picker / .ap- 开头)。
+ * 骨架(搜索框、网格容器、底部提示)在 index.html 的 #animPicker 里,id 与本区块的 DOM 引用一一对应。
+ *
+ * 本区块的阅读顺序:
+ *   DOM 引用 → 「最近使用」读写 → 卡片规格(含实测校准)→ 过滤排序 → 渲染卡片 →
+ *   键盘光标 → 顶栏触发器同步 → 开/关/选中 → 事件绑定 → 初始化
+ *
+ * 设计取向是「薄」:没有分组、没有收藏、没有简介。打开就是一份按「最近用过的在前」
+ * 排好的完整列表 —— 多数时候第一眼就是想要的,点一下即走;要精确定位就直接打字过滤。
+ * 键盘全程不用挪焦点(打开即聚焦搜索框),方向键 / Enter / 数字 1–9 都能直接用。
+ *
+ * 顶栏那条隐藏的原生 select(#selAnim)是给历史校验脚本用的程序化切换入口,
+ * 它的 options 由本区块末尾按注册表生成,不要删。
+ *
+ * 常见改动从哪儿下手:
+ *   • 卡片大小 / 一屏放几张        → style.css 的 .ap-grid(grid-template-columns 里的最小列宽)
+ *   • 卡片上显示哪些信息           → renderAnimGallery 里拼卡片 HTML 的那段 + 注册项的 meta
+ *   • 排序规则                     → animVisibleList 末尾的 sort
+ *   • 新增/修改快捷键              → 下面「画廊内的键盘」那个 document keydown
+ *   • 面板标题文案                 → renderAnimGallery 末尾写 animPickerSub 的那两行
+ *   • 去掉搜索框                   → 删 index.html 里的 .ap-search、本区块的 animSearch /
+ *                                    animSearchClear 两个 DOM 引用,以及它们的 input / click 监听
+ */
+const animTrigger = $<HTMLButtonElement>('animTrigger');
+const animTriggerThumb = $<HTMLImageElement>('animTriggerThumb');
+const animTriggerName = $<HTMLElement>('animTriggerName');
+const animTriggerMeta = $<HTMLElement>('animTriggerMeta');
+const animTriggerCount = $<HTMLElement>('animTriggerCount');
+const animPicker = $<HTMLDivElement>('animPicker');
+const animPickerBackdrop = $<HTMLDivElement>('animPickerBackdrop');
+const animPickerClose = $<HTMLButtonElement>('animPickerClose');
+const animPickerSub = $<HTMLElement>('animPickerSub');
+const animSearch = $<HTMLInputElement>('animSearch');
+const animSearchClear = $<HTMLButtonElement>('animSearchClear');
+const animGrid = $<HTMLDivElement>('animGrid');
+const animPickerBody = $<HTMLDivElement>('animPickerBody'); // 网格的滚动容器(滚轮转发用)
+const animEmpty = $<HTMLDivElement>('animEmpty');
+const animEmptyText = $<HTMLElement>('animEmptyText');
+const selAnim = $<HTMLSelectElement>('selAnim'); // 兼容层:程序化切换入口
+
+/* 「最近使用」:只存 key 数组,没有任何界面元素 —— 用过的动画下次打开就排在前面,
+ * 属于纯自动的顺手优化,用户不需要关心也不需要操作。localStorage 不可用时静默降级。 */
+const ANIM_PREFS_KEY = 'dfa.animPicker.v1';
+let animRecent: string[] = [];
+function loadAnimPrefs() {
+  try {
+    const raw = localStorage.getItem(ANIM_PREFS_KEY);
+    const p = raw ? (JSON.parse(raw) as { recent?: unknown }) : {};
+    // 只保留注册表里还存在的 key:删掉一套动画后,残留的脏数据不会影响排序
+    animRecent = (Array.isArray(p.recent) ? p.recent : [])
+      .filter((k): k is string => typeof k === 'string' && !!animDef(k));
+  } catch {
+    animRecent = [];
+  }
+}
+function saveAnimPrefs() {
+  try { localStorage.setItem(ANIM_PREFS_KEY, JSON.stringify({ recent: animRecent })); } catch { /* 忽略 */ }
+}
+/* 切换成功后把该动画提到「最近使用」最前(只留 3 个,避免最近列表无限膨胀) */
+function noteAnimUsed(key: string) {
+  animRecent = [key, ...animRecent.filter((k) => k !== key)].slice(0, 3);
+  saveAnimPrefs();
+}
+
+/* 载入过的动画用实测值校准卡片上的规格(注册表里的声明值只要求大致准确):
+ * 换掉某套动画的 JSON 之后,只要进过一次,画廊显示的就是真实尺寸/帧率。
+ * 总帧数对「时长可调」的动画(exposed)不校准 —— 它会随用户拖时长滑杆变化,不代表这套动画本身多长。 */
+const animMeasured = new Map<string, { w: number; h: number; fps: number; frames?: number }>();
+function measureAnim(def: AnimDef) {
+  const d = def.data();
+  if (!d) return;
+  const prev = animMeasured.get(def.key);
+  animMeasured.set(def.key, {
+    w: Number(d.w) || def.meta.w,
+    h: Number(d.h) || def.meta.h,
+    fps: Number(d.fr) || def.meta.fps,
+    frames: def.caps.timing ? prev?.frames : ((Number(d.op) || 0) - (Number(d.ip) || 0) || def.meta.frames),
+  });
+}
+function animMetaOf(def: AnimDef) {
+  const m = def.meta;
+  const x = animMeasured.get(def.key);
+  return {
+    tags: m.tags, accent: m.accent, features: m.features,
+    w: x?.w ?? m.w, h: x?.h ?? m.h, fps: x?.fps ?? m.fps,
+    // frames 校准后可能为 undefined(时长可调且还没测过),回落到声明值
+    frames: x?.frames ?? m.frames,
+  };
+}
+/* 时长 = 总帧数 / 帧率,保留两位再去掉多余的 0(10.15s / 6s) */
+function animDurationLabel(frames: number, fps: number) {
+  if (!frames || !fps) return '—';
+  return String(Number((frames / fps).toFixed(2))) + 's';
+}
+
+/* 画廊的临时状态:搜索词 / 键盘光标位置 */
+let animQuery = '';
+let animCursor = 0;
+let animLastFocus: HTMLElement | null = null;
+
+function animPickerOpen() { return !animPicker.hidden; }
+
+/* 过滤 + 排序:搜索命中 → 最近用过的排前面(其余保持注册表顺序)。
+ * 排序只用「最近使用」,没有收藏、没有分组 —— 打开就按最可能想要的顺序摆好,不需要用户先做任何筛选。 */
+function animVisibleList(): AnimDef[] {
+  const q = animQuery.trim().toLowerCase();
+  const hit = ANIMATIONS.filter((def) => {
+    if (!q) return true;
+    const m = animMetaOf(def);
+    return [def.label, def.key, ...m.tags, ...m.features].join(' ').toLowerCase().includes(q);
+  });
+  return hit.slice().sort((a, b) => {
+    const ra = animRecent.indexOf(a.key);
+    const rb = animRecent.indexOf(b.key);
+    const ka = ra < 0 ? animRecent.length + ANIMATIONS.indexOf(a) : ra;
+    const kb = rb < 0 ? animRecent.length + ANIMATIONS.indexOf(b) : rb;
+    return ka - kb;
+  });
+}
+
+/* 重画卡片网格。整段重写 innerHTML:卡片数量、排序、选中态都随一次交互整体变化,
+ * 逐个打补丁反而更容易漏(与侧栏各列表同一套做法);事件用委托挂在容器上,不随重画失效。 */
+function renderAnimGallery() {
+  const list = animVisibleList();
+  const searching = animQuery.trim().length > 0;
+  animGrid.classList.toggle('is-searching', searching);
+  animGrid.innerHTML = list.map((def, i) => {
+    const m = animMetaOf(def);
+    const isCurrent = def.key === currentAnimKey;
+    const specs = m.w + '×' + m.h +
+      '<i>·</i>' + m.fps + 'fps' +
+      '<i>·</i>' + animDurationLabel(m.frames, m.fps);
+    const feats = m.features.slice(0, 2)
+      .map((f) => '<span class="ap-feat">' + esc(f) + '</span>')
+      .concat(def.audioUrl ? ['<span class="ap-feat is-audio">含音效</span>'] : ['<span class="ap-feat is-mute">无音效</span>'])
+      .join('');
+    /* 序号角标就是「数字键直选」的提示:只给前 9 张编号(键盘就只认 1–9),
+     * 搜索态下整体隐藏(见 CSS 的 .is-searching),因为那时数字键是搜索输入而不是快捷键。 */
+    const num = (!searching && i < 9) ? '<span class="ap-card-num">' + (i + 1) + '</span>' : '';
+    // 悬停提示 = 动作 + 快捷键,无需去底部找说明
+    const tip = isCurrent
+      ? '「' + def.label + '」正在编辑中'
+      : '切换到「' + def.label + '」' + (num ? '(数字键 ' + (i + 1) + ')' : '');
+    // --ap-glow / --ap-accent 由注册项的 accent 注入:没有预览图时卡片照样有色可辨
+    return '<article class="ap-card' + (isCurrent ? ' is-current' : '') +
+      '" data-key="' + esc(def.key) + '" style="--ap-accent:' + esc(m.accent) + ';--ap-glow:' + esc(m.accent) + '33">' +
+      '<button type="button" class="ap-card-pick" data-pick="' + esc(def.key) + '" title="' + esc(tip) + '">' +
+      '<span class="ap-card-cover">' +
+      (def.poster ? '<img src="' + esc(def.poster) + '" alt="" loading="lazy" decoding="async" />' : '') +
+      num +
+      (isCurrent ? '<span class="ap-card-badge">当前</span>' : '') +
+      '</span>' +
+      '<span class="ap-card-info">' +
+      '<span class="ap-card-name">' + esc(def.label) + '</span>' +
+      '<span class="ap-card-specs">' + specs + '</span>' +
+      '<span class="ap-card-feats">' + feats + '</span>' +
+      '</span>' +
+      '</button>' +
+      '</article>';
+  }).join('');
+  const total = ANIMATIONS.length;
+  animEmpty.hidden = list.length > 0;
+  if (!list.length) animEmptyText.textContent = '没有匹配「' + animQuery + '」的动画';
+  animPickerSub.textContent = list.length === total
+    ? '共 ' + total + ' 套动画 · 点卡片任意位置即可切换'
+    : '匹配 ' + list.length + ' / ' + total + ' 套动画';
+  animSearchClear.hidden = !animQuery;
+  animCursor = Math.min(animCursor, Math.max(0, list.length - 1));
+  paintAnimCursor();
+}
+
+/* 键盘光标:给当前卡片加 .is-cursor 外描边(点卡片切换,方向键只是移动焦点) */
+function animCardEls(): HTMLElement[] {
+  return Array.from(animGrid.querySelectorAll<HTMLElement>('.ap-card'));
+}
+function paintAnimCursor(focus = false) {
+  animCardEls().forEach((el, i) => {
+    const on = i === animCursor;
+    el.classList.toggle('is-cursor', on);
+    if (on && focus) {
+      el.querySelector<HTMLButtonElement>('.ap-card-pick')?.focus();
+      el.scrollIntoView({ block: 'nearest' });
+    }
+  });
+}
+/* 网格列数:靠首行卡片的 offsetTop 归组算出来,不依赖 CSS 里写死的断点 */
+function animGridColumns(): number {
+  const cards = animCardEls();
+  if (cards.length < 2) return 1;
+  const top = cards[0].offsetTop;
+  let n = 0;
+  for (const c of cards) { if (c.offsetTop === top) n++; else break; }
+  return Math.max(1, n);
+}
+function moveAnimCursor(delta: number) {
+  const n = animCardEls().length;
+  if (!n) return;
+  animCursor = Math.max(0, Math.min(n - 1, animCursor + delta));
+  paintAnimCursor(true);
+}
+
+/* 顶栏触发器与兼容 select 的同步:名称 / 规格 / 总数 / 缩略图都来自当前注册项 */
+function syncAnimTrigger() {
+  const def = animDef();
+  if (!def) return;
+  const m = animMetaOf(def);
+  animTriggerName.textContent = def.label;
+  animTriggerMeta.textContent = m.w + '×' + m.h + ' · ' + m.fps + 'fps';
+  animTriggerCount.textContent = ANIMATIONS.length + ' 套';
+  animTrigger.style.setProperty('--ap-accent', m.accent);
+  if (def.poster) {
+    animTriggerThumb.src = def.poster;
+    animTriggerThumb.hidden = false;
+  } else {
+    animTriggerThumb.removeAttribute('src');
+    animTriggerThumb.hidden = true;
+  }
+  selAnim.value = def.key;
+  if (animPickerOpen()) renderAnimGallery();
+}
+
+function openAnimPicker() {
+  if (animPickerOpen()) return;
+  animLastFocus = document.activeElement as HTMLElement | null;
+  animQuery = '';
+  animSearch.value = '';
+  // 光标先停在「当前动画」上,按 Enter 不会误切到别的动画
+  const list = animVisibleList();
+  const idx = list.findIndex((d) => d.key === currentAnimKey);
+  animCursor = idx >= 0 ? idx : 0;
+  animPicker.hidden = false;
+  animTrigger.setAttribute('aria-expanded', 'true');
+  renderAnimGallery();
+  paintAnimCursor(true);
+  animSearch.focus();
+}
+/* 关闭画廊。restoreFocus 默认为 true(Esc / 点背景 / 点关闭按钮都走这条):
+ * 焦点回到打开画廊之前的位置,符合键盘用户预期。
+ * 但「选完动画就走」那条路径必须传 false —— 焦点若留在触发器上,用户接着按空格
+ * 会再次打开画廊而不是播放/暂停,那正是最别扭的一种"不顺手"。 */
+function closeAnimPicker(restoreFocus = true) {
+  if (!animPickerOpen()) return;
+  animPicker.hidden = true;
+  animTrigger.setAttribute('aria-expanded', 'false');
+  if (restoreFocus) {
+    const back = animLastFocus && document.contains(animLastFocus) ? animLastFocus : animTrigger;
+    back.focus();
+  } else {
+    (document.activeElement as HTMLElement | null)?.blur();
+  }
+  animLastFocus = null;
+}
+/* 选中某套动画:关掉画廊再切。
+ * 选中的就是当前这套时只关画廊,不做无谓的重新载入(重新载入还会重置编辑状态)。 */
+function pickAnimation(key: string) {
+  closeAnimPicker(false);
+  if (key === currentAnimKey) return;
+  void switchAnimation(key);
+}
+
+animTrigger.addEventListener('click', () => (animPickerOpen() ? closeAnimPicker() : openAnimPicker()));
+/* 点背景 / 关闭按钮 / Esc 都只是"关掉",焦点回到原处 */
+animPickerBackdrop.addEventListener('click', () => closeAnimPicker());
+animPickerClose.addEventListener('click', () => closeAnimPicker());
+/* 卡片事件用委托:画廊每次重画都会换掉全部 DOM,逐个绑定等于每次都要重挂。
+ * 整张卡片就是一个按钮,点哪儿都算 —— 不用瞄准标题或封面。 */
+animGrid.addEventListener('click', (e) => {
+  const pick = (e.target as HTMLElement).closest<HTMLElement>('[data-pick]');
+  if (pick) pickAnimation(pick.dataset.pick ?? '');
+});
+/* 鼠标移到哪儿,光标就跟到哪儿:滚轮浏览时不必先点一下再按方向键,
+ * 移开鼠标后键盘继续从最后停留的那张开始移动。 */
+animGrid.addEventListener('mousemove', (e) => {
+  const card = (e.target as HTMLElement).closest<HTMLElement>('.ap-card');
+  if (!card || card.classList.contains('is-cursor')) return;
+  const i = animCardEls().indexOf(card);
+  if (i >= 0) { animCursor = i; paintAnimCursor(false); }
+});
+/* 滚轮在面板任意位置都能滚动卡片网格:头部/底部/搜索框上滚也不会"卡住" ——
+ * 少了"先把鼠标挪到网格上"这一步。 */
+animPicker.addEventListener('wheel', (e) => {
+  if (e.target instanceof HTMLElement && e.target.closest('.ap-body')) return; // 网格自己会滚
+  if (!animPickerBody) return;
+  const d = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+  animPickerBody.scrollTop += d;
+  e.preventDefault();
+}, { passive: false });
+animSearch.addEventListener('input', () => {
+  animQuery = animSearch.value;
+  animCursor = 0;
+  renderAnimGallery();
+});
+animSearchClear.addEventListener('click', () => {
+  animSearch.value = '';
+  animQuery = '';
+  animCursor = 0;
+  renderAnimGallery();
+  animSearch.focus();
+});
+/* 画廊内的键盘(监听挂在 document 上,所以焦点在搜索框里也一样生效):
+ *   方向键移动光标 · Enter 切换 · 数字 1–9 直选 · Home/End 跳首尾 · Esc 关闭。
+ * 速度优先的几条捷径都做成了「不用先挪焦点」:打开即聚焦搜索框,输入的每个键都直接生效。 */
+document.addEventListener('keydown', (e) => {
+  if (!animPickerOpen()) return;
+  if (e.key === 'Escape') { e.preventDefault(); closeAnimPicker(); return; }
+  if (e.key === 'Enter') {
+    const key = animCardEls()[animCursor]?.dataset.key;
+    if (key) { e.preventDefault(); pickAnimation(key); }
+    return;
+  }
+  if (e.key === 'Home') { e.preventDefault(); animCursor = 0; paintAnimCursor(true); return; }
+  if (e.key === 'End') { e.preventDefault(); animCursor = animCardEls().length - 1; paintAnimCursor(true); return; }
+  /* 数字键直选:只在「搜索框为空」时生效 —— 那时数字没有任何别的含义,直接当快捷键最省事。
+   * 一旦开始输入(卡片上的序号角标也会随之隐藏,见 .is-searching),数字就还给搜索框,
+   * 免得想搜「1080」却被当成按了 1。 */
+  if (!e.ctrlKey && !e.metaKey && !e.altKey && animQuery.trim() === '' && /^[1-9]$/.test(e.key)) {
+    const key = animCardEls()[Number(e.key) - 1]?.dataset.key;
+    if (key) { e.preventDefault(); pickAnimation(key); }
+    return;
+  }
+  const cols = animGridColumns();
+  const step = e.key === 'ArrowRight' ? 1
+    : e.key === 'ArrowLeft' ? -1
+      : e.key === 'ArrowDown' ? cols
+        : e.key === 'ArrowUp' ? -cols
+          : 0;
+  if (!step) return;
+  e.preventDefault();
+  moveAnimCursor(step);
+});
+/* 全局快捷键:斜杠 / 或 Ctrl(Cmd)+K 打开画廊。焦点在输入控件里时不抢按键,
+ * 否则编辑文字图层时打不出「/」(与空格播放的守卫同一套判断)。 */
+window.addEventListener('keydown', (e) => {
+  if (animPickerOpen()) return;
+  const t = e.target as HTMLElement | null;
+  const typing = !!t && (['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName) || t.isContentEditable);
+  const modK = (e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K');
+  if (modK || (e.key === '/' && !typing)) {
+    e.preventDefault();
+    openAnimPicker();
+  }
+});
+
+/* 初始化:兼容 select 的 options 按注册表生成(历史脚本用 page.select 驱动),
+ * 再按当前动画同步一次触发器。「最近使用」从 localStorage 读回。 */
+selAnim.innerHTML = ANIMATIONS.map((a) => '<option value="' + esc(a.key) + '">' + esc(a.label) + '</option>').join('');
 selAnim.addEventListener('change', () => void switchAnimation(selAnim.value));
+loadAnimPrefs();
+syncAnimTrigger();
 
 /* 启动流程:声音已在模块加载时预载(prefetchAudios,先于数据包),
  * 此处只等待默认动画数据包按需加载完成,再构建动画与弹窗。 */

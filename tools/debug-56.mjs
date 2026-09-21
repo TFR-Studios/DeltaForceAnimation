@@ -42,7 +42,7 @@ async function test(dataPath, label) {
   }, JSON.stringify(data));
 }
 
-console.log('修改前(备份):', JSON.stringify(await test('I:/Delta Force custom animation/animation/animation_data.pre-ccreptile-fix.json', 'before')));
-console.log('修改后(当前):', JSON.stringify(await test('I:/Delta Force custom animation/animation/animation_data.json', 'after')));
+console.log('修改前(备份):', JSON.stringify(await test('I:/Delta Force custom animation/animations/animation_1/animation_data.pre-ccreptile-fix.json', 'before')));
+console.log('修改后(当前):', JSON.stringify(await test('I:/Delta Force custom animation/animations/animation_1/animation_data.json', 'after')));
 await browser.close();
 

@@ -3,12 +3,12 @@ import fs from 'node:fs';
 const URL = 'http://127.0.0.1:5173/';
 const ROOT = 'I:/Delta Force custom animation';
 const lottieSrc = fs.readFileSync(ROOT + '/node_modules/lottie-web/build/player/lottie.min.js', 'utf8');
-const iconB64 = fs.readFileSync(ROOT + '/animation_4/images/MallIcon_HafuCoins.png').toString('base64');
+const iconB64 = fs.readFileSync(ROOT + '/animations/animation_4/images/MallIcon_HafuCoins.png').toString('base64');
 const versions = { '改前': 'animation_data.pre-color-normalize.json', '改后': 'animation_data.json' };
 const browser = await puppeteer.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: 'new', protocolTimeout: 600000, args: ['--no-sandbox','--disable-gpu'] });
 try {
   for (const [name, file] of Object.entries(versions)) {
-    const d = JSON.parse(fs.readFileSync(ROOT + '/animation_4/' + file, 'utf8'));
+    const d = JSON.parse(fs.readFileSync(ROOT + '/animations/animation_4/' + file, 'utf8'));
     for (const a of d.assets || []) if (a.p === 'MallIcon_HafuCoins.png') { a.p = 'ICON'; a.u = ''; a.e = 1; }
     d.layers = d.layers.filter((l) => l.ty !== 9);
     const page = await browser.newPage();

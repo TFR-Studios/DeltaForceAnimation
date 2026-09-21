@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-const j = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animation/animation_data.json','utf8'));
+const j = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animations/animation_1/animation_data.json','utf8'));
 
 // 递归找形状项里的颜色(fl 填充 / st 描边 / gf 渐变填充 / gs 渐变描边)
 function collectColors(shapes, depth, out) {

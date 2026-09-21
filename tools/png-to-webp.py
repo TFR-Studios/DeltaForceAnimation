@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""animation_2/icon/ 下的 PNG 图标批量转 WebP(有损 q=95 + 无损 alpha)。
+"""animations/animation_2/icon/ 下的 PNG 图标批量转 WebP(有损 q=95 + 无损 alpha)。
 
 用法(仓库根目录):
     python tools/png-to-webp.py            # 转换并保留 PNG
@@ -23,7 +23,7 @@ METHOD = 6  # 最高压缩强度(编码慢但体积最小)
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dir", default=os.path.join("animation_2", "icon"), help="图标目录")
+    ap.add_argument("--dir", default=os.path.join("animations/animation_2", "icon"), help="图标目录")
     ap.add_argument("--quality", type=int, default=QUALITY)
     ap.add_argument("--delete-png", action="store_true", help="转换成功后删除源 PNG")
     args = ap.parse_args()

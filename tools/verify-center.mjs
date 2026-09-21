@@ -48,14 +48,14 @@ async function bboxOf(dataPath, renderer, ind) {
 }
 
 // 对比 ind40 对局时间 居中前后(canvas)
-const beforeC = await bboxOf('I:/Delta Force custom animation/animation/animation_data.pre-center-text.json', 'canvas', 40);
-const afterC = await bboxOf('I:/Delta Force custom animation/animation/animation_data.json', 'canvas', 40);
+const beforeC = await bboxOf('I:/Delta Force custom animation/animations/animation_1/animation_data.pre-center-text.json', 'canvas', 40);
+const afterC = await bboxOf('I:/Delta Force custom animation/animations/animation_1/animation_data.json', 'canvas', 40);
 console.log('canvas 对局时间 居中前:', JSON.stringify(beforeC));
 console.log('canvas 对局时间 居中后:', JSON.stringify(afterC));
 
 // svg 也验证一下
-const beforeS = await bboxOf('I:/Delta Force custom animation/animation/animation_data.pre-center-text.json', 'svg', 40);
-const afterS = await bboxOf('I:/Delta Force custom animation/animation/animation_data.json', 'svg', 40);
+const beforeS = await bboxOf('I:/Delta Force custom animation/animations/animation_1/animation_data.pre-center-text.json', 'svg', 40);
+const afterS = await bboxOf('I:/Delta Force custom animation/animations/animation_1/animation_data.json', 'svg', 40);
 console.log('svg 对局时间 居中前:', JSON.stringify(beforeS));
 console.log('svg 对局时间 居中后:', JSON.stringify(afterS));
 console.log('pageerrors:', JSON.stringify(errors));

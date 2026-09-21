@@ -1,5 +1,5 @@
 /* 新旧两版导出的对比(每版都在独立页面里渲染,避免同页多实例互相干扰):
- *   数据 A = 重新导出的 animation_4/animation_data.json(Bodymovin 5.12.2)
+ *   数据 A = 重新导出的 animations/animation_4/animation_data.json(Bodymovin 5.12.2)
  *   数据 B = 旧版备份 animation_data.pre-matte-fix.json(Bodymovin 5.6.10)
  * 输出每帧可见像素占比 + SVG 关键帧截图,用来确认「层级/遮罩」是否已经正常。
  * 用法:node tools/compare-animation4-exports.mjs   (需先 npm run dev 起站,本地 5173) */
@@ -10,10 +10,10 @@ const ROOT = 'I:/Delta Force custom animation';
 const OUT = ROOT + '/tools/.mission-check';
 fs.mkdirSync(OUT, { recursive: true });
 const lottieSrc = fs.readFileSync(ROOT + '/node_modules/lottie-web/build/player/lottie.min.js', 'utf8');
-const iconB64 = fs.readFileSync(ROOT + '/animation_4/images/MallIcon_HafuCoins.png').toString('base64');
+const iconB64 = fs.readFileSync(ROOT + '/animations/animation_4/images/MallIcon_HafuCoins.png').toString('base64');
 const versions = {
-  '新版(5.12.2)': ROOT + '/animation_4/animation_data.json',
-  '旧版(5.6.10)': ROOT + '/animation_4/animation_data.pre-reexport.json',
+  '新版(5.12.2)': ROOT + '/animations/animation_4/animation_data.json',
+  '旧版(5.6.10)': ROOT + '/animations/animation_4/animation_data.pre-reexport.json',
 };
 const FRAMES = [20, 40, 60, 100, 130, 150, 165, 180, 200];
 const browser = await puppeteer.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: 'new', protocolTimeout: 900000, args: ['--no-sandbox','--disable-gpu'] });

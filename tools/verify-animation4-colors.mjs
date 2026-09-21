@@ -7,10 +7,10 @@ const ROOT = 'I:/Delta Force custom animation';
 const OUT = ROOT + '/tools/.mission-check';
 fs.mkdirSync(OUT, { recursive: true });
 const lottieSrc = fs.readFileSync(ROOT + '/node_modules/lottie-web/build/player/lottie.min.js', 'utf8');
-const iconB64 = fs.readFileSync(ROOT + '/animation_4/images/MallIcon_HafuCoins.png').toString('base64');
+const iconB64 = fs.readFileSync(ROOT + '/animations/animation_4/images/MallIcon_HafuCoins.png').toString('base64');
 const versions = {
-  '改后': ROOT + '/animation_4/animation_data.json',
-  '改前': ROOT + '/animation_4/animation_data.pre-color-normalize.json',
+  '改后': ROOT + '/animations/animation_4/animation_data.json',
+  '改前': ROOT + '/animations/animation_4/animation_data.pre-color-normalize.json',
 };
 const FRAMES = [40, 80, 120, 150, 180];
 const browser = await puppeteer.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: 'new', protocolTimeout: 900000, args: ['--no-sandbox','--disable-gpu'] });

@@ -10,7 +10,7 @@ fs.mkdirSync(TMP, { recursive: true });
 // 预转素材
 for (let f = 300; f <= 310; f++) {
   const n = String(f).padStart(5, '0');
-  execFileSync('ffmpeg', ['-y', '-v', 'error', '-i', `I:/Delta Force custom animation/animation/ccreptile/ccreptitle_${n}.png`, '-f', 'rawvideo', '-pix_fmt', 'rgba', TMP + `/seq${f}.raw`], { timeout: 60000 });
+  execFileSync('ffmpeg', ['-y', '-v', 'error', '-i', `I:/Delta Force custom animation/animations/animation_1/ccreptile/ccreptitle_${n}.png`, '-f', 'rawvideo', '-pix_fmt', 'rgba', TMP + `/seq${f}.raw`], { timeout: 60000 });
 }
 
 let allOk = true;

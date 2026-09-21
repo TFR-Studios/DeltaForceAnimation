@@ -17,8 +17,8 @@ page.on('pageerror', (e) => errors.push(e.message));
 await page.goto('http://localhost:5173/', { waitUntil: 'networkidle2', timeout: 120000 });
 await sleep(1200);
 
-const before = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animation/animation_data.preshadow.json','utf8'));
-const after = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animation/animation_data.json','utf8'));
+const before = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animations/animation_1/animation_data.preshadow.json','utf8'));
+const after = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animations/animation_1/animation_data.json','utf8'));
 
 async function isolate48(data, renderer) {
   return await page.evaluate(async ({ dStr, renderer }) => {

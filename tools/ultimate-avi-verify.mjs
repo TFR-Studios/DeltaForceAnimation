@@ -62,7 +62,7 @@ try {
     for (const f of checkFrames) {
       const n = String(f).padStart(5, '0');
       try {
-        const res = await fetch(`/animation/ccreptile/ccreptitle_${n}.png`);
+        const res = await fetch(`/animations/animation_1/ccreptile/ccreptitle_${n}.png`);
         const buf = new Uint8Array(await res.arrayBuffer());
         // 解码 PNG 太复杂,改用 Image + canvas
         const bmp = await createImageBitmap(new Blob([buf], { type: 'image/png' }));

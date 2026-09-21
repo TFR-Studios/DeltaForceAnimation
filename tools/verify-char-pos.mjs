@@ -38,6 +38,6 @@ async function measureCharPositions(dataPath) {
   }, JSON.stringify(data));
 }
 
-const cur = await measureCharPositions('I:/Delta Force custom animation/animation/animation_data.json');
+const cur = await measureCharPositions('I:/Delta Force custom animation/animations/animation_1/animation_data.json');
 console.log('当前(j=0) 撤离成功:', JSON.stringify(cur, null, 2));
 await browser.close();

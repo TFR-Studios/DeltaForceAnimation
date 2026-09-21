@@ -5,8 +5,8 @@
 // - 左对齐组(地图名称/难度): j=0 + 锚点X对齐同一左边缘
 //   (文本从锚点起向右排,任意自定义文字宽度都保持左对齐)
 import fs from 'node:fs';
-const SRC = 'I:/Delta Force custom animation/animation/animation_data.json';
-const BACKUP = 'I:/Delta Force custom animation/animation/animation_data.pre-align-fix.json';
+const SRC = 'I:/Delta Force custom animation/animations/animation_1/animation_data.json';
+const BACKUP = 'I:/Delta Force custom animation/animations/animation_1/animation_data.pre-align-fix.json';
 if (!fs.existsSync(BACKUP)) fs.copyFileSync(SRC, BACKUP);
 console.log('备份: ' + BACKUP);
 

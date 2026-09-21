@@ -1,6 +1,6 @@
 import fs from 'node:fs';
-const SRC = 'I:/Delta Force custom animation/animation/animation_data.json';
-const BACKUP = 'I:/Delta Force custom animation/animation/animation_data.mirror-backup.json';
+const SRC = 'I:/Delta Force custom animation/animations/animation_1/animation_data.json';
+const BACKUP = 'I:/Delta Force custom animation/animations/animation_1/animation_data.mirror-backup.json';
 const W = 1920; // 画面宽
 const targets = { 7:'绿色 2', 18:'长白线 2', 20:'最短线左 2', 21:'短线左 2', 22:'方框左 2', 23:'点左 2' };
 const inds = Object.keys(targets).map(Number);

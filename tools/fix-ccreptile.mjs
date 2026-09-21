@@ -1,6 +1,6 @@
 import fs from 'node:fs';
-const SRC = 'I:/Delta Force custom animation/animation/animation_data.json';
-const BACKUP = 'I:/Delta Force custom animation/animation/animation_data.pre-ccreptile-fix.json';
+const SRC = 'I:/Delta Force custom animation/animations/animation_1/animation_data.json';
+const BACKUP = 'I:/Delta Force custom animation/animations/animation_1/animation_data.pre-ccreptile-fix.json';
 fs.copyFileSync(SRC, BACKUP);
 
 const j = JSON.parse(fs.readFileSync(SRC, 'utf8'));

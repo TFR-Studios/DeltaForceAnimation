@@ -1,5 +1,5 @@
 const fs = require('fs');
-const path = 'i:/Delta Force custom animation/animation_2/animation_data.json';
+const path = 'i:/Delta Force custom animation/animations/animation_2/animation_data.json';
 const data = JSON.parse(fs.readFileSync(path, 'utf8'));
 for (const a of data.assets) {
   if (typeof a.p === 'string' && a.p.startsWith('data:image')) {

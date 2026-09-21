@@ -66,7 +66,7 @@ try {
   console.log('采样数:', samples.length);
   for (const s of samples) {
     const n = String(s.frame).padStart(5, '0');
-    execFileSync('ffmpeg', ['-y', '-v', 'error', '-i', `I:/Delta Force custom animation/animation/ccreptile/ccreptitle_${n}.png`, '-vf', 'crop=90:100:220:375', '-f', 'rawvideo', '-pix_fmt', 'rgba', TMP + '/seq.raw']);
+    execFileSync('ffmpeg', ['-y', '-v', 'error', '-i', `I:/Delta Force custom animation/animations/animation_1/ccreptile/ccreptitle_${n}.png`, '-vf', 'crop=90:100:220:375', '-f', 'rawvideo', '-pix_fmt', 'rgba', TMP + '/seq.raw']);
     const seq = fs.readFileSync(TMP + '/seq.raw');
     const buf = Buffer.from(s.b64, 'base64');
     let seqPx = 0, matched = 0;

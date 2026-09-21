@@ -52,8 +52,8 @@ async function testFile(label, data) {
   console.log(label + ':', JSON.stringify(res));
 }
 
-const orig = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animation/animation_data.mirror-backup.json','utf8'));
-const mirr = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animation/animation_data.json','utf8'));
+const orig = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animations/animation_1/animation_data.mirror-backup.json','utf8'));
+const mirr = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animations/animation_1/animation_data.json','utf8'));
 await testFile('原始(镜像前)', orig);
 await testFile('镜像后', mirr);
 await browser.close();

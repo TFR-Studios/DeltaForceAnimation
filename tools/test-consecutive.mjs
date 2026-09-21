@@ -7,7 +7,7 @@ const page = await browser.newPage();
 await page.setViewport({ width: 1600, height: 1000 });
 await page.goto('http://localhost:5173/', { waitUntil: 'networkidle2', timeout: 120000 });
 await sleep(1500);
-const data = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animation/animation_data.json','utf8'));
+const data = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animations/animation_1/animation_data.json','utf8'));
 data.layers = data.layers.filter(function(l){ return l.ty !== 5 && l.ty !== 6; });
 const res = await page.evaluate(async function(dStr) {
   const data = JSON.parse(dStr);

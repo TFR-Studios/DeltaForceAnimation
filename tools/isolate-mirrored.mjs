@@ -1,6 +1,6 @@
 import fs from 'node:fs';
-const SRC = 'I:/Delta Force custom animation/animation/animation_data.json';
-const MIRRORED_BACKUP = 'I:/Delta Force custom animation/animation/animation_data.mirrored.json';
+const SRC = 'I:/Delta Force custom animation/animations/animation_1/animation_data.json';
+const MIRRORED_BACKUP = 'I:/Delta Force custom animation/animations/animation_1/animation_data.mirrored.json';
 const targets = new Set([7, 18, 20, 21, 22, 23]);
 
 // 1) 先把当前(已镜像)版本另存一份,保留为"真实镜像版"

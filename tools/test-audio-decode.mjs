@@ -7,7 +7,7 @@ const page = await browser.newPage();
 await page.setViewport({ width: 1600, height: 1000 });
 await page.goto('http://localhost:5173/', { waitUntil: 'networkidle2', timeout: 120000 });
 await sleep(1000);
-const data = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animation/animation_data.json','utf8'));
+const data = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animations/animation_1/animation_data.json','utf8'));
 const audioAsset = data.assets.find(a => typeof a.p === 'string' && a.p.startsWith('data:audio'));
 const audioUrl = audioAsset ? audioAsset.p : null;
 const res = await page.evaluate(async (url) => {

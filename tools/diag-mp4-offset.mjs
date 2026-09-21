@@ -6,7 +6,7 @@ const TMP = 'I:/Delta Force custom animation/tools/.mp4test';
 
 for (let f = 300; f <= 310; f++) {
   const n = String(f).padStart(5, '0');
-  execFileSync('ffmpeg', ['-y', '-v', 'error', '-i', `I:/Delta Force custom animation/animation/ccreptile/ccreptitle_${n}.png`, '-f', 'rawvideo', '-pix_fmt', 'rgba', TMP + '/s.raw']);
+  execFileSync('ffmpeg', ['-y', '-v', 'error', '-i', `I:/Delta Force custom animation/animations/animation_1/ccreptile/ccreptitle_${n}.png`, '-f', 'rawvideo', '-pix_fmt', 'rgba', TMP + '/s.raw']);
   const b = fs.readFileSync(TMP + '/s.raw');
   let nz = 0, minX = 1920, minY = 1080, maxX = -1, maxY = -1;
   for (let y = 0; y < 1080; y++) for (let x = 0; x < 1920; x++) {

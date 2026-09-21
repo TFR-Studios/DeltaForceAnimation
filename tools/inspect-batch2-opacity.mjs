@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-const j = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animation/animation_data.mirrored.json','utf8'));
+const j = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animations/animation_1/animation_data.mirrored.json','utf8'));
 
 function showOpacity(ind, label) {
   const l = j.layers.find(x => x.ind === ind);

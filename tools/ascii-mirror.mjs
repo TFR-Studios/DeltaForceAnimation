@@ -15,8 +15,8 @@ await page.setViewport({ width: 1600, height: 1000 });
 await page.goto('http://localhost:5173/', { waitUntil: 'networkidle2', timeout: 120000 });
 await sleep(1200);
 
-const orig = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animation/animation_data.mirror-backup.json','utf8'));
-const mirr = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animation/animation_data.json','utf8'));
+const orig = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animations/animation_1/animation_data.mirror-backup.json','utf8'));
+const mirr = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animations/animation_1/animation_data.json','utf8'));
 
 async function renderIsolated(data, label, frame) {
   const ascii = await page.evaluate(async ({ d, inds, drawframe }) => {

@@ -74,7 +74,7 @@ for (const f of [0, 304, 608]) {
 
 // 4) 帧 304 序列区域 vs ccreptitle_00304(反预乘对比)
 {
-  execFileSync('ffmpeg', ['-y', '-v', 'error', '-i', 'I:/Delta Force custom animation/animation/ccreptile/ccreptitle_00304.png', '-f', 'rawvideo', '-pix_fmt', 'rgba', TMP + '/seq.raw']);
+  execFileSync('ffmpeg', ['-y', '-v', 'error', '-i', 'I:/Delta Force custom animation/animations/animation_1/ccreptile/ccreptitle_00304.png', '-f', 'rawvideo', '-pix_fmt', 'rgba', TMP + '/seq.raw']);
   const seq = fs.readFileSync(TMP + '/seq.raw');
   const frame = fs.readFileSync(TMP + '/f304.raw');
   let seqPx = 0, matched = 0;

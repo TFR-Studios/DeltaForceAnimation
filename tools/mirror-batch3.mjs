@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-const SRC = 'I:/Delta Force custom animation/animation/animation_data.json';
+const SRC = 'I:/Delta Force custom animation/animations/animation_1/animation_data.json';
 const j = JSON.parse(fs.readFileSync(SRC, 'utf8'));
 const l = j.layers.find(x => x.ind === 19);
 const s = l.ks.s;

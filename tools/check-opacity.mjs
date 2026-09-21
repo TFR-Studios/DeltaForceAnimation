@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-const j = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animation/animation_data.json','utf8'));
+const j = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animations/animation_1/animation_data.json','utf8'));
 const inds = [7,18,20,21,22,23];
 const names = {7:'绿色 2',18:'长白线 2',20:'最短线左 2',21:'短线左 2',22:'方框左 2',23:'点左 2'};
 for (const ind of inds) {

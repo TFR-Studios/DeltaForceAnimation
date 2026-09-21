@@ -1,4 +1,4 @@
-/* 把 animation_4 里**可见形状图层**的颜色归到最接近的参考色:
+/* 把 animations/animation_4 里**可见形状图层**的颜色归到最接近的参考色:
  *   参考色 #77B0F0 / #78C5F3(sRGB 欧氏距离取最近)
  * 不动的:占位色(纯红填充 #ff0000 / 纯白描边 #ffffff)、蒙版图层(td=1)、以及离两个参考色都很远的
  *         非蓝系颜色(例如 mask 2 的黄绿 #A3FF00 —— 蒙版层本来也不在编辑列表里)。
@@ -9,8 +9,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
-const FILE = path.join(ROOT, 'animation_4', 'animation_data.json');
-const BACKUP = path.join(ROOT, 'animation_4', 'animation_data.pre-color-normalize.json');
+const FILE = path.join(ROOT, 'animations/animation_4', 'animation_data.json');
+const BACKUP = path.join(ROOT, 'animations/animation_4', 'animation_data.pre-color-normalize.json');
 const argv = process.argv.slice(2);
 const dryRun = argv.includes('--dry-run');
 const revert = argv.includes('--revert');

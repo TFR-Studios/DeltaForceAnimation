@@ -1,6 +1,6 @@
 /* 修改「底框」「底框(可见)」图层的红色描边为 #e23b3b */
 const fs = require('fs');
-const path = 'i:/Delta Force custom animation/animation_2/animation_data.json';
+const path = 'i:/Delta Force custom animation/animations/animation_2/animation_data.json';
 const d = JSON.parse(fs.readFileSync(path, 'utf8'));
 
 const OLD = [0.882352941176, 0.224842505362, 0.221453273998, 1];

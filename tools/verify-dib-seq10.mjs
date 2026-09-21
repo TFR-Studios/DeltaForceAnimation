@@ -165,7 +165,7 @@ try {
     const dec = fs.readFileSync(TMP + `/dec${i}.raw`);
     // 序列 PNG 直通(未预乘)对比:解码帧是预乘值,需要反预乘或对比预乘后的期望值
     const n = String(START + i).padStart(5, '0');
-    execFileSync('ffmpeg', ['-y', '-v', 'error', '-i', `I:/Delta Force custom animation/animation/ccreptile/ccreptitle_${n}.png`, '-f', 'rawvideo', '-pix_fmt', 'rgba', TMP + '/seq.raw']);
+    execFileSync('ffmpeg', ['-y', '-v', 'error', '-i', `I:/Delta Force custom animation/animations/animation_1/ccreptile/ccreptitle_${n}.png`, '-f', 'rawvideo', '-pix_fmt', 'rgba', TMP + '/seq.raw']);
     const seq = fs.readFileSync(TMP + '/seq.raw');
     // 期望值 = 序列帧 premultiplied(与文件一致)
     let seqPx = 0, matched = 0;

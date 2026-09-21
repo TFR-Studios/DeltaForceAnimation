@@ -64,7 +64,7 @@ try {
   // 严格对比:每个采样帧的序列区域 vs 对应 ccreptitle 帧(premultiplied 期望,阈值 20)
   for (const s of captured) {
     const n = String(s.frame).padStart(5, '0');
-    execFileSync('ffmpeg', ['-y', '-v', 'error', '-i', `I:/Delta Force custom animation/animation/ccreptile/ccreptitle_${n}.png`, '-vf', 'crop=90:100:220:375', '-f', 'rawvideo', '-pix_fmt', 'rgba', TMP + '/seq.raw']);
+    execFileSync('ffmpeg', ['-y', '-v', 'error', '-i', `I:/Delta Force custom animation/animations/animation_1/ccreptile/ccreptitle_${n}.png`, '-vf', 'crop=90:100:220:375', '-f', 'rawvideo', '-pix_fmt', 'rgba', TMP + '/seq.raw']);
     const seq = fs.readFileSync(TMP + '/seq.raw');
     const buf = Buffer.from(s.b64, 'base64');
     let seqPx = 0, matched10 = 0, matched20 = 0, matched40 = 0;

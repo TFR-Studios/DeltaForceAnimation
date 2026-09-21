@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const file = path.join(__dirname, '..', 'animation_2', 'animation_data.json');
+const file = path.join(__dirname, '..', 'animations/animation_2', 'animation_data.json');
 const data = JSON.parse(fs.readFileSync(file, 'utf8'));
 
 let changed = 0;

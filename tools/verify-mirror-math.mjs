@@ -1,6 +1,6 @@
 import fs from 'node:fs';
-const ORIG = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animation/animation_data.mirror-backup.json','utf8'));
-const MIRR = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animation/animation_data.json','utf8'));
+const ORIG = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animations/animation_1/animation_data.mirror-backup.json','utf8'));
+const MIRR = JSON.parse(fs.readFileSync('I:/Delta Force custom animation/animations/animation_1/animation_data.json','utf8'));
 const W = 1920;
 const inds = [7,18,20,21,22,23];
 

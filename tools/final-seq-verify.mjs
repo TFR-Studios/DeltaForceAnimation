@@ -10,7 +10,7 @@ fs.mkdirSync(TMP, { recursive: true });
 // ② MP4 帧 304(已有文件):序列区域合成色匹配(直通色×alpha + 背景×(1-alpha))
 const MP4 = 'I:/Delta Force custom animation/tools/.mp4test/animation.mp4';
 execFileSync('ffmpeg', ['-y', '-v', 'error', '-i', MP4, '-vf', "select='eq(n\\,304)'", '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgba', TMP + '/mp4.raw']);
-execFileSync('ffmpeg', ['-y', '-v', 'error', '-i', 'I:/Delta Force custom animation/animation/ccreptile/ccreptitle_00304.png', '-f', 'rawvideo', '-pix_fmt', 'rgba', TMP + '/seq.raw']);
+execFileSync('ffmpeg', ['-y', '-v', 'error', '-i', 'I:/Delta Force custom animation/animations/animation_1/ccreptile/ccreptitle_00304.png', '-f', 'rawvideo', '-pix_fmt', 'rgba', TMP + '/seq.raw']);
 const mp4 = fs.readFileSync(TMP + '/mp4.raw');
 const seq = fs.readFileSync(TMP + '/seq.raw');
 const bg = [0x16, 0x18, 0x1d];

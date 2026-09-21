@@ -1,6 +1,6 @@
 const fs=require('fs');
-const main=JSON.parse(fs.readFileSync('animation_2/animation_data.json','utf8'));
-const next=JSON.parse(fs.readFileSync('animation_2/animation_data_next_fixed.json','utf8'));
+const main=JSON.parse(fs.readFileSync('animations/animation_2/animation_data.json','utf8'));
+const next=JSON.parse(fs.readFileSync('animations/animation_2/animation_data_next_fixed.json','utf8'));
 
 function prepareNextData(nd, baseOp){
   const d=JSON.parse(JSON.stringify(nd));

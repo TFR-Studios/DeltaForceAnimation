@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-const d = JSON.parse(fs.readFileSync('animation_2/animation_data.json', 'utf8'));
+const d = JSON.parse(fs.readFileSync('animations/animation_2/animation_data.json', 'utf8'));
 const BUFFER = 5; // DURATION_BUFFER
 const targetEnd = Math.round(1.25 * (d.fr || 60)) + BUFFER; // 75 + 5? 见 applyMainDuration
 console.log('fr=', d.fr, 'op=', d.op, 'targetEnd(seconds*fr)=', Math.round(1.25 * (d.fr||60)), 'DURATION_BUFFER=?');

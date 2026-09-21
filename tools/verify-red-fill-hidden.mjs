@@ -5,9 +5,9 @@ import fs from 'node:fs';
 const URL = 'http://127.0.0.1:5173/';
 const ROOT = 'I:/Delta Force custom animation';
 const targets = [
-  { key: 'mission', label: '任务弹窗动画', file: 'animation_4/animation_data.json' },
-  { key: 'extraction', label: '撤离动画', file: 'animation/animation_data.json' },
-  { key: 'blinds', label: '核电站功率动画', file: 'animation_3/animation_data.json' },
+  { key: 'mission', label: '任务弹窗动画', file: 'animations/animation_4/animation_data.json' },
+  { key: 'extraction', label: '撤离动画', file: 'animations/animation_1/animation_data.json' },
+  { key: 'blinds', label: '核电站功率动画', file: 'animations/animation_3/animation_data.json' },
 ];
 const hexOf = (fc) => '#' + fc.slice(0, 3).map((v) => Math.max(0, Math.min(255, Math.round(v * 255))).toString(16).padStart(2, '0')).join('');
 const browser = await puppeteer.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: 'new', args: ['--no-sandbox','--disable-gpu'] });

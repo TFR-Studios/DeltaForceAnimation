@@ -49,7 +49,7 @@ async function check(dataPath, label) {
   }, JSON.stringify(data));
 }
 
-console.log('备份(原始动画位置):', JSON.stringify(await check('I:/Delta Force custom animation/animation/animation_data.pre-ccreptile-fix.json', 'before')));
-console.log('当前(新位置):', JSON.stringify(await check('I:/Delta Force custom animation/animation/animation_data.json', 'after')));
+console.log('备份(原始动画位置):', JSON.stringify(await check('I:/Delta Force custom animation/animations/animation_1/animation_data.pre-ccreptile-fix.json', 'before')));
+console.log('当前(新位置):', JSON.stringify(await check('I:/Delta Force custom animation/animations/animation_1/animation_data.json', 'after')));
 await browser.close();
 

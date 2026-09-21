@@ -58,7 +58,7 @@ try {
     execFileSync('ffmpeg', ['-y', '-v', 'error', '-i', OUT, '-vf', `select='eq(n\\,${f})'`, '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgba', TMP + `/f${f}.raw`]);
     const mp4f = fs.readFileSync(TMP + `/f${f}.raw`);
     const n = String(f).padStart(5, '0');
-    execFileSync('ffmpeg', ['-y', '-v', 'error', '-i', `I:/Delta Force custom animation/animation/ccreptile/ccreptitle_${n}.png`, '-f', 'rawvideo', '-pix_fmt', 'rgba', TMP + '/seq.raw']);
+    execFileSync('ffmpeg', ['-y', '-v', 'error', '-i', `I:/Delta Force custom animation/animations/animation_1/ccreptile/ccreptitle_${n}.png`, '-f', 'rawvideo', '-pix_fmt', 'rgba', TMP + '/seq.raw']);
     const seq = fs.readFileSync(TMP + '/seq.raw');
     const bg = [0x16, 0x18, 0x1d];
     let seqPx = 0, matched = 0;
