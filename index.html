@@ -152,7 +152,7 @@
         </div>
       </section>
 
-      <!-- 侧栏:动画信息 -> 动画时长(仅位置暴露) -> 文字图层 -> 形状图层 -> 图片图层 -> 图标选择 -> 弹窗图层 -->
+      <!-- 侧栏:动画信息 -> 动画时长(仅位置暴露) -> 报酬信息(仅任务弹窗) -> 文字图层 -> 形状图层 -> 图片图层 -> 图标选择 -> 弹窗图层 -->
       <!-- 除「动画信息」外,各区块默认 hidden,由 main.ts 按当前动画的数据能力逐块打开 -->
       <!-- 各区块标题后的 span 是图层数量计数,由 main.ts 写入 -->
       <aside class="side-panel">
@@ -177,6 +177,16 @@
               <span id="nextDurationVal">3.2s</span>
             </label>
           </div>
+        </div>
+        <!-- 报酬信息(仅任务弹窗动画显示):一个开关统一控制「预期报酬」「数字」与货币图标三者的显隐 -->
+        <!-- 放在「文字图层」之前,是因为其中两项(预期报酬 / 数字)就列在紧随其后的列表里 -->
+        <!-- 实现走图层的 hd(隐藏)标记而不是把不透明度压成 0:三者在侧栏各有独立的不透明度滑块,
+             改不透明度来隐藏会被滑块冲掉,也会覆盖用户隐藏前调好的值(见 main.ts 的 setMissionRewardVisible) -->
+        <div id="missionRewardSection" hidden>
+          <h3>报酬信息</h3>
+          <label class="popup-toggle" id="missionRewardToggle" title="统一控制「预期报酬」「数字」与货币图标三者的显隐;隐藏后各自的文案 / 颜色 / 不透明度设置都会保留,重新勾选即原样恢复">
+            <input type="checkbox" id="chkMissionReward" checked /> 显示预期报酬 / 数字 / 图标
+          </label>
         </div>
         <!-- 文字图层:每项可改文案与颜色,右上角「重置」恢复该图层在 JSON 里的原始文案与颜色 -->
         <h3>文字图层 <span id="textCount"></span></h3>

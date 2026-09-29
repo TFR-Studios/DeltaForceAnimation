@@ -822,6 +822,7 @@ input[type="color"] { padding: 0; width: 34px; height: 26px; }
   padding: 8px 10px 10px;
   background: var(--panel-2);
 }
+/* 勾选行(「显示弹窗」「显示图标」「显示预期报酬 / 数字 / 图标」共用):整行可点、文字与复选框同高 */
 .popup-toggle {
   display: flex;
   align-items: center;

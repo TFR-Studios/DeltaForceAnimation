@@ -16,7 +16,8 @@
  * 五套动画(ANIMATIONS,按需加载):撤离动画(1920×1080)、位置暴露动画(画布加宽为 3840×1080,
  *   可把「二次扫描」第二段合并进同一条时间轴)、核电站功率动画(两条 359 帧透明序列叠加)、
  *   任务弹窗动画(1920×1080,自带一枚货币图标,可在「图标选择」里替换/上传并调不透明度)、
- *   地图标题动画(方形 1024×1024,纯文字 + 形状的「地图名称 / 地图地点」标题卡)。
+ *   地图标题动画(宽画布 2560×1024,纯文字 + 形状的「地图名称 / 地图地点」标题卡,
+ *   文字左对齐、底框与描边随文字宽度自适应)。
  *
  * 编辑面板(所有编辑都是就地改渲染用的 JSON,再走 reRenderPreservingState() 单飞重建并恢复播放位置):
  *   • 文字 / 形状 / 图片图层列表 —— 顶层与被引用的预合成(assets[] 里的合成)内部都列出,预合成项名字带「合成名 ›」前缀;
@@ -1026,6 +1027,9 @@ const iconScopeTabs = $<HTMLDivElement>('iconScopeTabs'); // 分段选项卡容�
 const iconOpacityRow = $<HTMLDivElement>('iconOpacityRow');
 const iconOpacitySlider = $<HTMLInputElement>('iconOpacitySlider');
 const iconOpacityVal = $<HTMLSpanElement>('iconOpacityVal');
+/* 「报酬信息」统一开关(仅任务弹窗动画):控制「预期报酬」「数字」与货币图标的显隐 */
+const missionRewardSection = $<HTMLDivElement>('missionRewardSection');
+const chkMissionReward = $<HTMLInputElement>('chkMissionReward');
 /* 图标选择的分段选项卡:位置暴露(主段)/ 二次扫描(第二段)分别自定义图标 */
 const iconScopeMain = $<HTMLButtonElement>('iconScopeMain');
 const iconScopeNext = $<HTMLButtonElement>('iconScopeNext');
@@ -1119,6 +1123,7 @@ async function loadData(data: any, name: string) {
   captureOriginalShapeState(data);
   captureOpacityState(data);
   captureDikuangBaseState();
+  captureMaptitlePlateBase(); // 地图标题动画:采集底框/描边的基准宽度与文字基准宽度
   captureIconState();
   setupImageSequence(data);
   // 按本次载入的序列图层(重新)生成调色滤镜:叠加序列默认就挂出厂色滤镜,
@@ -2255,6 +2260,7 @@ function onTextEdited(ind: number, newText: string) {
   if (!layer) return;
   setLayerText(layer, newText);
   adaptDikuangWidth(); // 文字宽度变化 → 底框宽度同步
+  adaptMaptitlePlateWidth(); // 地图标题动画:底框/描边跟着文字宽度走(只增不减)
   // 防抖后重渲染(保留当前帧/播放状态/缩放)
   window.clearTimeout(textEditTimer);
   textEditTimer = window.setTimeout(() => {
@@ -2327,6 +2333,7 @@ function onResetText(ind: number) {
   }
   resetLayerOpacity(ind);
   adaptDikuangWidth(); // 文字恢复原宽 → 底框恢复基准宽
+  adaptMaptitlePlateWidth(); // 地图标题动画:文字回到基准宽度 → 衬板也回到基准宽
   // 同步 UI
   const ta = textList.querySelector<HTMLTextAreaElement>('.t-input[data-ind="' + ind + '"]');
   if (ta) ta.value = String(orig.text).replace(/\r/g, '\n');
@@ -3778,6 +3785,134 @@ function adaptDikuangWidth() {
 }
 
 
+/* ---------- 地图标题动画:「底框 / 描边」随文字宽度自适应 ----------
+ * 该动画的底框与描边是一对**同尺寸**圆角矩形(描边图层多一条 tm 修剪路径,白轮廓才露得出来),
+ * 两者必须一起变宽,否则黑白两层会错位 —— 这也是不能直接复用 adaptDikuangWidth 的原因之一
+ * (那套只认「底框」这一个图层名,而这里的描边同样要跟着动)。
+ * 与位置暴露动画那套的另外两点差异:
+ *   ① 那段文字改成了**左对齐**,底框必须「左边缘钉死、只向右生长」;
+ *      位置暴露的底框是居中的,加宽时向两侧同时生长。
+ *   ② 实现上**不动图层缩放**,而是直接改形状里的圆角矩形 rc:宽度 +Δ、矩形位置 x = Δ/2。
+ *      矩形在形状空间里是「以 pos 为中心、宽 w」,于是左边缘恒为 −w/2 + Δ/2 = 原左边缘,
+ *      天然实现「左边缘不动」,不必再去补偿锚点/缩放带来的位移(该图层的锚点在 −644.54,
+ *      一旦用缩放实现,加宽会把左边缘推着往右跑,还得反解回移量)。
+ * 规则:**只增不减** —— 文字变长才变宽,改短不回缩(与位置暴露动画一致)。 */
+/* 描边图层比底框多一条「修剪路径(tm)」:它把矩形轮廓只保留 67.2%→100% 一段,
+ * 也就是**只留下顶边那条横线**(矩形路径按 AE 的顺时针约定从右上角起画:右边→底边→左边→顶边,
+ * 顶边恰好在 67.1% 处开始)—— 白描边靠它才露得出来。
+ * 麻烦在于修剪的 s/e 是**周长百分比**:矩形一加宽,周长变长,同样 67.2% 就切得更靠里,
+ * 白线的左端会跟着往右跑(实测底框左边缘钉在 102.4px 不动,描边却漂到了 433.2px)。
+ * 因此加宽时必须重算 s —— 但**不能**简单换成「顶边起点所占比例」(2h+w)/2(h+w):
+ * 原始导出是 67.2%,比顶边起点 67.101% 多出约 0.086 个单位的内缩,那是白线左端相对转角的留白。
+ * 把这个内缩抹掉、让 s 正好压在转角上,线帽就会落在矩形拐角处并向外溢出半个描边宽度
+ * (实测描边左端从 102 跑到 81,左边「多出来几个像素」)。
+ * 正确做法是**保留原始内缩量**:s = (2h + w + inset) / 2(w + h),Δ=0 时与原始值逐位一致。 */
+type MaptitlePlateRect = {
+  rc: any;          // 形状组里的圆角矩形项(JSON 本体,就地改)
+  baseW: number;    // 基准宽度(形状空间)
+  basePosX: number; // 基准矩形位置 x(形状空间)
+  baseH: number;    // 基准高度(形状空间,算修剪比例要用)
+  ratio: number;    // 文字空间增量 → 形状空间增量的换算系数
+  trims: { tm: any; inset: number }[]; // 该图层里的修剪路径项(底框没有,描边有一条)及其「起点内缩量」
+};
+let maptitlePlateBase: { textInd: number; baseAdv: number; rects: MaptitlePlateRect[] } | null = null;
+
+/* 采集基准:文字层当前的前进宽度 + 两个衬板图层里每个圆角矩形的原始尺寸与位置。
+ * 与其它 capture* 一样只在 loadData(切动画)时跑一次,重建动画不会重采,
+ * 否则「基准」会被用户改过的宽度覆盖掉,自适应就永远不生效了。 */
+function captureMaptitlePlateBase() {
+  maptitlePlateBase = null;
+  if (!currentData || currentAnimKey !== 'maptitle') return;
+  const top = currentData.layers ?? [];
+  const textLayer = top.find((l: any) => l.ty === 5 && l.nm === '地图地点');
+  const plates = top.filter((l: any) => l.ty === 4 && (l.nm === '底框' || l.nm === '描边'));
+  if (!textLayer || !plates.length) return;
+  const doc = textDocOf(textLayer);
+  if (!doc) return;
+  const rects: MaptitlePlateRect[] = [];
+  for (const plate of plates) {
+    /* 文字层与两个衬板图层同属一个父级链(都在 ind3 之下),所以两者换算到合成空间时
+     * 公共的祖先缩放会约掉,只剩「文字层自身缩放 ÷ 衬板自身缩放」这一项。 */
+    const textScale = (textLayer.ks?.s?.k?.[0] ?? 100) / 100;
+    const plateScale = (plate.ks?.s?.k?.[0] ?? 100) / 100;
+    if (!plateScale) continue;
+    const ratio = textScale / plateScale;
+    /* 先定位该图层的基准圆角矩形(尺寸 static),修剪路径的「起点内缩量」要用它算 */
+    let rect0: { w: number; h: number } | null = null;
+    const findRect = (items: any[]) => {
+      for (const it of items ?? []) {
+        if (!rect0 && it.ty === 'rc' && it.s?.a === 0 && Array.isArray(it.s.k) && it.p?.a === 0) {
+          const w = Number(it.s.k[0]), h = Number(it.s.k[1]);
+          if (w > 0 && h > 0) rect0 = { w, h };
+        }
+        if (Array.isArray(it.it)) findRect(it.it);
+      }
+    };
+    findRect(plate.shapes);
+    /* 修剪路径是形状组的兄弟节点,单独收集一次。
+     * 只认「终点在路径末端(e=100%)」的静态修剪 —— 也就是地图标题动画里那条「只保留顶边」的写法。
+     * 起点相对「顶边起点」的**内缩量必须原样保留**:原始导出 s=67.2%,而顶边起点是 67.101%,
+     * 多出的约 0.086 个单位就是白线左端相对转角的留白。若把它当成「正好压在角上」重算,
+     * 线帽会正好落在矩形转角上、笔画端头向外溢出半个描边宽度(实测 21px)——
+     * 看起来就是「描边左边多出来几个像素」。 */
+    const trims: { tm: any; inset: number }[] = [];
+    const br = rect0 as { w: number; h: number } | null;
+    if (br) {
+      const perim0 = 2 * (br.w + br.h);
+      const collectTrims = (items: any[]) => {
+        for (const it of items ?? []) {
+          if (it.ty === 'tm' && it.s?.a === 0 && it.e?.a === 0 && Math.abs((it.e.k ?? 100) - 100) < 0.01) {
+            trims.push({ tm: it, inset: ((it.s.k ?? 0) / 100) * perim0 - (2 * br.h + br.w) });
+          }
+          if (Array.isArray(it.it)) collectTrims(it.it);
+        }
+      };
+      collectTrims(plate.shapes);
+    }
+    const walk = (items: any[]) => {
+      for (const it of items ?? []) {
+        // 只认静态尺寸的圆角矩形:做成关键帧的尺寸没法当基准
+        if (it.ty === 'rc' && it.s?.a === 0 && Array.isArray(it.s.k) && it.p?.a === 0) {
+          const baseW = Number(it.s.k[0]);
+          const baseH = Number(it.s.k[1]);
+          const basePosX = Number(it.p.k?.[0] ?? 0);
+          if (baseW > 0 && baseH > 0 && isFinite(basePosX)) rects.push({ rc: it, baseW, basePosX, baseH, ratio, trims });
+        }
+        if (Array.isArray(it.it)) walk(it.it);
+      }
+    };
+    walk(plate.shapes);
+  }
+  if (!rects.length) return;
+  maptitlePlateBase = { textInd: textLayer.ind, baseAdv: measureDikuangTextWidth(String(doc.t ?? ''), doc), rects };
+}
+
+/* 按当前文字宽度重算两个衬板的矩形宽度。文字变短时 Δ 取 0(只增不减),
+ * 因此「改短 → 没变化」,点重置把文字改回原样时会精确回到基准宽度。 */
+function adaptMaptitlePlateWidth() {
+  const base = maptitlePlateBase;
+  if (!base || !currentData) return;
+  const textLayer = findLayerInData(currentData, base.textInd);
+  const doc = textLayer ? textDocOf(textLayer) : null;
+  if (!doc) return;
+  const cur = measureDikuangTextWidth(String(doc.t ?? ''), doc);
+  if (!cur || !base.baseAdv) return;
+  const grow = Math.max(0, cur - base.baseAdv); // 只增不减
+  for (const r of base.rects) {
+    const delta = grow * r.ratio;
+    const w = r.baseW + delta;
+    r.rc.s.k[0] = w;
+    r.rc.p.k[0] = r.basePosX + delta / 2; // 中心右移半个增量 → 左边缘不动
+    /* 有修剪路径的图层(描边):把 s 锁在「顶边起点」的比例上,白线才会跟着矩形一起变宽、
+       而不是因为周长变长而往右缩。e 保持原值(100%)。 */
+    for (const { tm, inset } of r.trims) {
+      const perimeter = 2 * (w + r.baseH);
+      // 顶边起点 + 原样的内缩量 → 再换算成周长百分比;Δ=0 时结果与原始导出值完全一致
+      if (perimeter > 0) tm.s.k = +(((2 * r.baseH + w + inset) / perimeter) * 100).toFixed(4);
+    }
+  }
+}
+
 /* ---------- 底框黑色矩形独立透明度(两段) ----------
  * 底框(可见) = 两个竖条 + 黑色主矩形(形状组「矩形 1」)。矩形有自己的
  * 形状组不透明度(tr.o),可被独立于「两个竖条」单独调整。主段与二次扫描段
@@ -4778,8 +4913,9 @@ async function ensureMissionData(onProgress?: (p: number | null) => void): Promi
 }
 
 /* ---------- 地图标题动画(animations/animation_5)----------
- * 数据 = animations/animation_5/animation_data.json(1024×1024 / 60fps / op=327,即 327 帧 ≈ 5.45s;
- * 方形画布,内容占画布宽度约 80% —— 由根空对象 ind=1 的缩放/位置实现,关键帧未改动;
+ * 数据 = animations/animation_5/animation_data.json(2560×1024 / 60fps / op=327,即 327 帧 ≈ 5.45s;
+ * 宽画布 + 文字左对齐:内容贴在画布左侧(左边缘 ≈102px),右侧留出空间供长地名把底框撑开;
+ * 底框/描边随文字宽度自适应,见 captureMaptitlePlateBase / adaptMaptitlePlateWidth;
  * 原始导出里 ip=4,会把「地图名称」从第 0 帧开始的淡入切掉前 4 帧,已本地归一为 ip=0,见 README),
  * 画面内容:上方「地图名称」+ 下方「地图地点」(带一条底框 + 描边衬板,两层都有闪烁的不透明度关键帧),
  * 两个 NULL CONTROL 负责整组的位移。没有音频、没有位图资源、没有叠加序列,
@@ -5174,8 +5310,8 @@ const ANIMATIONS: AnimDef[] = [
     meta: {
       tags: ['地图', '地点', '地名', '标题', '位置', '坐标', 'maptitle'],
       accent: '#14b8a6',
-      w: 1024, h: 1024, fps: 60, frames: 327,
-      features: ['文字可编辑', '底框可调'],
+      w: 2560, h: 1024, fps: 60, frames: 327,
+      features: ['文字可编辑', '底框随文字自适应'],
     },
     poster: posterOf('maptitle'),
     data: () => mapTitleData,
@@ -5390,6 +5526,8 @@ function setIconVisible(visible: boolean, rerender = true) {
 }
 
 chkIcon.addEventListener('change', () => setIconVisible(chkIcon.checked));
+/* 「报酬信息」统一开关(仅任务弹窗动画):勾选/取消后重建动画(数据里的 hd 已改) */
+chkMissionReward.addEventListener('change', () => setMissionRewardVisible(chkMissionReward.checked));
 
 /* 「图标不透明度」滑块(任务弹窗动画):复用图片/文字/形状列表那套 .o-slider 处理,
  * 只把根节点换成图标区块 —— 滑块是静态 DOM,模块加载时绑定一次即可,不会重复挂监听。 */
@@ -5531,6 +5669,49 @@ function syncIconOpacityRow(data: any = currentData) {
   iconOpacitySlider.dataset.ind = String(layer.ind);
   iconOpacitySlider.value = String(v);
   iconOpacityVal.textContent = v + '%';
+}
+
+/* ---------- 任务弹窗动画:「报酬信息」统一显隐 ----------
+ * 「预期报酬」「数字」与货币图标在画面上是同一条报酬文案(文字 + 金额 + 币种图标),
+ * 这里把它们当成一组,用一个开关统一显隐。
+ *
+ * 为什么用图层的 hd(隐藏)标记,而不是像位置暴露动画的 setIconVisible 那样把不透明度压成 0:
+ *   • 这三个图层在侧栏各有**独立的不透明度滑块**(两个文字层在「文字图层」列表、图标在「图标不透明度」),
+ *     靠改不透明度来隐藏,用户一碰滑块就会把隐藏状态冲掉;
+ *   • 隐藏前用户调好的不透明度也会被覆盖 —— hd 则完全不动 o,重新勾选即原样恢复;
+ *   • hd 只在 lottie 构建时跳过该图层(buildItem),其余字段一个不碰,风险最小。
+ * 侧栏各列表的遍历(walkEditableLayers)不过滤 hd,所以隐藏后三者仍留在列表里,
+ * 文案 / 颜色 / 不透明度都照常可编辑,只是画面不显示 —— 这正是「设置都保留」的含义。 */
+const MISSION_REWARD_TEXT_NAMES = ['预期报酬', '数字'];
+/* 当前是否显示(默认显示)。存在模块级而不是挂在数据上:切换动画时数据对象会保留,
+ * 但重新勾选/取消时要以这个为准,避免「数据里没 hd 但开关是关的」这种不一致。 */
+let missionRewardShown = true;
+
+/* 收集这一组的三个图层:两个按名字找的文字层 + 任务弹窗动画唯一的那张位图(图标层)。
+ * 用名字而不是写死 ind:重新导出后 ind 可能变,名字是稳定的。 */
+function missionRewardLayers(data: any = currentData): any[] {
+  if (!data) return [];
+  const out: any[] = [];
+  for (const nm of MISSION_REWARD_TEXT_NAMES) {
+    const l = (data.layers ?? []).find((x: any) => x.nm === nm);
+    if (l) out.push(l);
+  }
+  const icon = iconLayerOf(data, 'mission');
+  if (icon) out.push(icon);
+  return out;
+}
+
+/* 应用显隐。rerender=false 用于「批量改完数据再统一重建」的场景(如 switchAnimation 里
+ * 在 loadData 之前先把状态落实,避免重建两次)。 */
+function setMissionRewardVisible(visible: boolean, rerender = true) {
+  missionRewardShown = visible;
+  if (currentData && currentAnimKey === 'mission') {
+    for (const l of missionRewardLayers()) {
+      if (visible) delete l.hd;
+      else l.hd = true;
+    }
+  }
+  if (rerender) reRenderPreservingState();
 }
 
 /* 同步选项卡 / 缩略图 / 跟随开关 / 二次扫描提示,并重绘图标网格。
@@ -5717,6 +5898,15 @@ async function switchAnimation(key: string) {
   } else {
     iconList.innerHTML = '';
     iconOpacityRow.hidden = true;
+  }
+  // 报酬信息区块(统一显隐「预期报酬 / 数字 / 图标」):只有任务弹窗动画有这一组
+  const hasRewardGroup = key === 'mission';
+  missionRewardSection.hidden = !hasRewardGroup;
+  if (hasRewardGroup) {
+    /* 必须在随后的 loadData 之前把 hd 落实到位 —— loadData 会据此构建 lottie 实例,
+     * 之后再改就要多重建一次。rerender=false:这里只改数据,重建由 loadData 负责。 */
+    chkMissionReward.checked = missionRewardShown;
+    setMissionRewardVisible(missionRewardShown, false);
   }
   // 动画时长区块(时长 + 二次扫描开关 + 二次扫描时长):由注册项的 caps.timing 决定
   timingSection.hidden = !def.caps.timing;
