@@ -832,7 +832,11 @@ function patchSvgRendererTree(renderer: any) {
       const seqEntry = el.data.ty === 2 ? seqEntryByInd.get(el.data.ind) : undefined;
       if (seqEntry) patchSeqSvgElement(el, seqEntry);
       else if (el.data.ty === 0 && typeof el.buildItem === 'function') patchSvgRendererTree(el);
-      if (getDropShadow(el.data)) patchSvgDropShadow(el);
+      applySeqTintToSvg(el); // 预合成宿主(黑潮爆破的逐帧序列)也要挂调色滤镜
+      /* AE 效果补丁:投影与填充都要写 style.filter,统一由 patchSvgDropShadow 合并成一条。
+       * 不能只按"有没有投影"来调 —— 只有「填充」没有投影的图层(黑潮爆破的 HUD 底条与提示条)
+       * 会因此被整段跳过,表现为"改了颜色画面没反应"。 */
+      if (getDropShadow(el.data) || getFillEffect(el.data)) patchSvgDropShadow(el);
     }
   }
   const origBuild = renderer.buildItem.bind(renderer);
@@ -847,7 +851,8 @@ function patchSvgRendererTree(renderer: any) {
     } else if (el.data && el.data.ty === 0 && typeof el.buildItem === 'function') {
       patchSvgRendererTree(el); // 预合成内
     }
-    if (el.data && getDropShadow(el.data)) patchSvgDropShadow(el);
+    if (el) applySeqTintToSvg(el); // 预合成宿主(黑潮爆破的逐帧序列)也要挂调色滤镜
+    if (el.data && (getDropShadow(el.data) || getFillEffect(el.data))) patchSvgDropShadow(el);
   };
 }
 
@@ -882,8 +887,8 @@ async function ensureSeqDecoded(n: number) {
 const seqTints = new Map<string, string>(); // '动画key:ind' → 目标色 #rrggbb
 let seqTintSvg: SVGSVGElement | null = null;
 
-function seqTintKey(ind: number): string {
-  return currentAnimKey + ':' + ind;
+function seqTintKey(name: string): string {
+  return currentAnimKey + ':' + name;
 }
 
 /* 叠加序列名单:这些序列默认就挂着调色滤镜(出厂色 #d82f28),而不是「未调色 = 不挂滤镜」。
@@ -892,18 +897,67 @@ function isBlindsSequenceName(nm: string | undefined): boolean {
   return !!nm && BLINDS_SEQUENCES.some((s) => s.name === nm);
 }
 
-/* 该图层当前生效的调色:用户手动设过的色优先,否则叠加序列用出厂色,其余序列图层不调色 */
-function seqTintHexOfLayer(data: any): string | null {
-  const ind = data?.ind;
-  if (typeof ind !== 'number') return null;
-  const explicit = seqTints.get(seqTintKey(ind));
-  if (explicit) return explicit;
-  return isBlindsSequenceName(data?.nm) ? sequenceDefaultHex(String(data.nm)) : null;
+/* ---------- 位图图层的调色(黑潮爆破默认弹窗的「图片图层」) ----------
+ * 与核电站功率的叠加序列不同:那里的图层是逐帧换图(ks.src),调色只能挂滤镜;
+ * 这里要调的是一张**静态位图资源**(提示条 / 图标 / HUD 底条 / 遮罩源 / 两张整幅图),所以走的是
+ * 「把资源换成着色后的 data URI」——也就是站点原本给「百叶窗.png」用的那条通路。
+ *
+ * 三个必须处理的点:
+ *  ① **要能调回原样**:着色是"从原始位图重新着色",所以原始地址必须先存下来。动画自带的资源原本是
+ *     /animations/animation_6/images/xxx.png 这种打包地址,直接存下来即可;一旦被着过色,
+ *     资源 p 就变成了 data:image/png;base64... —— 所以用 blastTintHex/isBlastTintedUri 判定"当前是不是
+ *     着色结果",只在还没着色时记住原地址,避免把着色结果当原图(re-reset 就回不去了)。
+ *  ② **着色后必须刷新缓存**:站点按地址缓存解码结果(imageTintCaches),不清一遍的话重建时会拿旧图,
+ *     表现为"拖了颜色但画面不变"(见 invalidateBitmapCaches)。
+ *  ③ **着色用乘色法**(目标色 × 源像素亮度),而不是站点原有的"保留亮度换色相饱和度":这些 UI 素材是
+ *     纯灰度的(实测 100% 灰度像素、平均饱和度 0),"保留饱和度"的算法对灰色等于什么都不做 ——
+ *     拖了颜色画面纹丝不动。乘色法则天然适配"白描边 + 半透明底"的 UI 图:白描边保持色相、
+ *     灰底被染成所选颜色、暗部仍是暗部。
+ *
+ * 逐帧序列(696 帧)走的是另一条路:按图层 ind 记色,套 SVG 滤镜(与核电站的叠加序列同一套机制),
+ * 不逐帧重编码 —— 见 seqTint* 那几个函数。 */
+/* 清掉按「图片地址」缓存的解码结果:资源换成着色后的 data URI 之后,不清就会命中旧图,
+ * 表现为"拖了颜色但重建出来的画面没变"。着色用的原始位图缓存也一并清,保证下次仍从原图重算。 */
+function invalidateBitmapCaches(asset: any, originalUri: string) {
+  if (typeof asset?.p === 'string') imageTintCaches.delete(asset.p);
+  imageTintCaches.delete(originalUri);
+}
+const blastOriginalImageUri = new Map<string, string>(); // '动画key:refId' → 原始资源地址
+const blastFillOriginalColor = new Map<string, number[]>(); // '动画key:refId' → 原始「填充」色(fc 数组),用于重置
+const blastTintHex = new Map<string, string>(); // '动画key:refId' → 用户选定的颜色
+/** 当前资源是不是本站着色产物(着色后 p 一定是 data:image/...) */
+function isBlastTintedUri(p: unknown): boolean {
+  return typeof p === 'string' && p.indexOf('data:image/') === 0;
+}
+function blastTintKey(refId: string): string {
+  return currentAnimKey + ':' + refId;
+}
+/* 逐帧序列的调色键:用**宿主图层名**(如「箭头 1_[00000-00695].png」)。
+ * 为什么不复用 ind:预合成内的图层 ind 会被 normalizePrecompInds 重新编号 —— 实测 comp_1 里的宿主
+ * ind 是 100001,但列表里拿到的对象 ind 是 1(与预合成内其它图层撞号),用它当键会串味。
+ * 图层名既唯一又稳定,而且它本来就是这条序列的素材名。 */
+const SEQ_NAME_PREFIX = 'seqname:';
+function seqNameKey(name: string): string {
+  return SEQ_NAME_PREFIX + name;
+}
+function isSeqNameRef(ref: string): boolean {
+  return ref.startsWith(SEQ_NAME_PREFIX);
 }
 
-// 滤镜 id 只能含字母数字 / 下划线 / 连字符,把 '动画key:ind' 里的非法字符统一替换掉
-function seqTintFilterId(ind: number): string {
-  return 'df-seq-tint-' + seqTintKey(ind).replace(/[^a-zA-Z0-9_-]+/g, '-');
+/* 该图层当前生效的调色:用户手动设过的色优先,否则叠加序列用出厂色,其余序列图层不调色。
+ * 键用**图层名**而不是 ind:预合成内的 ind 会被 normalizePrecompInds 重新编号(实测同一条序列
+ * 在不同遍历路径下 ind 是 100001 / 1 两种值),用名字才稳定;名字在这份数据里也是唯一的。 */
+function seqTintHexOfLayer(data: any): string | null {
+  const nm = typeof data?.nm === 'string' ? data.nm : '';
+  if (!nm) return null;
+  const explicit = seqTints.get(seqTintKey(nm));
+  if (explicit) return explicit;
+  return isBlindsSequenceName(nm) ? sequenceDefaultHex(nm) : null;
+}
+
+// 滤镜 id 只能含字母数字 / 下划线 / 连字符,把 '动画key:图层名' 里的非法字符统一替换掉
+function seqTintFilterId(name: string): string {
+  return 'df-seq-tint-' + seqTintKey(name).replace(/[^a-zA-Z0-9_-]+/g, '-');
 }
 
 /* 生成 feColorMatrix 的 20 个系数(4×5,行主序):输出 RGB 恒等于目标色、alpha 沿用源图,
@@ -931,11 +985,40 @@ function syncSeqTintFilters() {
   while (seqTintSvg.firstChild) seqTintSvg.removeChild(seqTintSvg.firstChild);
   const defs = document.createElementNS(NS, 'defs');
   // 按当前动画的序列图层生成:即使 seqTints 里没有显式记录,叠加序列也会按出厂色生成滤镜
-  for (const entry of seqEntries) {
-    const hex = seqTintHexOfLayer({ ind: entry.ind, nm: entry.nm });
+  /* 每条序列一个 <filter>:只有"有有效颜色"的才生成 —— 叠加序列自带出厂色,黑潮爆破的逐帧序列
+   * 出厂不调色(seqTintHexOfLayer 返回空),用户选过色之后才有滤镜。 */
+  /* 逐帧序列的宿主图层藏在预合成里(currentData.layers 顶层找不到),所以整棵树找一遍;
+   * 它是一条 ty:0 预合成图层,用户选过色之后才有滤镜(未选色 = 画面保持素材原样)。 */
+  const seqNames: string[] = [];
+  const collectSeqNames = (layers: any[]) => {
+    for (const l of layers ?? []) {
+      if (l && String(l.refId) === 'sequence_0' && typeof l.nm === 'string' && seqNames.indexOf(l.nm) < 0) seqNames.push(l.nm);
+      if (Array.isArray(l?.layers)) collectSeqNames(l.layers);
+    }
+  };
+  collectSeqNames(currentData?.layers);
+  for (const a of currentData?.assets ?? []) if (Array.isArray(a.layers)) collectSeqNames(a.layers);
+  for (const nm of seqNames) {
+    const hex = seqTintHexOfLayer({ nm });
     if (!hex) continue;
     const filter = document.createElementNS(NS, 'filter');
-    filter.setAttribute('id', seqTintFilterId(entry.ind));
+    filter.setAttribute('id', seqTintFilterId(nm));
+    filter.setAttribute('x', '-10%');
+    filter.setAttribute('y', '-10%');
+    filter.setAttribute('width', '120%');
+    filter.setAttribute('height', '120%');
+    filter.setAttribute('color-interpolation-filters', 'sRGB');
+    const m = document.createElementNS(NS, 'feColorMatrix');
+    m.setAttribute('type', 'matrix');
+    m.setAttribute('values', seqTintMatrixValues(hex));
+    filter.appendChild(m);
+    defs.appendChild(filter);
+  }
+  for (const entry of seqEntries) {
+    const hex = seqTintHexOfLayer({ nm: entry.nm });
+    if (!hex) continue;
+    const filter = document.createElementNS(NS, 'filter');
+    filter.setAttribute('id', seqTintFilterId(entry.nm));
     filter.setAttribute('x', '-10%');
     filter.setAttribute('y', '-10%');
     filter.setAttribute('width', '120%');
@@ -958,7 +1041,7 @@ function withSeqTint(el: any, draw: () => void) {
   const prev = ctx.filter;
   let applied = false;
   try {
-    ctx.filter = 'url(#' + seqTintFilterId(el.data.ind) + ')';
+    ctx.filter = 'url(#' + seqTintFilterId(String(el.data?.nm ?? '')) + ')';
     applied = true;
   } catch { /* 浏览器不支持时按原色绘制 */ }
   const r = draw();
@@ -966,12 +1049,49 @@ function withSeqTint(el: any, draw: () => void) {
   return r;
 }
 
-/* SVG 渲染路径:把调色滤镜挂到图层 <g> 上(该层若带 AE 投影则让位给投影) */
+/* 序列图层对应的"调色键 ind":黑潮爆破的逐帧序列是一条引用 sequence_0 的预合成图层,
+ * 它被嵌在「预合成 1」里(宿主 ind 100001),渲染器顶层只有引用 comp_1 的那条图层。
+ * 调色按宿主的 ind 记录,但滤镜要挂在**能覆盖整条序列的那个元素**上 —— 也就是引用了同一份
+ * 预合成资源的顶层图层。这里统一解析出"用于取色和挂滤镜的那个 ind"。 */
+function seqTintTargetInd(el: any): number | null {
+  const data = el?.data;
+  if (!data || typeof data.ind !== 'number') return null;
+  if (String(data.refId) === 'sequence_0') return data.ind; // 宿主自身(若直接出现在顶层)
+  if (String(data.refId) === 'comp_1' || String(data.refId) === '99') return data.ind; // 承载序列的预合成
+  return null;
+}
+
+/* SVG 渲染路径:把调色滤镜挂到图层 <g> 上(该层若带 AE 投影则让位给投影)。
+ * 黑潮爆破的逐帧序列是一条**被引用的预合成**(宿主在 comp_1 内,ind 100001),
+ * 渲染器顶层只有引用 comp_1 的那条图层 —— 对它挂滤镜就等于覆盖整条序列,
+ * 所以这里用 seqTintTargetInd 解析"该元素代表哪条序列",再按宿主的 ind 取色。 */
 function applySeqTintToSvg(el: any) {
   if (!el || !el.layerElement || getDropShadow(el.data)) return;
-  const hex = seqTintHexOfLayer(el.data);
-  const want = hex ? 'url(#' + seqTintFilterId(el.data.ind) + ')' : '';
+  /* 取色键 = 该元素**承载的那条序列**的名字:
+   *  · 元素自身是序列图层(核电站的叠加序列、或宿主直接位于顶层)→ 用它自己的名字;
+   *  · 元素是承载序列的预合成(黑潮爆破的「预合成 1」)→ 用其内部宿主图层的名字。 */
+  const seqName = seqNameOfElement(el);
+  const hex = seqName ? seqTintHexOfLayer({ nm: seqName }) : seqTintHexOfLayer(el.data);
+  const want = hex && seqName ? 'url(#' + seqTintFilterId(seqName) + ')' : '';
   if (el.layerElement.style.filter !== want) el.layerElement.style.filter = want;
+}
+/* 该渲染元素对应的「序列图层名」:自身是序列图层就用自己,是承载序列的预合成就用内部的宿主名 */
+function seqNameOfElement(el: any): string | null {
+  const nm = typeof el?.data?.nm === 'string' ? el.data.nm : '';
+  if (nm && seqTintHexOfLayerNameKnown(nm)) return nm;
+  const refId = el?.data ? String(el.data.refId) : '';
+  if (refId) {
+    const comp = (currentData?.assets ?? []).find((a: any) => String(a.id) === refId);
+    const host = (comp?.layers ?? []).find((l: any) => l && String(l.refId) === 'sequence_0');
+    if (host && typeof host.nm === 'string') return host.nm;
+  }
+  return nm || null;
+}
+/* 该名字是否是一条"已登记调色"的序列(核电站的叠加序列名 / 黑潮爆破的宿主名) */
+function seqTintHexOfLayerNameKnown(nm: string): boolean {
+  if (seqTints.has(seqTintKey(nm))) return true;
+  if (isBlindsSequenceName(nm)) return true;
+  return false;
 }
 
 /* ---------- DOM 引用 ---------- */
@@ -990,6 +1110,7 @@ const rngDuration = $<HTMLInputElement>('rngDuration');
 const durationVal = $<HTMLSpanElement>('durationVal');
 const timingSection = $<HTMLDivElement>('timingSection');
 const chkNextScan = $<HTMLInputElement>('chkNextScan');
+const nextScanRow = $<HTMLLabelElement>('nextScanRow');
 const nextDurationRow = $<HTMLLabelElement>('nextDurationRow');
 const rngNextDuration = $<HTMLInputElement>('rngNextDuration');
 const nextDurationVal = $<HTMLSpanElement>('nextDurationVal');
@@ -1104,9 +1225,10 @@ async function loadData(data: any, name: string) {
   currentName = name;
   /* 默认时长(注册项 caps.defaultDuration):位置暴露动画载入时压缩到 1.25s 内容时长,
    * 总播放 = 内容时长 + 5 帧;仅首次载入时应用,之后交给用户的时长滑杆。 */
-  const defaultDur = animDef()?.caps.defaultDuration;
-  if (defaultDur && !defaultDurationApplied) {
-    defaultDurationApplied = true;
+  const defaultDurDef = animDef();
+  const defaultDur = defaultDurDef?.caps.defaultDuration;
+  if (defaultDur && defaultDurDef && !defaultDurationApplied.has(defaultDurDef.key)) {
+    defaultDurationApplied.add(defaultDurDef.key);
     applyMainDuration(data, defaultDur);
   }
   /* 预合成内部图层的 ind 挪到独立号段(幂等):侧栏要能编辑预合成里的文字/形状/图片,
@@ -1347,7 +1469,10 @@ rngSpeed.addEventListener('input', () => {
 const DURATION_BUFFER = 5; // 在设定时长基础上额外多播放的帧数
 // 时长滑块的防抖定时器:两个时长滑块共用;拖动过程中不重建动画(重建代价高),停 200ms 才真正应用
 let durationTimer: number | undefined;
-let defaultDurationApplied = false; // 位置暴露动画默认时长仅首次载入时应用
+/* 已应用过「默认时长」的动画 key(每套动画各自只应用一次)。
+ * 这里必须按 key 记,不能用一个全局布尔:带 defaultDuration 的动画可能不止一套,
+ * 全局布尔会被「先载入的那套」吃掉,后载入的那套就永远拿不到自己的默认时长。 */
+const defaultDurationApplied = new Set<string>();
 
 /* 调整指定段(0=第一段,1=二次扫描)的末尾淡出关键帧到目标时长。
  * 第二段关键帧已整体平移到 __mainOp 之后,末尾淡出以 __mainOp 为基准。 */
@@ -1471,9 +1596,16 @@ rngNextDuration.addEventListener('input', () => {
  * 开启时把 animation2NextData 合并进主动画(mergeNextInto:第二段整体平移到主段之后,
  * 资源重命名为 image_0_n),关闭时再拆出来(extractMainFrom),最后统一走一次 loadData 重建。 */
 chkNextScan.addEventListener('change', () => {
+  /* 不支持二次扫描的动画(黑潮爆破默认弹窗)这一行在界面上是隐藏的,但程序化勾选仍可能到达这里:
+   * 直接忽略并回写状态,免得把「二次扫描时长」那一行也叫出来。 */
+  if (!animDef()?.caps.nextScan) {
+    chkNextScan.checked = showNextScan;
+    nextDurationRow.hidden = true;
+    return;
+  }
   showNextScan = chkNextScan.checked;
   nextDurationRow.hidden = !showNextScan;
-  if (!currentData || !animDef()?.caps.nextScan) return;
+  if (!currentData) return;
   if (showNextScan) {
     if (!isMergedNext(animation2Data)) {
       animation2Data = mergeNextInto(animation2Data);
@@ -1498,7 +1630,7 @@ chkNextScan.addEventListener('change', () => {
   syncIconScopeUI(currentData);
   loadData(currentData, currentName);
   // 二次扫描合并/取消后,图片图层列表(百叶窗.png / 百叶窗2.png / 光.png)随之变化,需刷新
-  const hasTintImage = tintableImageLayers(currentData).length > 0;
+  const hasTintImage = (currentAnimKey === 'blast' ? blastTintableLayers(currentData) : tintableImageLayers(currentData)).length > 0;
   imageSection.hidden = !hasTintImage;
   if (hasTintImage) renderImageList(currentData);
   else imageList.innerHTML = '';
@@ -1866,6 +1998,27 @@ function getImageTintSource(uri: string): Promise<{ img: HTMLImageElement; data:
     img.onerror = reject;
     img.src = uri;
   });
+}
+
+/* 灰度 UI 位图的着色:用「目标色 × 源亮度」逐像素相乘(RGB 分别乘)。
+ * 为什么不用 tintImageDataFast(保留亮度、替换色相/饱和度):那套算法保留了源图的饱和度,而这些
+ * UI 素材是**纯灰度**的(实测 100% 灰度像素、饱和度 0)—— 灰色的饱和度为 0,换色后仍然是灰的,
+ * 表现就是"拖了颜色,画面纹丝不动"。乘色法则天然适配这类"白描边 + 半透明底"的 UI 图:
+ *   白色 (255) × 目标色 = 目标色;黑色/暗部保持黑;中间的灰阶变成该色的明暗层次。
+ * 换句话说:素材本身的明度层次全部保留,只把"颜色"换成用户选的那个。 */
+function tintImageDataMultiply(src: ImageData, hexColor: string): ImageData {
+  const out = new ImageData(new Uint8ClampedArray(src.data), src.width, src.height);
+  const d = out.data;
+  const tr = parseInt(hexColor.slice(1, 3), 16) / 255;
+  const tg = parseInt(hexColor.slice(3, 5), 16) / 255;
+  const tb = parseInt(hexColor.slice(5, 7), 16) / 255;
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] === 0) continue; // 全透明像素不必动
+    d[i] = d[i] * tr;
+    d[i + 1] = d[i + 1] * tg;
+    d[i + 2] = d[i + 2] * tb;
+  }
+  return out;
 }
 
 /* 快速着色:整数运算,保留每个像素亮度(HSL 的 L),替换为所选颜色的色相/饱和度 */
@@ -2802,6 +2955,39 @@ function tintableImageLayers(data: any): any[] {
   });
   return out;
 }
+/* 该动画要列在「图片图层」里的图层(黑潮爆破默认弹窗):
+ *  · **普通位图**(提示条 / 图标 / HUD 底条 / 两张整幅图)—— 按资源(refId)去重后列出:
+ *    同一个资源常被多层引用(提示条 image_1 被 6 层引用、HUD 底条 image_0 被 4 层引用),它们共享同一个
+ *    asset.p,而调色本身就是"换资源",所以列一项就够,改一次所有引用处一起变;
+ *  · **遮罩源图层**(被 tt>=1 的图层用 tp 指向)—— 它只提供遮罩形状,但自身颜色同样影响画面
+ *    (遮罩是拿它的亮度/alpha 去切别的图层),所以照样列出来;
+ *  · **逐帧序列**(AE 视频素材导出成的 image sequence:696 帧)—— 藏在「预合成 1」里,顶层遍历走不到,
+ *    单独找引用 sequence_0 的那条图层当代表;它按图层 ind 记色、走 SVG 滤镜,不逐帧重编码。 */
+function blastTintableLayers(data: any): any[] {
+  const out: any[] = [];
+  const seen = new Set<string>();
+  /* 必须走 walkEditableLayers 而不是自己遍历 data.layers:HUD 底条(image_0)在「预合成 2」里、
+   * 两张整幅图(image_4 / image_5)在「形状图层 3 合成 1 / 1 合成 2」里 —— 只走顶层会漏掉它们。
+   * 该函数同时处理了「预合成内联副本」的去重(lottie 会把预合成的图层数组内联到引用它的图层上),
+   * 所以同一个资源不会被列两次。 */
+  let seqHost: any = null;
+  walkEditableLayers(data, (l) => {
+    if (!l) return;
+    /* 逐帧序列的宿主:一条引用 sequence_0 的预合成图层(ty:0)。它内部那 696 条序列帧(lottie 会把
+     * 预合成图层数组内联进来)refId 是 imgSeq_*,既没有 ks.src 也不是静态位图,不能当成"图片图层"列出,
+     * 所以只认宿主、跳过 imgSeq_*。 */
+    if (String(l.refId) === 'sequence_0' && !seqHost) { seqHost = l; return; }
+    if (String(l.refId).startsWith('imgSeq_')) return;
+    if (l.ty === 2 && typeof l.refId === 'string' && !isSeqLayer(l) && !seen.has(l.refId)) {
+      seen.add(l.refId);
+      out.push(l);
+    }
+  });
+  /* 调色按宿主图层的 ind 记录,与 696 帧共用一份滤镜(见 syncSeqTintFilters / onImageColorChanged) */
+  if (seqHost) out.push(seqHost);
+  return out;
+}
+
 /* 图片图层在侧栏显示的图层名(预合成内容加「合成名 ›」前缀) */
 function imageLayerDisplayName(data: any, layer: any): string {
   let name = layer?.nm || '(未命名)';
@@ -2825,11 +3011,44 @@ function seqIndOfRef(ref: string): number | null {
   const n = Number(ref.slice(SEQ_REF_PREFIX.length));
   return Number.isFinite(n) ? n : null;
 }
-/* 当前渲染器里该序列图层的元素(用于立刻套用/撤销调色滤镜) */
-function seqLayerElementOf(ind: number): any {
+/* 当前渲染器里该序列图层的元素(用于立刻套用/撤销调色滤镜)。
+ * 按**图层名**找:黑潮爆破的序列宿主是预合成内的图层,它的渲染元素不在顶层 elements 里,
+ * 但引用同一份预合成的顶层图层带着同样的名字?—— 不对,顶层那条名字是「预合成 1」。
+ * 所以这里同时支持两种查找:按名字(核电站的叠加序列在顶层)与按"承载该序列的预合成元素"。 */
+function seqLayerElementOf(nameOrInd: string | number): any {
   const els = (anim as any)?.renderer?.elements ?? [];
-  for (const el of els) if (el && el.data && el.data.ind === ind) return el;
+  if (typeof nameOrInd === 'string') {
+    for (const el of els) if (el && el.data && el.data.nm === nameOrInd) return el;
+    /* 宿主在预合成内(黑潮爆破的序列宿主在「预合成 1」里):找**承载它的那个预合成元素**,
+     * 对它套滤镜等效于覆盖整条序列。判定分两层:
+     *  ① 元素的 data.refId 指向的 assets 预合成里含该名字的图层(权威);
+     *  ② 退一步:元素内联的 layers 里有该名字(lottie 会把预合成图层内联进来)。 */
+    for (const el of els) {
+      const refId = el && el.data ? String(el.data.refId) : '';
+      if (refId) {
+        const comp = (currentData?.assets ?? []).find((a: any) => String(a.id) === refId);
+        if (comp && Array.isArray(comp.layers) && comp.layers.some((l: any) => l && l.nm === nameOrInd)) return el;
+      }
+    }
+    for (const el of els) {
+      if (el && el.data && Array.isArray(el.layers)) {
+        const hit = el.layers.some((l: any) => l && l.nm === nameOrInd);
+        if (hit) return el;
+      }
+    }
+    return null;
+  }
+  for (const el of els) if (el && el.data && el.data.ind === nameOrInd) return el;
   return null;
+}
+/* 按核电站叠加序列的 ind 反查图层名(那边的键仍是 'seq:<ind>') */
+function seqNameByInd(ind: number): string | null {
+  for (const entry of seqEntries) if (entry.ind === ind) return entry.nm;
+  return null;
+}
+/* 按名字取序列元素(语义化包装) */
+function seqLayerElementByName(nm: string): any {
+  return seqLayerElementOf(nm);
 }
 
 /* 渲染「图片图层」列表。两类图层的取色键不同:
@@ -2839,19 +3058,46 @@ function seqLayerElementOf(ind: number): any {
  *    记在 seqTints 里,所以键用 'seq:<ind>'。
  * 键通过 data-ref 传给回调,重置按钮复用同一个键。 */
 function renderImageList(data: any) {
-  // 主段「百叶窗.png」+ 二次扫描段「百叶窗2.png」「光.png」+ 核电站功率动画的两条叠加序列
-  const layers = tintableImageLayers(data);
+  /* 三套动画的「图片图层」来源不同:
+   *  · 核电站功率:两条叠加序列(逐帧换图,走滤镜着色);
+   *  · 位置暴露:百叶窗.png / 百叶窗2.png / 光.png 三张纹理(换资源 data URI);
+   *  · 黑潮爆破默认弹窗:提示条 / 图标 / HUD 底条 / 遮罩源 / 两张整幅图 + 一段 696 帧序列(见下)。 */
+  const layers = currentAnimKey === 'blast' ? blastTintableLayers(data) : tintableImageLayers(data);
   imageCount.textContent = '· ' + layers.length + ' 个';
   imageList.innerHTML = layers
     .map((l: any) => {
-      const seq = isSeqLayer(l);
-      const ref = seq ? SEQ_REF_PREFIX + l.ind : String(l.refId);
+      /* 黑潮爆破的逐帧序列在数据里是一条引用 sequence_0 的 ty:0 图层(不是 ty:2,也没有 ks.src),
+       * 对侧栏来说它就是"一条可调色的序列",所以这里统一按「引用 sequence_0」判定,
+       * 键用 'seq:<ind>' —— 与核电站的叠加序列共用同一套滤镜着色机制。 */
+      /* 黑潮爆破的逐帧序列用「宿主图层名」作键(见 seqNameKey 的注释:预合成内 ind 会被重新编号,不可用作键);
+       * 核电站的叠加序列仍在顶层、ind 可靠,继续用 'seq:<ind>'。 */
+      const blastSeq = currentAnimKey === 'blast' && String(l.refId) === 'sequence_0';
+      const seq = blastSeq || isSeqLayer(l);
+      const ref = blastSeq ? seqNameKey(String(l.nm ?? '')) : seq ? SEQ_REF_PREFIX + l.ind : String(l.refId);
       const asset = (data.assets ?? []).find((a: any) => a.id === l.refId);
       // 默认色:百叶窗.png 红色,百叶窗2.png 与 光.png 金色(#ffca5e),叠加序列为源纹理色
-      const defaultHex = seq ? sequenceDefaultHex(l.nm) : l.nm === '百叶窗.png' ? '#e23b3b' : '#ffca5e';
-      const hex = seq
-        ? (seqTints.get(seqTintKey(l.ind)) ?? defaultHex)
-        : asset && typeof asset.p === 'string' && asset.p.startsWith('data:image') ? defaultHex : '#ffffff';
+      /* 黑潮爆破的逐帧序列出厂不调色(未选过色时不生成滤镜,画面保持素材原样);
+       * 其余序列(核电站)出厂即挂自己的默认色。 */
+      const defaultHex = seq
+        ? (blastSeq ? '' : sequenceDefaultHex(l.nm))
+        : l.nm === '百叶窗.png' ? '#e23b3b' : '#ffca5e';
+      /* 黑潮爆破的位图取色器的初值,按优先级:
+       *  ① 用户已经改过的色;
+       *  ② 该图层带 AE「填充」效果 → 显示**填充色**(画面里看到的就是它,改的也该是它);
+       *  ③ 否则显示白色占位(素材是白色描边 + 半透明底,取色器代表"当前染色")。 */
+      const blastFillTarget = currentAnimKey === 'blast' && !seq ? findFillTarget(data, l) : null;
+      const blastFill = blastFillTarget && blastFillTarget.colorParam?.v
+        ? { color: fcToHex(blastFillTarget.colorParam.v.k), alpha: 1 } : null;
+      /* 采集「填充」原始色(只采一次):重置时要还原到动画原值,而不是硬编码一个色。 */
+      if (blastFill && !blastFillOriginalColor.has(blastTintKey(String(l.refId)))) {
+        const ck = blastFillTarget?.colorParam?.v?.k;
+        if (Array.isArray(ck)) blastFillOriginalColor.set(blastTintKey(String(l.refId)), ck.slice());
+      }
+      const blastHex = currentAnimKey === 'blast' && !seq
+        ? (blastTintHex.get(blastTintKey(String(l.refId))) ?? (blastFill ? blastFill.color : '#ffffff')) : null;
+      const hex = blastHex ?? (seq
+        ? (seqTints.get(seqTintKey(String(l.nm ?? ''))) ?? defaultHex ?? '')
+        : asset && typeof asset.p === 'string' && asset.p.startsWith('data:image') ? defaultHex : '#ffffff');
       return (
         '<li class="text-item">' +
         '<div class="text-item-head">' +
@@ -2897,15 +3143,97 @@ function baiyechuangOriginalUriOf(refId: string): string | null {
  * 纹理图拖取色器会连续触发,这里 200ms 防抖且只记最后一个颜色:着色加 toDataURL
  * (上万像素宽)是重活,每次都做会卡住拖动;每次都从原始位图着色(而不是在上次结果上
  * 再着色),避免多次调色的累计偏差。 */
+/* 找出**决定该图片图层画面颜色**的 AE「填充」效果。
+ * 关键:填充不一定挂在这张图自己身上 —— 黑潮爆破的 HUD 底条把填充挂在**引用它的预合成**
+ * (「预合成 2」,ind 8)上,由整个预合成把内部内容统一刷色。所以两层都要查:
+ *   ① 图层自身有填充 → 用它;
+ *   ② 否则找「引用了本图层所在预合成的那个顶层图层」,它有填充就用它的。 */
+function findFillTarget(data: any, layer: any): { layer: any; colorParam: any } | null {
+  const own = (layer?.ef ?? []).find((e: any) => e.ty === 21 && e.en !== 0);
+  if (own) {
+    const colorParam = (own.ef ?? []).find((x: any) => x.ix === 3);
+    if (colorParam?.v) return { layer, colorParam };
+  }
+  /* 本图层在哪份预合成里 → 谁引用了这份预合成 */
+  const ownerId = referencedPrecompAssets(data)
+    .find((a: any) => findLayerByInd(a.layers, layer?.ind))?.id;
+  if (ownerId === undefined) return null;
+  let hit: { layer: any; colorParam: any } | null = null;
+  const walk = (layers: any[]) => {
+    for (const l of layers ?? []) {
+      if (hit) return;
+      if (l && String(l.refId) === String(ownerId)) {
+        const fe = (l.ef ?? []).find((e: any) => e.ty === 21 && e.en !== 0);
+        const cp = fe ? (fe.ef ?? []).find((x: any) => x.ix === 3) : null;
+        if (cp?.v) { hit = { layer: l, colorParam: cp }; return; }
+      }
+      if (Array.isArray(l?.layers)) walk(l.layers);
+    }
+  };
+  walk(data?.layers);
+  return hit;
+}
+
 function onImageColorChanged(refId: string, hex: string) {
+  /* 黑潮爆破的位图:把资源换成"从原始位图重新着色"的 data URI。
+   * 两条纪律:① 原始地址只在**尚未着色**时记录(着色后 p 已是 data URI,再记就把着色结果当原图了);
+   * ② 着色完把按地址的位图缓存清掉,否则重建时会命中旧图、表现为"拖了颜色画面不动"。 */
+  if (currentAnimKey === 'blast' && seqIndOfRef(refId) === null && !isSeqNameRef(refId)) {
+    /* 该图层带 AE「填充」效果时,改的是**填充色**(画面里看到的颜色就是它,见 getFillEffect)——
+     * 改完直接更新效果参数并重建,不碰底图素材。 */
+    const entryLayer = blastTintableLayers(currentData).find((x: any) => String(x.refId) === refId) ?? null;
+    const fillTarget = entryLayer ? findFillTarget(currentData, entryLayer) : null;
+    if (fillTarget && fillTarget.colorParam?.v) {
+      fillTarget.colorParam.v.k = hexToFc(hex, Array.isArray(fillTarget.colorParam.v.k) ? fillTarget.colorParam.v.k : undefined);
+      const key = blastTintKey(refId);
+      blastTintHex.set(key, hex);
+      if (!blastFillOriginalColor.has(key)) { /* 原值已在列表渲染时采集 */ }
+      reRenderPreservingState();
+      setStatus('填充颜色已改为 ' + hex);
+      return;
+    }
+    const asset = findAssetByRef(currentData, refId);
+    if (!asset) return;
+    if (typeof asset.p === 'string' && !isBlastTintedUri(asset.p)) {
+      blastOriginalImageUri.set(blastTintKey(refId), asset.p);
+    }
+    const original = blastOriginalImageUri.get(blastTintKey(refId));
+    if (!original) return;
+    blastTintHex.set(blastTintKey(refId), hex);
+    pendingTintHex = hex;
+    window.clearTimeout(imageTintTimer);
+    imageTintTimer = window.setTimeout(() => {
+      const h = pendingTintHex;
+      if (!h) return;
+      void getImageTintSource(original)
+        .then((src) => {
+          const tinted = tintImageDataMultiply(src.data, h);
+          const canvas = document.createElement('canvas');
+          canvas.width = src.img.width;
+          canvas.height = src.img.height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return;
+          ctx.putImageData(tinted, 0, 0);
+          asset.p = canvas.toDataURL('image/png');
+          invalidateBitmapCaches(asset, original);
+          reRenderPreservingState();
+          setStatus('图片图层已着色 ' + h);
+        })
+        .catch((e) => console.error('[图片图层着色失败]', e));
+    }, 200);
+    return;
+  }
   // 叠加序列:滤镜着色,立即生效(无需重建动画、无需逐帧重新编码 359×2 张 PNG)
-  const seqInd = seqIndOfRef(refId);
-  if (seqInd !== null) {
-    seqTints.set(seqTintKey(seqInd), hex);
+  /* 序列调色两种键:黑潮爆破用 'seqname:<图层名>',核电站用 'seq:<ind>' —— 都归到图层名上记录,
+   * 因为滤镜按名字生成/挂载(见 seqTintHexOfLayer 的注释:预合成内 ind 会被重新编号)。 */
+  if (isSeqNameRef(refId) || seqIndOfRef(refId) !== null) {
+    const nm = isSeqNameRef(refId) ? refId.slice(SEQ_NAME_PREFIX.length) : seqNameByInd(seqIndOfRef(refId) as number);
+    if (!nm) return;
+    seqTints.set(seqTintKey(nm), hex);
     syncSeqTintFilters();
-    const el = seqLayerElementOf(seqInd);
+    const el = seqLayerElementByName(nm);
     if (el) applySeqTintToSvg(el);
-    setStatus('叠加序列已着色 ' + hex);
+    setStatus('序列已着色 ' + hex);
     return;
   }
   const originalUri = baiyechuangOriginalUriOf(refId);
@@ -2964,18 +3292,49 @@ function onImageColorChanged(refId: string, hex: string) {
  *    图层的不透明度,立即生效不重建;
  *  - 纹理图把资源 data URI 换回缓存的原始图,取色器与滑块同步回默认色,并重建预览。 */
 function onImageColorReset(refId: string) {
-  // 叠加序列:撤销手动着色,回到出厂色 #d82f28(滤镜仍然挂着),不重建动画
-  const seqInd = seqIndOfRef(refId);
-  if (seqInd !== null) {
-    seqTints.delete(seqTintKey(seqInd));
-    syncSeqTintFilters();
-    const el = seqLayerElementOf(seqInd);
-    if (el) applySeqTintToSvg(el);
-    const layer = (currentData?.layers ?? []).find((l: any) => l.ind === seqInd);
-    if (layer) resetLayerOpacity(layer.ind);
+  /* 黑潮爆破的位图:把资源换回原始地址、清缓存、清掉记录 —— 相当于"从没调过色" */
+  if (currentAnimKey === 'blast' && seqIndOfRef(refId) === null && !isSeqNameRef(refId)) {
+    /* 带 AE「填充」效果的图层:重置 = 把填充色还原成动画原始值(记在 fillOriginalColor 里) */
+    const entryLayer2 = blastTintableLayers(currentData).find((x: any) => String(x.refId) === refId) ?? null;
+    const fillTarget2 = entryLayer2 ? findFillTarget(currentData, entryLayer2) : null;
+    const orig = blastFillOriginalColor.get(blastTintKey(refId));
+    if (fillTarget2?.colorParam?.v && orig) {
+      fillTarget2.colorParam.v.k = orig.slice();
+      blastTintHex.delete(blastTintKey(refId));
+      const ci0 = imageList.querySelector<HTMLInputElement>('.i-color[data-ref="' + refId + '"]');
+      if (ci0) setColorPickerValue(ci0, fcToHex(orig));
+      reRenderPreservingState();
+      setStatus('填充颜色已还原为 ' + fcToHex(orig));
+      return;
+    }
+    const asset = findAssetByRef(currentData, refId);
+    const original = blastOriginalImageUri.get(blastTintKey(refId));
+    if (!asset || !original) return;
+    asset.p = original;
+    blastTintHex.delete(blastTintKey(refId));
+    invalidateBitmapCaches(asset, original);
     const ci = imageList.querySelector<HTMLInputElement>('.i-color[data-ref="' + refId + '"]');
-    if (ci) setColorPickerValue(ci, layer ? sequenceDefaultHex(layer.nm) : '#d82f28');
-    setStatus('叠加序列已恢复默认色 ' + (layer ? sequenceDefaultHex(layer.nm) : '#d82f28'));
+    if (ci) setColorPickerValue(ci, '#ffffff');
+    reRenderPreservingState();
+    setStatus('图片图层已恢复原始素材色');
+    return;
+  }
+  // 叠加序列:撤销手动着色,回到出厂色 #d82f28(滤镜仍然挂着),不重建动画
+  if (isSeqNameRef(refId) || seqIndOfRef(refId) !== null) {
+    const nm = isSeqNameRef(refId) ? refId.slice(SEQ_NAME_PREFIX.length) : seqNameByInd(seqIndOfRef(refId) as number);
+    if (!nm) return;
+    seqTints.delete(seqTintKey(nm));
+    syncSeqTintFilters();
+    const el = seqLayerElementByName(nm);
+    if (el) applySeqTintToSvg(el);
+    /* 恢复该序列的不透明度(调色时自动提到 100%,重置时一并还原) */
+    const layer = findLayerInData(currentData, (currentData?.layers ?? []).find((l: any) => l.nm === nm)?.ind ?? -1)
+      ?? (currentData?.layers ?? []).find((l: any) => l.nm === nm);
+    if (layer && typeof layer.ind === 'number') resetLayerOpacity(layer.ind);
+    const ci = imageList.querySelector<HTMLInputElement>('.i-color[data-ref="' + refId + '"]');
+    const fallback = isBlindsSequenceName(nm) ? sequenceDefaultHex(nm) : '#ffffff';
+    if (ci) setColorPickerValue(ci, fallback);
+    setStatus(isBlindsSequenceName(nm) ? '叠加序列已恢复默认色 ' + fallback : '序列已恢复原始素材色');
     return;
   }
   const originalUri = baiyechuangOriginalUriOf(refId);
@@ -3046,10 +3405,125 @@ function dropShadowRgba(ds: { color: string; alpha: number; dx: number; dy: numb
  * 由 patchSvgRendererTree 在动画载入/重建时逐层调用;重复调用是幂等的(整串赋值),
  * 不会叠加出双重阴影。 */
 function patchSvgDropShadow(el: any) {
+  if (!el.layerElement) return;
+  /* 投影与填充都要写 layerElement.style.filter,必须合并成一条 ——
+   * 分两次赋值会互相覆盖(后写的赢),表现为"改色不生效"或"投影消失"。 */
+  const parts: string[] = [];
+  // 填充要先于投影:先把图层刷成目标色,再让阴影基于刷色后的形状投出去(与 AE 的效果栈一致)
+  const fill = getFillEffect(el.data);
+  if (fill) parts.push(fillEffectCss(fill));
   const ds = getDropShadow(el.data);
-  if (!ds || !el.layerElement) return;
-  el.layerElement.style.filter = dropShadowCss(ds);
+  if (ds) parts.push(dropShadowCss(ds));
+  el.layerElement.style.filter = parts.join(' ');
 }
+
+/* ---------- AE 填充效果(ADBE Fill)渲染 ----------
+ * lottie-web 不渲染 AE 效果,所以「填充」同样要自己补:AE 的填充把图层内容整体刷成指定颜色
+ * (保留 alpha 形状),画面里那条青色 HUD 底条就是这么来的 ——
+ * 「预合成 2」上挂着 ty:21「填充」,颜色写死 #81CAF6,不补这个效果的话那层会露出素材原色(近白),
+ * 在深色背景上看不见,用户改素材颜色也"没反应"(改的根本不是决定画面的那个颜色)。
+ *
+ * 实现走 CSS filter:先按目标色做一次 colorize(输出 RGB 恒为目标色、alpha 沿用源图),
+ * 再用不透明度做一次 alpha 缩放(离屏 canvas 的 feComponentTransfer),两者串起来即等价于
+ * AE「填充(颜色 + 不透明度)」的合成结果 —— SVG 与导出(SVG 逐帧光栅化)都吃 CSS filter,一条路径通吃。
+ * 参数:ix 1=填充蒙版、2=所有蒙版、3=颜色、4=反转、5=水平羽化、6=垂直羽化、7=不透明度。
+ * 只支持无蒙版约束、无羽化、无反转的常见形态(本项目的数据就是这种);其余形态返回 null 不处理,
+ * 免得画出与 AE 不一致的东西。 */
+type FillEffect = { color: string; alpha: number };
+function getFillEffect(layer: any): FillEffect | null {
+  const ef = layer?.ef;
+  if (!Array.isArray(ef)) return null;
+  const fill = ef.find((e: any) => e.ty === 21 && e.mn === 'ADBE Fill' && e.en !== 0);
+  if (!fill || !Array.isArray(fill.ef)) return null;
+  const getVal = (ix: number) => {
+    const p = fill.ef.find((x: any) => x.ix === ix);
+    return p ? p.v?.k : undefined;
+  };
+  const color = getVal(3);
+  if (!Array.isArray(color)) return null;
+  // 带蒙版约束 / 羽化 / 反转的形态不支持(会与 AE 结果不一致,宁可不画)
+  if (Number(getVal(1)) !== 0 || Number(getVal(2)) !== 0) return null;
+  if (Number(getVal(4)) !== 0) return null;
+  if (Number(getVal(5)) !== 0 || Number(getVal(6)) !== 0) return null;
+  const opacity = getVal(7);
+  /* Bodymovin 对「填充」的不透明度有两种写法:0~1 的小数(实测本项目是 0.5 / 1)或 0~100 的百分数。
+   * 早期按百分数一律 /100,把 0.5 变成了 0.005 —— 填充几乎全透明,表现为"改了颜色画面没反应"。
+   * 判据:值 > 1 才当百分数。 */
+  let alpha = 1;
+  if (typeof opacity === 'number' && isFinite(opacity)) {
+    alpha = opacity > 1 ? opacity / 100 : opacity;
+    alpha = Math.max(0, Math.min(1, alpha));
+  }
+  return { color: fcToHex([color[0], color[1], color[2]]), alpha };
+}
+
+/* 填充滤镜的 CSS filter 串:colorize(换成目标色) + 可选的 alpha 缩放。
+ * alpha 用站点既有的离屏滤镜(df-fill-alpha-*),由 ensureFillAlphaFilter 懒创建。 */
+function fillEffectCss(fill: FillEffect): string {
+  return 'url(#' + ensureFillFilter(fill.color, fill.alpha) + ')';
+}
+
+/* 站点级隐藏 SVG 里的两个滤镜定义(与序列调色的 seqTintSvg 同一套路:切渲染器/重建都不会丢) */
+let fillFilterSvg: SVGSVGElement | null = null;
+const fillAlphaFilterIds = new Map<string, string>();
+function ensureFillFilterHost(): SVGSVGElement {
+  const NS = 'http://www.w3.org/2000/svg';
+  if (!fillFilterSvg) {
+    fillFilterSvg = document.createElementNS(NS, 'svg');
+    fillFilterSvg.setAttribute('width', '0');
+    fillFilterSvg.setAttribute('height', '0');
+    fillFilterSvg.setAttribute('aria-hidden', 'true');
+    fillFilterSvg.style.cssText = 'position:absolute;width:0;height:0;overflow:hidden';
+    document.body.appendChild(fillFilterSvg);
+    const defs = document.createElementNS(NS, 'defs');
+    fillFilterSvg.appendChild(defs);
+  }
+  return fillFilterSvg;
+}
+/* 为一个「填充」效果构造(或复用)SVG 滤镜:
+ *   feFlood(目标色) → feComposite operator="in" in2=SourceGraphic  → 得到"颜色 = 目标色、形状 = 源图 alpha"
+ *   → feComponentTransfer 用 slope 把 alpha 缩到效果的不透明度。
+ * 这与 AE「填充」的语义一致:不透明度按图层内容的不透明度施加,形状完全保留。 */
+function ensureFillFilter(color: string, alpha: number): string {
+  const key = color + '@' + alpha.toFixed(3);
+  const hit = fillAlphaFilterIds.get(key);
+  if (hit) return hit;
+  const NS = 'http://www.w3.org/2000/svg';
+  const host = ensureFillFilterHost();
+  const defs = host.querySelector('defs') as SVGDefsElement;
+  const id = 'df-fill-' + key.replace(/[^a-zA-Z0-9_-]+/g, '-');
+  const filter = document.createElementNS(NS, 'filter');
+  filter.setAttribute('id', id);
+  filter.setAttribute('x', '-10%');
+  filter.setAttribute('y', '-10%');
+  filter.setAttribute('width', '120%');
+  filter.setAttribute('height', '120%');
+  filter.setAttribute('color-interpolation-filters', 'sRGB');
+  const flood = document.createElementNS(NS, 'feFlood');
+  flood.setAttribute('flood-color', color);
+  flood.setAttribute('result', 'fillColor');
+  filter.appendChild(flood);
+  const comp = document.createElementNS(NS, 'feComposite');
+  comp.setAttribute('in', 'fillColor');
+  comp.setAttribute('in2', 'SourceGraphic');
+  comp.setAttribute('operator', 'in');
+  comp.setAttribute('result', 'filled');
+  filter.appendChild(comp);
+  if (alpha < 1) {
+    const ct = document.createElementNS(NS, 'feComponentTransfer');
+    ct.setAttribute('in', 'filled');
+    const funcA = document.createElementNS(NS, 'feFuncA');
+    funcA.setAttribute('type', 'linear');
+    funcA.setAttribute('slope', String(alpha));
+    funcA.setAttribute('intercept', '0');
+    ct.appendChild(funcA);
+    filter.appendChild(ct);
+  }
+  defs.appendChild(filter);
+  fillAlphaFilterIds.set(key, id);
+  return id;
+}
+
 
 /* 给 Canvas 渲染器里的图层补投影:包装该图层的 renderFrame,一帧画两次 ——
  * 第一次设好 shadowColor/Blur/Offset 后照常画(内容被盖住,只留下外扩的阴影),
@@ -4380,6 +4854,20 @@ import animation2NextUrl from '../animations/animation_2/animation_data_next_fix
 import animation3DataUrl from '../animations/animation_3/animation_data.json?url';
 import missionDataUrl from '../animations/animation_4/animation_data.json?url';
 import mapTitleDataUrl from '../animations/animation_5/animation_data.json?url';
+import blastDataUrl from '../animations/animation_6/animation_data.json?url';
+/* 黑潮爆破默认弹窗动画的位图素材(animations/animation_6/images/*.png):
+ * JSON 里是相对路径(u:"images/"),站点产物里没有 images/ 目录,必须按静态资源打包后改写资源地址
+ * (见 ensureBlastData)。目录里同时还有一份 AE 视频图层的素材(.gif / .mp4),它们随 ty:9 视频图层一起被丢掉。
+ * 用 glob 而不是逐个写死路径:重导出换素材名时不用改代码,缺图也只是那张图 404 而不是构建失败。
+ * ?url&no-inline 不能省:这套动画的 images/ 里有 700 多个小 PNG(重新导出后视频素材变成了逐帧图),
+ * Vite 默认会把小于 4KB 的静态资源内联成 data URI —— 700 张 2KB 的图内联进主 chunk 会把首屏 JS 从
+ * 613KB 顶到 2.1MB(实测),而这些帧只有切到本动画时才用得上。加 no-inline 让它们照常产出独立文件,
+ * 主 chunk 只保留 700 条 URL 字符串,帧图仍旧按需加载。 */
+const blastImageModules = import.meta.glob('../animations/animation_6/images/*.png', {
+  eager: true,
+  query: '?url&no-inline',
+  import: 'default',
+}) as Record<string, string>;
 /* 任务弹窗动画自带的哈夫币图标:JSON 里是相对路径(u:"images/", p:"MallIcon_HafuCoins.png"),
  * 站点里没有 images/ 目录,必须把它按静态资源打包后改写资源地址(见 ensureMissionData)。
  * 它同时是「图标选择」列表里的默认/内置图标,所以这里导入一次、两处共用。 */
@@ -4942,6 +5430,95 @@ async function ensureMapTitleData(onProgress?: (p: number | null) => void): Prom
   return mapTitleDataPromise;
 }
 
+
+/* ---------- 黑潮爆破默认弹窗动画(animations/animation_6)----------
+ * 数据 = animations/animation_6/animation_data.json(1920×1080 / 60fps / op=600 = 600 帧,保持 AE 导出原样;
+ * 这套动画**不配 caps.defaultDuration**,侧栏也没有时长区块 —— 改时长会搬动末尾淡出关键帧,属于改数据)。
+ * 画面内容:「主标题 / 副标题」两个文字层 + 一条 HUD 底条(预合成 2 里的 656×16 位图,叠了填充与线性擦除)
+ *      + 三张提示位图(一张 512×84 长条与两张 256×256 图标)、一段 696 帧的逐帧序列
+ *      (AE 里的视频素材,导出成 Bodymovin 的 image sequence:assets[] 里的 sequence_0 + 696 个 t:"seq" 资源,
+ *      由「预合成 1」里的一条 ty:0 图层引用),再用毛边/方框模糊的形状层做轨道遮罩叠出观感。
+ * 载入时要处理三件与其它动画不同的事:
+ *  ① 位图资源的 u/p 是相对路径(u:"images/"),站点产物里没有 images/ 目录,原样渲染必然 404(SVG / Canvas 都是空白图)。
+ *     这里按**文件基名**把 animations/animation_6/images/*.png 换成本地打包后的静态资源地址(p 指向 ?url 的产物、
+ *     u 置空、e 置 1 —— 只有 e 为真时 lottie 才把 p 当完整地址)。与任务弹窗动画同做法:只认「相对路径」的资源,
+ *     重新导出若已写成 data: URI 或绝对地址就不去动它。
+ *     注意这条规则现在要覆盖 700 多个文件(见上面 glob 处的 ?url&no-inline 说明):序列帧一个都不能漏,
+ *     漏掉就是那几帧空白。基名匹配正好兜住这种「同一个目录里既有单图又有成百上千张序列帧」的情况。
+ *  ② 视频图层(ty:9)及其素材必须整个丢掉,这次不是「可丢可不丢」:数据里除了一堆引用 GIF 的 ty:9 图层,
+ *     还带了 9 个 xt:1 的外链预合成(数值 id,内容全是 ty:9 视频层)。lottie 的 searchExtraCompositions 会对
+ *     每个 xt 资源直接 createComp,而这些资源在浏览器侧是残缺的,构建时抛 TypeError;异常发生在
+ *     AnimationItem.configAnimation 的 try/catch 里被吞掉,表现为 DOMLoaded 永不触发、预览整帧全黑
+ *     (SVG / Canvas 都一样,实测)。做法:递归删掉 ty:9 图层,再删掉**没有任何图层再引用**的资源 ——
+ *     外链预合成与 GIF 素材就此一并消失,也省掉必然 404 的请求。
+ *     ⚠ 这套「按引用回收」的判据只认图层的 refId:696 个序列帧资源正是被 sequence_0 内部的图层逐个 refId 引用,
+ *     所以它们会**原样保留**(实测 696/696 全部留着);重新导出后若资源数骤降,先查这一条。
+ *  ③ 剩余资源里有 tt:3 亮度遮罩,canvas 渲染器根本构建不出来(上游 lottie-web 的 bug,见 hasLumaMatte),
+ *     所以这套动画的预览与导出都必须走 SVG —— 由 hasLumaMatte 统一判定,切到该动画时自动切回 SVG 渲染器。
+ * 字体与其它动画一致(fName = ProjectDType-Medium / ProjectDTypeCurve-Bold,fPath 已被剥离),
+ * 运行时由 loadEmbeddedFonts 从 animations/animation_1/fonts/ 注册,这里不需要额外处理。 */
+let blastData: any = null;
+let blastDataPromise: Promise<void> | null = null;
+/* 位图素材的「文件基名 → 打包地址」表:重新导出时 AE 可能把素材归到子目录,只比对完整 p 会漏改,
+ * 所以一律按基名匹配(与任务弹窗动画的图标改写同规则)。 */
+const blastImageUrlByBase = new Map<string, string>();
+for (const [path, url] of Object.entries(blastImageModules)) {
+  const base = path.split('/').pop();
+  if (base) blastImageUrlByBase.set(base, url);
+}
+
+async function ensureBlastData(onProgress?: (p: number | null) => void): Promise<void> {
+  if (blastData) return;
+  if (blastDataPromise) {
+    if (onProgress) onProgress(null); // 已在加载中:以不确定进度显示
+    return blastDataPromise;
+  }
+  blastDataPromise = (async () => {
+    try {
+      const [raw] = await fetchJsonBundle([blastDataUrl], onProgress);
+      const data = JSON.parse(raw);
+      /* ① 把相对路径的位图资源改写成打包地址 */
+      const isAbsoluteAssetUrl = (p: string) => /^(data:|https?:|\/\/|\/|\.\.?[\/\\])/i.test(p);
+      for (const a of data.assets ?? []) {
+        if (typeof a?.p !== 'string' || isAbsoluteAssetUrl(a.p)) continue;
+        const base = a.p.split(/[\/\\]/).pop() ?? '';
+        const url = blastImageUrlByBase.get(base);
+        if (!url) continue; // 视频 / GIF 素材:引用它们的图层随后会被删掉,这里不动
+        a.p = url;
+        a.u = '';
+        a.e = 1;
+      }
+      /* ② 递归丢掉视频图层(ty:9),预合成内部也一并处理 */
+      const dropVideoLayers = (layers: any[]): any[] => (layers ?? []).filter((l) => {
+        if (l && l.ty === 9) return false;
+        if (Array.isArray(l?.layers)) l.layers = dropVideoLayers(l.layers);
+        return true;
+      });
+      data.layers = dropVideoLayers(data.layers);
+      for (const a of data.assets ?? []) if (Array.isArray(a.layers)) a.layers = dropVideoLayers(a.layers);
+      /* ②续 删掉没有任何图层引用的资源:xt 外链预合成与视频资源都在此列。
+       * 引用表必须在「删完视频图层之后」重新收集 —— 否则刚被删掉的视频层仍会把 video_* 算作「有人在用」。 */
+      const usedRefs = new Set<string>();
+      const collectRefs = (layers: any[]) => {
+        for (const l of layers ?? []) {
+          if (typeof l?.refId === 'string') usedRefs.add(l.refId);
+          if (Array.isArray(l?.layers)) collectRefs(l.layers);
+        }
+      };
+      collectRefs(data.layers);
+      for (const a of data.assets ?? []) if (Array.isArray(a.layers)) collectRefs(a.layers);
+      data.assets = (data.assets ?? []).filter((a: any) => usedRefs.has(String(a.id)));
+      blastData = data;
+    } catch (e) {
+      console.error('[黑潮爆破动画数据解析失败]', e);
+      setStatus('黑潮爆破动画数据解析失败: ' + (e as Error).message, true);
+    }
+    // 失败时允许下次重试
+    if (!blastData) blastDataPromise = null;
+  })();
+  return blastDataPromise;
+}
+
 /* 递归偏移对象中所有动画属性({a:1, k:[{t,...}]})的关键帧时刻 t */
 /* 说明：只平移动画属性（{a:1}）里关键帧的 t（帧号，60fps 下一帧 = 1）；数组直接递归；
  * 遇到 a===1 的 k 数组后不再向下递归，避免把关键帧的 s/e 值当成嵌套属性处理；
@@ -5319,6 +5896,30 @@ const ANIMATIONS: AnimDef[] = [
     audioUrl: null,
     loaded: () => !!mapTitleData,
     load: (p) => ensureMapTitleData(p),
+    caps: {},
+  },
+  {
+    key: 'blast',
+    label: '黑潮爆破默认弹窗动画',
+    meta: {
+      tags: ['黑潮', '爆破', '黑潮爆破', '弹窗', '默认弹窗', '提示', '爆破提示', 'blasting', 'blast'],
+      accent: '#1bb8c4',
+      w: 1920, h: 1080, fps: 60, frames: 600,
+      features: ['文字可编辑', '图片可调色'],
+    },
+    poster: posterOf('blast'),
+    data: () => blastData,
+    popup: () => null,
+    audioUrl: null,
+    loaded: () => !!blastData,
+    load: (p) => ensureBlastData(p),
+    /* caps 全空:**侧栏不出现「动画时长」区块**,也就没有任何改时长/改关键帧的入口 ——
+     * 这套动画的画面与时间轴完全按 AE 导出原样呈现(600 帧 / 10s)。
+     * 之所以连滑杆都不要:改时长的实现(applyMainDuration)是**把各图层末尾那段淡出关键帧整体搬到新的出点**,
+     * 对这套动画就等于改数据 —— 提示条 image_1 的 192→216 淡出、图标 image_3 的 114→145 淡出都会被搬走,
+     * 侧栏里的透明度关键帧就和 AE 对不上了。
+     * 同理也**不要**加 nextScan:这是单段弹窗动画,没有第二段可接。
+     * 日后若确实需要给用户改时长的能力,把 timing: true 加回来即可(区块会自动出现,无需改别的代码)。 */
     caps: {},
   },
 ];
@@ -5876,15 +6477,25 @@ async function switchAnimation(key: string) {
   /* 当前动画的「可编辑数据」:注册项的 data() 本身就是内存里的那份引用
    * (位置暴露返回的 animation2Data 可能已合并二次扫描/含用户编辑状态),直接取用即可。 */
   const data = def.data();
+  /* 含亮度遮罩(tt:3)的动画在 canvas 渲染器下构建即失败(上游 lottie-web 的 bug,见 hasLumaMatte):
+   * 预览会整帧全黑、导出也是空帧。渲染器下拉框是全局状态(上一套动画可能被切到 Canvas),
+   * 所以切入这类动画时自动切回 SVG 并提示一句,用户不用自己去猜为什么黑屏。 */
+  const lumaMatte = hasLumaMatte(data);
+  if (lumaMatte && selRenderer.value !== 'svg') {
+    selRenderer.value = 'svg';
+    setStatus('该动画含亮度遮罩:canvas 渲染器不支持,已自动切回 SVG 渲染器');
+  }
   // 遮罩源被多个图层共用的动画(tt 层数 > 遮罩源数)在 canvas 渲染器下遮罩合成会偏暗/丢内容,
   // 导出时自动改走 SVG 逐帧光栅化(见 needsSvgRasterExport / rasterizeSvgFrameToCtx),无需用户干预
   if (needsSvgRasterExport(data)) {
-    setStatus('该动画含共用轨道遮罩:导出将自动使用 SVG 逐帧光栅化,画面与预览一致');
+    setStatus(lumaMatte
+      ? '该动画含亮度遮罩:导出将自动使用 SVG 逐帧光栅化,画面与预览一致'
+      : '该动画含共用轨道遮罩:导出将自动使用 SVG 逐帧光栅化,画面与预览一致');
   }
   // 主题颜色区块:当前动画里存在这两族颜色(填充族/描边族)时显示,并回填当前色与计数
   syncThemeSection(data);
-  // 图片图层区块:含可调色纹理(百叶窗.png 等)或叠加序列时显示
-  const hasTintable = tintableImageLayers(data).length > 0;
+  // 图片图层区块:含可调色纹理(百叶窗.png 等)、叠加序列,或黑潮爆破的位图/序列时显示
+  const hasTintable = (currentAnimKey === 'blast' ? blastTintableLayers(data) : tintableImageLayers(data)).length > 0;
   imageSection.hidden = !hasTintable;
   if (hasTintable) renderImageList(data);
   else imageList.innerHTML = '';
@@ -5910,7 +6521,11 @@ async function switchAnimation(key: string) {
   }
   // 动画时长区块(时长 + 二次扫描开关 + 二次扫描时长):由注册项的 caps.timing 决定
   timingSection.hidden = !def.caps.timing;
-  // 二次扫描行只在「支持二次扫描」且开关已打开时出现(开关状态是全局的,切回来要保持)
+  /* 「二次扫描」勾选行单独按 caps.nextScan 显隐 —— 它只是碰巧和时长滑杆放在同一区块里,
+   * 语义上和「时长可调」无关:黑潮爆破默认弹窗是单段弹窗动画(caps 全空),
+   * 只该有时长滑杆、甚至没有区块,出现「二次扫描」开关会让人以为能接第二段(勾了也确实什么都不会发生)。 */
+  nextScanRow.hidden = !def.caps.nextScan;
+  // 二次扫描时长行只在「支持二次扫描」且开关已打开时出现(开关状态是全局的,切回来要保持)
   nextDurationRow.hidden = !(def.caps.nextScan && showNextScan);
   if (def.caps.nextScan) chkNextScan.checked = showNextScan;
   if (def.caps.timing) syncNextDurationSlider();
@@ -6865,12 +7480,35 @@ function countMatteLayers(data: any): { tt: number; td: number; text: number } {
   return { tt, td, text };
 }
 
-/* 需要兼容导出吗:被遮罩层(tt)多于遮罩源(td)说明遮罩源被共用,canvas 合成不可靠 */
+/* 数据里是否存在「亮度遮罩」(轨道遮罩 tt:3)。
+ * 背景:lottie-web 5.13.0 的 canvas 渲染器对亮度遮罩是坏的 —— 源码里 lumaLoader 是函数表达式却漏了
+ * 调用括号(assetLoader 里写的是 lumaLoader.load,而 lumaLoader 本身是个未经调用的函数),
+ * 于是 assetLoader.loadLumaCanvas === undefined;构建任何 tt>=3 的图层时 CVBaseElement.createContainerElements
+ * 调用它会抛 TypeError,而异常正好落在 AnimationItem.configAnimation 的 try/catch 里被吞掉:
+ * 后续 config_ready / DOMLoaded 都不会触发(预览停在加载态、画面全黑),导出取到的也是空帧。
+ * SVG 渲染器用 SVG 滤镜(feColorMatrix)自己做亮度遮罩,不走这条路径,实测正常。
+ * 所以含亮度遮罩的动画一律走 SVG:预览在切入时自动把渲染器切回 SVG(见 switchAnimation),
+ * 导出由 needsSvgRasterExport 自动改走 SVG 逐帧光栅化。 */
+function hasLumaMatte(data: any): boolean {
+  let found = false;
+  const walk = (layers: any[]) => {
+    for (const l of layers ?? []) {
+      if (l?.tt === 3) found = true;
+      if (Array.isArray(l?.layers)) walk(l.layers);
+    }
+  };
+  walk(data?.layers);
+  for (const a of data?.assets ?? []) if (Array.isArray(a?.layers)) walk(a.layers);
+  return found;
+}
+
+/* 需要兼容导出吗:被遮罩层(tt)多于遮罩源(td)说明遮罩源被共用,canvas 合成不可靠;
+ * 另外含亮度遮罩(tt:3)的动画在 canvas 渲染器下根本构建不出来(见 hasLumaMatte),同样必须走 SVG。 */
 function needsSvgRasterExport(data: any): boolean {
   // 判定是启发式:tt > td 只说明「有遮罩源被共用」,并不保证 canvas 一定出错;
   // 但兼容导出的代价只是更慢(SVG 逐帧光栅化),画面正确优先于速度,所以宁可多走这条路。
   const { tt, td } = countMatteLayers(data);
-  return tt > td;
+  return tt > td || hasLumaMatte(data);
 }
 
 /* 字体二进制 → 可复用的 blob URL。

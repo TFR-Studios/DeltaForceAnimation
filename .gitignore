@@ -22,3 +22,6 @@ tools/.frames.raw
 
 # AE video-layer footage inside animations/animation_4 (unused by the site, can be GBs)
 animations/animation_4/images/*.mp4
+
+# AE video-layer footage inside animations/animation_6 (the loader drops those layers, can be GBs)
+animations/animation_6/images/*.mp4

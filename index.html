@@ -158,8 +158,10 @@
       <aside class="side-panel">
         <h3>动画信息</h3>
         <dl id="infoList"></dl>
-        <!-- 动画时长(仅位置暴露动画显示):时长滑杆把末尾淡出关键帧整体后移,范围 1~10s、步进 0.1s -->
+        <!-- 动画时长(由注册项的 caps.timing 决定是否显示):时长滑杆把末尾淡出关键帧整体后移,范围 1~10s、步进 0.1s -->
         <!-- 「二次扫描」勾选后主动画播完紧接着播第二段;下一行是它的时长,默认 hidden,勾选后才出现 -->
+        <!-- 这两行(勾选行 + 时长行)只对 caps.nextScan 为真的动画显示 —— 「时长可调」和「有第二段」是两件事:
+             弹窗类动画只该有时长滑杆,不该出现「二次扫描」(整行隐藏由 switchAnimation 写 nextScanRow.hidden) -->
         <div id="timingSection" hidden>
         <h3>动画时长</h3>
           <div class="timing-row">
@@ -168,7 +170,7 @@
               <input type="range" id="rngDuration" min="1" max="10" step="0.1" value="10" />
               <span id="durationVal">10.0s</span>
             </label>
-            <label class="timing-item" title="开启后,主动画播完紧接着播放二次扫描动画">
+            <label class="timing-item" id="nextScanRow" title="开启后,主动画播完紧接着播放二次扫描动画">
               <input type="checkbox" id="chkNextScan" /> 二次扫描
             </label>
             <label class="timing-item" id="nextDurationRow" hidden title="调整二次扫描动画持续时间(1s-10s)">

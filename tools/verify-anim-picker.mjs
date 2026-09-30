@@ -88,7 +88,11 @@ const extras = await page.evaluate(() => ({
 }));
 check('点触发器打开画廊', st.open && st.expanded === 'true');
 check('卡片数量 = 动画数量', st.cards.length === total, st.cards.length + ' vs ' + total);
-check('当前动画带「当前」角标且唯一', st.current === '撤离动画' && st.cards.length > 0, st.current);
+/* galleryState().current 是卡片的 data-key(不是中文名);「唯一」= 恰好一张带 is-current */
+const currentCount = await page.evaluate(() => document.querySelectorAll('.ap-card.is-current').length);
+check('当前动画带「当前」角标且唯一',
+  st.current === 'extraction' && st.cards.length === total && currentCount === 1,
+  st.current + ' ×' + currentCount);
 check('封面图全部加载成功', extras.covers === total, extras.covers + '/' + total);
 check('搜索框自动获得焦点', st.focused === 'animSearch', String(st.focused));
 check('卡片带数字键序号角标', st.nums.length === Math.min(9, total), st.nums.join(','));
@@ -119,8 +123,16 @@ check('清空搜索后恢复全部卡片',
 
 /* ---------- 4. 数字键直选 ---------- */
 const beforeKey = await page.evaluate(() => document.getElementById('selAnim').value);
-const numKey = await page.evaluate(() => document.querySelector('.ap-card-num').textContent === '2'
-  ? document.querySelectorAll('.ap-card')[1].dataset.key : '');
+/* 卡片上的数字角标与卡片位置一一对应(位置 1 = 角标 1),所以按 '2' 应当切到**第二张**卡片。
+ * 这里直接取位置 2 的 key,并顺带断言它的角标确实是 '2' —— 角标一旦与位置脱节,后一条会红。
+ * (旧写法是"先看第一个角标是不是 2、再取第二张的 key",角标恒为 1 时取到空串,
+ *  waitLoaded('') 会一直等到超时;那段是从"序号不跟位置走"的旧实现留下来的。) */
+const numTarget = await page.evaluate(() => {
+  const card = document.querySelectorAll('.ap-card')[1];
+  return card ? { key: card.dataset.key, num: (card.querySelector('.ap-card-num') || {}).textContent } : null;
+});
+check('第二张卡片的角标是 2', !!numTarget && numTarget.num === '2', JSON.stringify(numTarget));
+const numKey = numTarget ? numTarget.key : '';
 await page.keyboard.press('2');
 await waitLoaded(numKey);
 await sleep(500);
@@ -134,18 +146,37 @@ check('数字键 2 直接切换到第二张卡片', st.key === numKey && st.key 
 check('数字键切换后画廊关闭且触发器同步', !st.open && st.name.length > 0, JSON.stringify(st));
 
 /* 搜索框有内容时,数字还给搜索框 */
+/* 触发器的点击是「开/关」切换,所以先确认画廊确实关着再点,免得把刚打开的面板又关掉;
+ * 点完等面板真的可见(而不是固定 sleep)再往下走 —— 上一套动画刚切完时页面还在重建,
+ * 固定睡眠偶尔会抢在面板渲染之前(搜索框还是 display:none,typings 会打空)。 */
+if (await page.evaluate(() => !document.getElementById('animPicker').hidden)) {
+  await page.keyboard.press('Escape');
+  await sleep(250);
+}
 await page.click('#animTrigger');
-await sleep(350);
+await page.waitForFunction(() => !document.getElementById('animPicker').hidden, { timeout: 30_000, polling: 100 });
+await sleep(200);
 const keyBeforeType = await page.evaluate(() => document.getElementById('selAnim').value);
-await page.type('#animSearch', '1');
+/* 数字直选的判据是「搜索框为空」:先敲一个字母让查询非空,再按数字,数字才应该进搜索框。
+ * (直接往空框里按数字,按设计就是快捷键,会因为 preventDefault 而一个字符都进不去 ——
+ *  这里要验的正是"已有内容之后数字还给搜索框",所以必须先有一个字母。) */
+await page.type('#animSearch', 'a');
+await page.waitForFunction(() => document.getElementById('animSearch').value === 'a', { timeout: 30_000, polling: 100 });
+await page.keyboard.press('1');
+await page.waitForFunction(() => document.getElementById('animSearch').value === 'a1', { timeout: 30_000, polling: 100 });
 await sleep(250);
 st = await page.evaluate(() => ({
   query: document.getElementById('animSearch').value,
   key: document.getElementById('selAnim').value,
   open: !document.getElementById('animPicker').hidden,
 }));
-check('搜索框已有内容时数字键不再直选', st.query === '1' && st.key === keyBeforeType && st.open,
+check('搜索框已有内容时数字键不再直选', st.query === 'a1' && st.key === keyBeforeType && st.open,
   JSON.stringify(st));
+/* 「清空搜索」按钮只在搜索框有内容时显示,先等它可点再点(同理,别跟固定 sleep 赌时序) */
+await page.waitForFunction(() => {
+  const c = document.getElementById('animSearchClear');
+  return !!c && !c.hidden && c.getBoundingClientRect().width > 0;
+}, { timeout: 30_000, polling: 100 });
 await page.click('#animSearchClear');
 await sleep(200);
 

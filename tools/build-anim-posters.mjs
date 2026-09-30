@@ -16,6 +16,7 @@
  * 用法:
  *   node tools/build-anim-posters.mjs           # dev server 没起就自己起一个,跑完关掉
  *   node tools/build-anim-posters.mjs --keep    # 复用已在 5173 端口运行的 dev server
+ *   POSTER_KEYS=blast node tools/...            # 只重生成指定 key(新增动画时不必动其它封面)
  *
  * 输出:posters/<key>.webp(640×360 左右)。生成后重新构建站点即可在画廊里看到。
  */
@@ -39,6 +40,9 @@ const FRAME_RATIO = {
   exposed: 0.62,
   blinds: 0.5,
   mission: 0.52,
+  // 黑潮爆破默认弹窗:比例是相对**载入后的时间轴**算的 —— 该动画的默认时长是 4.3s(263 帧),
+  // 画面在第 ~252 帧淡完,所以 0.45(≈ 第 118 帧)正好落在「HUD + 提示条 + 标题」都在的展示段。
+  blast: 0.45,
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -191,9 +195,14 @@ async function main() {
   await page.goto(ORIGIN + '/', { waitUntil: 'domcontentloaded', timeout: 180_000 });
   await page.waitForFunction(() => !document.getElementById('app-loading'), { timeout: 300_000, polling: 200 });
 
-  const targets = await page.evaluate(() =>
+  const allTargets = await page.evaluate(() =>
     [...document.querySelectorAll('#selAnim option')].map((o) => ({ key: o.value, label: o.textContent })));
-  if (!targets.length) throw new Error('页面上没有读到任何动画(兼容 select #selAnim 为空)');
+  if (!allTargets.length) throw new Error('页面上没有读到任何动画(兼容 select #selAnim 为空)');
+  /* POSTER_KEYS=key1,key2 时只生成这几张:新增一套动画只需补它自己的封面,
+   * 不会顺手把其它封面按当前实现重新裁一遍(避免无关 diff)。 */
+  const only = (process.env.POSTER_KEYS || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const targets = only.length ? allTargets.filter((t) => only.includes(t.key)) : allTargets;
+  if (!targets.length) throw new Error('POSTER_KEYS 没有匹配到任何动画:' + only.join(', '));
   console.log('[posters] 待生成 ' + targets.length + ' 张:' + targets.map((t) => t.key).join(', '));
 
   /* 等到「这套动画确实已经载入」为止。
