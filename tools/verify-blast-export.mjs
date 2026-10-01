@@ -28,14 +28,14 @@ try {
     && window.__anim && window.__anim !== window.__prevAnim && window.__anim.isLoaded, { timeout: 180000, polling: 200 });
   await sleep(1200);
 
-  // 剪掉空尾:时长 3.7s(600 帧 → 227 帧),导出更快,也顺带验一次时长滑杆
-  await page.evaluate(() => {
+  /* 这套动画**不配**时长滑杆(caps 为空):时长已经直接裁进 animation_data.json(op 258 = 4.30s),
+   * 所以导出前只确认「滑杆那一行是隐藏的、时长就是数据本身的 4.30s」,不再去拖它。 */
+  const timing = await page.evaluate(() => {
     const rng = document.getElementById('rngDuration');
-    rng.value = '3.7';
-    rng.dispatchEvent(new Event('input', { bubbles: true }));
+    return { sliderHidden: rng ? rng.offsetParent === null : null, totalFrames: Math.round(window.__anim.totalFrames) };
   });
-  await page.waitForFunction(() => window.__anim && Math.round(window.__anim.totalFrames) < 300, { timeout: 60000 });
-  console.log('frames after trim:', await page.evaluate(() => window.__anim.totalFrames));
+  console.log('timing:', JSON.stringify(timing));
+  if (timing.totalFrames !== 258) { console.log('EXPORT SMOKE FAILED(时长不是 4.30s / 258 帧)'); process.exitCode = 1; }
 
   await page.evaluate(() => document.getElementById('btnExport').click());
   const t0 = Date.now();

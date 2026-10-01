@@ -41,7 +41,8 @@ try {
   console.log('DIAG:', JSON.stringify(info.diag));
   console.log(JSON.stringify({ assets: info.assets, probes: info.probes }, null, 1));
   console.log('errors:', errors.slice(0, 3).join(' || ') || '(none)');
-  /* 时间轴长度 = 源数据的 op(600)—— 这套动画不配 caps.defaultDuration,载入即 AE 导出原样 */
-  const ok = info.probes.every((p) => p.ok && p.size > 100) && info.totalFrames === 600;
+  /* 时间轴长度 = 源数据的 op(258 = 4.30s @60fps)—— 这套动画不配 caps.defaultDuration,
+   * 载入即 AE 导出原样(时长已直接裁进数据里,不靠 applyMainDuration 改关键帧) */
+  const ok = info.probes.every((p) => p.ok && p.size > 100) && info.totalFrames === 258;
   console.log(ok ? 'BUILD SMOKE OK' : 'BUILD SMOKE FAILED');
 } finally { await browser.close(); }

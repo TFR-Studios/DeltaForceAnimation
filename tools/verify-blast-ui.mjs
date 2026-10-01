@@ -55,19 +55,16 @@ try {
   await sleep(400);
   await stage.screenshot({ path: path.join(OUT, 'ui-after-edit.png') });
 
-  // 时长滑块:拖到 3.7s(剪掉空尾)
-  await page.evaluate(() => {
+  // 这套动画没有时长滑杆(caps 为空):确认滑杆被隐藏、时长保持数据原样 4.30s
+  const after = await page.evaluate(() => {
     const rng = document.getElementById('rngDuration');
-    rng.value = '3.7';
-    rng.dispatchEvent(new Event('input', { bubbles: true }));
+    return {
+      sliderHidden: rng ? rng.offsetParent === null : null,
+      totalFrames: window.__anim ? window.__anim.totalFrames : null,
+      status: document.getElementById('statusbar').textContent,
+    };
   });
-  await sleep(1600);
-  const after = await page.evaluate(() => ({
-    totalFrames: window.__anim ? window.__anim.totalFrames : null,
-    durationVal: document.getElementById('durationVal').textContent,
-    status: document.getElementById('statusbar').textContent,
-  }));
-  console.log('after duration:', JSON.stringify(after));
+  console.log('timing row:', JSON.stringify(after));
 
   // 画廊:打开动画选择器并截图(确认新卡片与封面)
   await page.evaluate(() => document.getElementById('animTrigger').click());

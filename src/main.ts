@@ -3184,12 +3184,22 @@ function onImageColorChanged(refId: string, hex: string) {
     const entryLayer = blastTintableLayers(currentData).find((x: any) => String(x.refId) === refId) ?? null;
     const fillTarget = entryLayer ? findFillTarget(currentData, entryLayer) : null;
     if (fillTarget && fillTarget.colorParam?.v) {
-      fillTarget.colorParam.v.k = hexToFc(hex, Array.isArray(fillTarget.colorParam.v.k) ? fillTarget.colorParam.v.k : undefined);
-      const key = blastTintKey(refId);
-      blastTintHex.set(key, hex);
-      if (!blastFillOriginalColor.has(key)) { /* 原值已在列表渲染时采集 */ }
-      reRenderPreservingState();
-      setStatus('填充颜色已改为 ' + hex);
+      const fc = fillTarget.colorParam.v.k;
+      if (!blastFillOriginalColor.has(blastTintKey(refId))) {
+        blastFillOriginalColor.set(blastTintKey(refId), Array.isArray(fc) ? fc.slice() : [1, 1, 1]);
+      }
+      /* 参数与位图一起改:参数保证"重置/再次读列表"能拿到当前色,位图才是画面真正在读的东西
+       * (见 bakeFillColor 的说明:导出走独立文档,滤镜不可靠)。 */
+      fillTarget.colorParam.v.k = hexToFc(hex, Array.isArray(fc) ? fc : undefined);
+      blastTintHex.set(blastTintKey(refId), hex);
+      const alpha = getFillEffect(fillTarget.layer)?.alpha ?? 1;
+      window.clearTimeout(imageTintTimer);
+      imageTintTimer = window.setTimeout(() => {
+        void bakeFillColor(fillTarget.layer, hex, alpha).then(() => {
+          reRenderPreservingState();
+          setStatus('填充颜色已改为 ' + hex);
+        });
+      }, 150);
       return;
     }
     const asset = findAssetByRef(currentData, refId);
@@ -3301,6 +3311,12 @@ function onImageColorReset(refId: string) {
     if (fillTarget2?.colorParam?.v && orig) {
       fillTarget2.colorParam.v.k = orig.slice();
       blastTintHex.delete(blastTintKey(refId));
+      /* 位图也要还原:烘焙是写进 asset.p 的,不改回来画面不会变 */
+      for (const rid of gatherImageRefIds(currentData, fillTarget2.layer)) {
+        const uri = fillBakeOriginalUri.get(blastTintKey(rid));
+        const asset0 = (currentData.assets ?? []).find((a: any) => String(a.id) === rid);
+        if (uri && asset0) { asset0.p = uri; invalidateBitmapCaches(asset0, uri); }
+      }
       const ci0 = imageList.querySelector<HTMLInputElement>('.i-color[data-ref="' + refId + '"]');
       if (ci0) setColorPickerValue(ci0, fcToHex(orig));
       reRenderPreservingState();
@@ -3406,28 +3422,86 @@ function dropShadowRgba(ds: { color: string; alpha: number; dx: number; dy: numb
  * 不会叠加出双重阴影。 */
 function patchSvgDropShadow(el: any) {
   if (!el.layerElement) return;
-  /* 投影与填充都要写 layerElement.style.filter,必须合并成一条 ——
-   * 分两次赋值会互相覆盖(后写的赢),表现为"改色不生效"或"投影消失"。 */
-  const parts: string[] = [];
-  // 填充要先于投影:先把图层刷成目标色,再让阴影基于刷色后的形状投出去(与 AE 的效果栈一致)
-  const fill = getFillEffect(el.data);
-  if (fill) parts.push(fillEffectCss(fill));
+  /* 只处理投影。AE「填充」不在这里实现 —— 见 bakeFillColor 的说明:
+   * 导出把当帧 SVG 序列化成**独立文档**用 <img> 加载,该环境下 CSS/SVG filter 不可靠,
+   * 挂滤镜会导致导出画面缺层。填充改为"烘焙进位图资源",预览与导出走同一条位图路径。 */
   const ds = getDropShadow(el.data);
-  if (ds) parts.push(dropShadowCss(ds));
-  el.layerElement.style.filter = parts.join(' ');
+  el.layerElement.style.filter = ds ? dropShadowCss(ds) : '';
 }
 
-/* ---------- AE 填充效果(ADBE Fill)渲染 ----------
- * lottie-web 不渲染 AE 效果,所以「填充」同样要自己补:AE 的填充把图层内容整体刷成指定颜色
- * (保留 alpha 形状),画面里那条青色 HUD 底条就是这么来的 ——
- * 「预合成 2」上挂着 ty:21「填充」,颜色写死 #81CAF6,不补这个效果的话那层会露出素材原色(近白),
- * 在深色背景上看不见,用户改素材颜色也"没反应"(改的根本不是决定画面的那个颜色)。
- *
- * 实现走 CSS filter:先按目标色做一次 colorize(输出 RGB 恒为目标色、alpha 沿用源图),
- * 再用不透明度做一次 alpha 缩放(离屏 canvas 的 feComponentTransfer),两者串起来即等价于
- * AE「填充(颜色 + 不透明度)」的合成结果 —— SVG 与导出(SVG 逐帧光栅化)都吃 CSS filter,一条路径通吃。
+/* ---------- AE「填充」的落地方式:烘焙进位图 ----------
+ * 为什么不用 CSS/SVG filter:导出走「SVG 逐帧光栅化」——把当帧 SVG 序列化成**独立文档**再用 <img> 加载;
+ * 实测该环境里 CSS filter 与 SVG <filter>(feFlood+feComposite、feColorMatrix 都试过)**均不产出像素**
+ * (滤镜定义内联或外链都一样),结果是导出画面直接缺掉整层,而预览正常(预览里滤镜在同文档内、能解析)。
+ * 所以改成站点最擅长的那条路:**把颜色烘焙进位图资源**(与「百叶窗.png」调色完全同一套):
+ *   · 填充挂在**图片图层**上 → 着色该图层的资源;
+ *   · 填充挂在**预合成**上(HUD 底条就是这样) → 着色该预合成内部的位图资源。
+ * 预览与导出读的都是同一个 asset.p,两边天然一致,且不依赖任何滤镜。 */
+const fillBakeOriginalUri = new Map<string, string>(); // '动画key:refId' → 该资源的原始地址
+
+/* 该图层(或它引用的预合成)覆盖到的所有位图资源 id */
+function gatherImageRefIds(data: any, layer: any): string[] {
+  const out: string[] = [];
+  const push = (id: unknown) => {
+    const s = String(id);
+    if (s && s !== 'undefined' && out.indexOf(s) < 0) out.push(s);
+  };
+  const walk = (layers: any[]) => {
+    for (const l of layers ?? []) {
+      if (l?.ty === 2 && typeof l.refId === 'string') push(l.refId);
+      if (Array.isArray(l.layers)) walk(l.layers);
+    }
+  };
+  if (layer?.ty === 2 && typeof layer.refId === 'string') push(layer.refId);
+  const refId = typeof layer?.refId === 'string' ? layer.refId : '';
+  if (refId) {
+    const comp = (data?.assets ?? []).find((a: any) => String(a.id) === refId);
+    if (comp && Array.isArray(comp.layers)) walk(comp.layers);
+  }
+  if (Array.isArray(layer?.layers)) walk(layer.layers);
+  return out;
+}
+
+/* 按当前填充参数把颜色烘焙到相关位图:目标色与**原素材像素**按 alpha 混合。 */
+async function bakeFillColor(layer: any, color: string, alpha: number): Promise<void> {
+  if (!currentData) return;
+  for (const refId of gatherImageRefIds(currentData, layer)) {
+    const asset = (currentData.assets ?? []).find((a: any) => String(a.id) === refId);
+    if (!asset || typeof asset.p !== 'string') continue;
+    const key = blastTintKey(refId);
+    if (!fillBakeOriginalUri.has(key) && !isBlastTintedUri(asset.p)) {
+      fillBakeOriginalUri.set(key, asset.p);
+    }
+    const original = fillBakeOriginalUri.get(key);
+    if (!original) continue;
+    try {
+      const src = await getImageTintSource(original);
+      const canvas = document.createElement('canvas');
+      canvas.width = src.img.width;
+      canvas.height = src.img.height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) continue;
+      const tinted = tintImageDataMultiply(src.data, color);
+      const out = new ImageData(new Uint8ClampedArray(src.data.data), src.data.width, src.data.height);
+      const d0 = src.data.data, d1 = tinted.data, d2 = out.data;
+      for (let i = 0; i < d2.length; i += 4) {
+        for (let c = 0; c < 3; c++) d2[i + c] = Math.round(d0[i + c] * (1 - alpha) + d1[i + c] * alpha);
+      }
+      ctx.putImageData(out, 0, 0);
+      asset.p = canvas.toDataURL('image/png');
+      invalidateBitmapCaches(asset, original);
+    } catch (e) {
+      console.error('[填充烘焙失败]', e);
+    }
+  }
+}
+
+/* ---------- AE 填充效果(ADBE Fill)解析 ----------
+ * lottie-web 不渲染 AE 效果,所以「填充」要自己补:它把图层内容整体刷成指定颜色(保留 alpha 形状),
+ * 画面里那条青色 HUD 底条就是这么来的 —— 「预合成 2」上挂着 ty:21「填充」,颜色 #81CAF6。
+ * 这里只负责**解析参数**;真正落地见 bakeFillColor(烘焙进位图,预览与导出同一份数据)。
  * 参数:ix 1=填充蒙版、2=所有蒙版、3=颜色、4=反转、5=水平羽化、6=垂直羽化、7=不透明度。
- * 只支持无蒙版约束、无羽化、无反转的常见形态(本项目的数据就是这种);其余形态返回 null 不处理,
+ * 只支持无蒙版约束、无羽化、无反转的常见形态(本项目数据就是这种);其余形态返回 null 不处理,
  * 免得画出与 AE 不一致的东西。 */
 type FillEffect = { color: string; alpha: number };
 function getFillEffect(layer: any): FillEffect | null {
@@ -3459,70 +3533,8 @@ function getFillEffect(layer: any): FillEffect | null {
 
 /* 填充滤镜的 CSS filter 串:colorize(换成目标色) + 可选的 alpha 缩放。
  * alpha 用站点既有的离屏滤镜(df-fill-alpha-*),由 ensureFillAlphaFilter 懒创建。 */
-function fillEffectCss(fill: FillEffect): string {
-  return 'url(#' + ensureFillFilter(fill.color, fill.alpha) + ')';
-}
-
-/* 站点级隐藏 SVG 里的两个滤镜定义(与序列调色的 seqTintSvg 同一套路:切渲染器/重建都不会丢) */
-let fillFilterSvg: SVGSVGElement | null = null;
-const fillAlphaFilterIds = new Map<string, string>();
-function ensureFillFilterHost(): SVGSVGElement {
-  const NS = 'http://www.w3.org/2000/svg';
-  if (!fillFilterSvg) {
-    fillFilterSvg = document.createElementNS(NS, 'svg');
-    fillFilterSvg.setAttribute('width', '0');
-    fillFilterSvg.setAttribute('height', '0');
-    fillFilterSvg.setAttribute('aria-hidden', 'true');
-    fillFilterSvg.style.cssText = 'position:absolute;width:0;height:0;overflow:hidden';
-    document.body.appendChild(fillFilterSvg);
-    const defs = document.createElementNS(NS, 'defs');
-    fillFilterSvg.appendChild(defs);
-  }
-  return fillFilterSvg;
-}
-/* 为一个「填充」效果构造(或复用)SVG 滤镜:
- *   feFlood(目标色) → feComposite operator="in" in2=SourceGraphic  → 得到"颜色 = 目标色、形状 = 源图 alpha"
- *   → feComponentTransfer 用 slope 把 alpha 缩到效果的不透明度。
- * 这与 AE「填充」的语义一致:不透明度按图层内容的不透明度施加,形状完全保留。 */
-function ensureFillFilter(color: string, alpha: number): string {
-  const key = color + '@' + alpha.toFixed(3);
-  const hit = fillAlphaFilterIds.get(key);
-  if (hit) return hit;
-  const NS = 'http://www.w3.org/2000/svg';
-  const host = ensureFillFilterHost();
-  const defs = host.querySelector('defs') as SVGDefsElement;
-  const id = 'df-fill-' + key.replace(/[^a-zA-Z0-9_-]+/g, '-');
-  const filter = document.createElementNS(NS, 'filter');
-  filter.setAttribute('id', id);
-  filter.setAttribute('x', '-10%');
-  filter.setAttribute('y', '-10%');
-  filter.setAttribute('width', '120%');
-  filter.setAttribute('height', '120%');
-  filter.setAttribute('color-interpolation-filters', 'sRGB');
-  const flood = document.createElementNS(NS, 'feFlood');
-  flood.setAttribute('flood-color', color);
-  flood.setAttribute('result', 'fillColor');
-  filter.appendChild(flood);
-  const comp = document.createElementNS(NS, 'feComposite');
-  comp.setAttribute('in', 'fillColor');
-  comp.setAttribute('in2', 'SourceGraphic');
-  comp.setAttribute('operator', 'in');
-  comp.setAttribute('result', 'filled');
-  filter.appendChild(comp);
-  if (alpha < 1) {
-    const ct = document.createElementNS(NS, 'feComponentTransfer');
-    ct.setAttribute('in', 'filled');
-    const funcA = document.createElementNS(NS, 'feFuncA');
-    funcA.setAttribute('type', 'linear');
-    funcA.setAttribute('slope', String(alpha));
-    funcA.setAttribute('intercept', '0');
-    ct.appendChild(funcA);
-    filter.appendChild(ct);
-  }
-  defs.appendChild(filter);
-  fillAlphaFilterIds.set(key, id);
-  return id;
-}
+/* 注:AE「填充」不再用 SVG 滤镜实现 —— 导出把当帧 SVG 序列化成独立文档用 <img> 加载,
+ * 该环境下 CSS/SVG filter 实测不产出像素(会缺层)。改走 bakeFillColor 的位图烘焙。 */
 
 
 /* 给 Canvas 渲染器里的图层补投影:包装该图层的 renderFrame,一帧画两次 ——
@@ -7616,14 +7628,43 @@ async function rasterizeSvgFrameToCtx(
   const NS_SVG = 'http://www.w3.org/2000/svg';
   const XLINK = 'http://www.w3.org/1999/xlink';
   const clone = svgEl.cloneNode(true) as SVGSVGElement;
-  // lottie 的图片预载元素(序列帧 720 张)与字体 <style> 都不在画面上,序列化前剔除
-  clone.querySelectorAll('defs image').forEach((n) => n.remove());
+  /* 剔除 lottie 的图片预载元素与字体 <style>。
+   * ⚠ 必须用**直接子选择器** defs > image:预载元素是 <defs> 的直接子节点,
+   * 而 mask 引用的**遮罩源**是 <defs> 里 <g id=…> 的子节点 —— 用后代选择器会把遮罩源一起删掉,
+   * 蒙版随即变空,导出画面里整条蒙版动画直接消失(实测:导出丢蒙版,预览正常)。 */
+  clone.querySelectorAll('defs > image').forEach((n) => n.remove());
   clone.querySelectorAll('defs style').forEach((n) => n.remove());
   // 强制按导出尺寸重建视口:clone 沿用了 lottie 写在 <svg> 上的尺寸属性,
   // 不覆盖的话 <img> 会按原尺寸呈现,合成到输出画布上位置和大小都会错位。
   clone.setAttribute('width', String(w));
   clone.setAttribute('height', String(h));
   clone.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+  /* 修剪「本帧不可见」的图层子树:lottie 用 display:none 表示图层不在当前帧的区间内,
+   * 黑潮爆破的逐帧序列同时挂着 696 层、任一时刻只有 1 层可见 —— 不修剪的话每帧都要序列化
+   * 700 个 <image>(实测 0.35 秒/帧、258 帧要 90 多秒,画面还更容易出错)。
+   * 但被 mask / clip-path / filter / <use> 引用到的元素(及其祖先)必须保留:
+   * 轨道遮罩的**源图层**本身就常常是 display:none,删了蒙版就空了。 */
+  const referencedIds = new Set<string>();
+  clone.querySelectorAll('[mask],[clip-path],[filter],use').forEach((n) => {
+    for (const attr of ['mask', 'clip-path', 'filter']) {
+      const v = n.getAttribute(attr);
+      if (!v) continue;
+      const m = /#([^)"'\s]+)/.exec(v);
+      if (m) referencedIds.add(m[1]);
+    }
+    const href = n.getAttribute('href') || n.getAttributeNS(XLINK, 'href');
+    if (href && href.charAt(0) === '#') referencedIds.add(href.slice(1));
+  });
+  const mustKeep = new Set<Element>();
+  referencedIds.forEach((id) => {
+    const el = clone.querySelector('#' + CSS.escape(id));
+    let node: Element | null = el;
+    while (node && node !== clone) { mustKeep.add(node); node = node.parentElement; }
+  });
+  for (const n of Array.from(clone.querySelectorAll('[style*="display: none"]'))) {
+    if (mustKeep.has(n) || !n.parentNode) continue;
+    n.parentNode.removeChild(n);
+  }
   const imgs = Array.from(clone.querySelectorAll('image')) as SVGImageElement[];
   // 逐个内联 <image> 的地址:同时写 xlink:href 与 href 两份(SVG 2 解析器读 href,老解析器只认 xlink:href),
   // 本来就是 data: 的跳过;单张图失败不阻断整帧。
@@ -7755,10 +7796,13 @@ async function exportVideo() {
       // 这样每帧克隆/序列化的节点数从 ~740 降到 ~20(实测每帧省 ~90ms)
       const svgRoot = (renderAnim as any).renderer?.svgElement as SVGSVGElement | null;
       if (svgRoot) {
-        svgRoot.querySelectorAll('defs image').forEach((n) => n.remove());
+        /* ⚠ 必须是**直接子选择器** defs > image(与下方栅格化一致):
+         * 预载图片是 <defs> 的直接子节点,而遮罩源图层是 <defs> 里 <g id=…> 的子节点 ——
+         * 用后代选择器会把导出实例自己的遮罩源删掉,蒙版随即变空,导出视频里整条蒙版动画直接消失。 */
+        svgRoot.querySelectorAll('defs > image').forEach((n) => n.remove());
         // lottie 会把字体 base64(TTF,约 5MB)塞进 <defs><style>:栅格化时改用下面注入的 WOFF2 版本,
         // 否则每帧要白白序列化+解析两份字体(实测这是导出最慢的一环)
-        svgRoot.querySelectorAll('defs style').forEach((n) => n.remove());
+        svgRoot.querySelectorAll('defs > style').forEach((n) => n.remove());
       }
     } else {
       patchExportCanvasRenderer((renderAnim as any).renderer);
