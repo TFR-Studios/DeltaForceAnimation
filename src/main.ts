@@ -857,9 +857,14 @@ function patchSvgRendererTree(renderer: any) {
 }
 
 /* 导出前确保第 n 帧的序列图片已解码(每条序列各自的导出专用图片,与预览隔离) */
+/* 每张序列图的解码等待上限:超时先放行(见 ensureSeqDecoded 注释) */
+const SEQ_DECODE_TIMEOUT_MS = 4000;
+
 /* 逐帧导出前调用:把第 n 帧的序列图片挂到导出专用 <img> 上并等它解码完成。
  * 已经 complete 的图不再 await(decode() 虽会立即返回,但少一次 Promise 开销);
- * decode() 失败(图 404 / 解码报错)被吞掉 —— 少一帧总好过中断整段导出。 */
+ * decode() 失败(图 404 / 解码报错)被吞掉 —— 少一帧总好过中断整段导出。
+ * decode() **悬空**(既不 resolve 也不 reject)同样要防:手机上图片解码队列被占满时会出现,
+ * 没有超时就会让导出永远停在第 0 帧(界面停在「正在初始化渲染器」)。 */
 async function ensureSeqDecoded(n: number) {
   if (seqEntries.length === 0) return;
   await Promise.all(
@@ -867,9 +872,12 @@ async function ensureSeqDecoded(n: number) {
       const img = seqExportImages.get(entry.ind);
       const url = seqFrameUrl(entry, n);
       if (!img || !url) return;
-      if (img.src !== url) {
+      /* img.src 读出来是解析后的绝对地址,而 url 是打包出来的相对路径,直接比永远不相等 ——
+       * 那会让每帧都重新赋一次 src 并重复 decode()。用「上次实际赋过的 url」记账。 */
+      if ((img as any).__seqUrl !== url) {
+        (img as any).__seqUrl = url;
         img.src = url;
-        if (!img.complete) await img.decode().catch(() => {});
+        if (!img.complete) await raceTimeout(img.decode().catch(() => null), SEQ_DECODE_TIMEOUT_MS);
       }
     })
   );
@@ -6576,9 +6584,52 @@ function fmtSize(bytes: number): string {
   return bytes + ' B';
 }
 
+/* ==================== 导出「永不卡死」护栏 ====================
+ *
+ * 手机上导出最容易踩到的不是「报错」而是「没有回调」:硬件编码器的 isConfigSupported /
+ * flush 不 settle、图片 decode() 悬空、SVG 作为 <img> 既不 load 也不 error、
+ * 移动网络下 fetch 挂住……这些 Promise 永远不会 settle,没有超时的表现就是
+ * **进度浮层永远停在「正在初始化渲染器…」0%**,用户只能反复点导出(而导出中按钮是锁着的)。
+ *
+ * 统一用 raceTimeout 包一层:超时返回哨兵 TIMED_OUT,由各调用点决定「降级继续」还是「如实报错」。
+ * 原则:
+ *   • 缺了它不影响成片正确性的东西(音轨、字体、探测结果、单张序列图)→ 超时就降级/跳过;
+ *   • 缺了它画面就是错的(首帧就栅格化不出来)→ 连续失败后抛出可读错误,而不是无声空转。 */
+const TIMED_OUT = Symbol('export-timeout');
+type TimedOut = typeof TIMED_OUT;
+/* p 在 ms 内 settle 就照原样返回(或抛出);否则返回 TIMED_OUT。
+ * 超时后不再理会 p 的后续结果,但保留 then 的处理器,避免产生 unhandledrejection。 */
+function raceTimeout<T>(p: Promise<T>, ms: number): Promise<T | TimedOut> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = window.setTimeout(() => { if (!settled) { settled = true; resolve(TIMED_OUT); } }, ms);
+    p.then(
+      (v) => { if (!settled) { settled = true; window.clearTimeout(timer); resolve(v); } },
+      (e) => { if (!settled) { settled = true; window.clearTimeout(timer); reject(e); } },
+    );
+  });
+}
+
+/* 进度浮层的「心跳」:每秒把当前阶段的 detail 后面补上「已用时 Ns」。
+ * 逐帧渲染是同步重活,慢设备上一帧可能要几百毫秒到几秒;没有心跳时界面上分不清
+ * 「正在慢慢跑」和「已经死了」,而这两者对用户是同一件事。有了心跳,再慢也在动,
+ * 用户就知道该等(配合屏幕常亮)而不是反复点击。 */
+let exportHeartbeatTimer: number | undefined;
+let exportHeartbeatStart = 0;
+let exportStageDetail = ''; // 最近一次由阶段回调写入的 detail(心跳只追加,不覆盖)
+function paintExportDetail() {
+  if (!exportHeartbeatStart) { exportDetail.textContent = exportStageDetail; return; }
+  const sec = Math.max(0, Math.round((Date.now() - exportHeartbeatStart) / 1000));
+  exportDetail.textContent = exportStageDetail ? exportStageDetail + ' · 已用时 ' + sec + 's' : '已用时 ' + sec + 's';
+}
+function stopExportHeartbeat() {
+  window.clearInterval(exportHeartbeatTimer);
+  exportHeartbeatTimer = undefined;
+}
+
 // 打开进度浮层并复位所有导出状态:取消标志、进度、按钮文案、颜色 class。
 // exportPercent 的 class 必须重设 —— 上一次导出留下的 done/error/cancel 会让本次进度数字保持旧配色。
-// warn 只在有需要提前告知的风险时显示(目前仅透明 AVI 的体积提示)。
+// warn 只在有需要提前告知的风险时显示(透明 AVI 的体积提示、手机逐帧光栅化的耗时提示)。
 function showExportOverlay(opts: { formatLabel: string; warn?: string }) {
   window.clearTimeout(exportOverlayTimer);
   exportCancelRequested = false;
@@ -6590,7 +6641,10 @@ function showExportOverlay(opts: { formatLabel: string; warn?: string }) {
   btnExportCancel.disabled = false;
   btnExportCancel.textContent = '取消导出';
   exportPercent.className = 'export-percent';
+  stopExportHeartbeat();
+  exportHeartbeatStart = Date.now();
   updateExportProgress(0, '正在准备…', '');
+  exportHeartbeatTimer = window.setInterval(paintExportDetail, 1000);
 }
 
 // 更新进度:百分比取整并夹到 0..100(逐帧回调按整数帧计算,可能因取整越界),进度条宽度与数字同步。
@@ -6601,13 +6655,18 @@ function updateExportProgress(pct: number, status: string, detail = '') {
   exportPercent.textContent = p + '%';
   exportBarFill.style.width = p + '%';
   exportStatus.textContent = status;
-  exportDetail.textContent = detail;
+  exportStageDetail = detail;
+  paintExportDetail();
 }
 
 // 收尾:把浮层切到 done / error / cancel 三种终态。
 // done 时把文案里的字符勾「✓」换成矢量 ICON_CHECK —— 不同平台的 emoji 字体会把勾渲染成彩色方块。
 // 非 error 会在 holdMs(默认 2600ms)后自动关闭浮层;失败则常驻,免得用户还没看清原因就消失了。
 function finishExportOverlay(kind: 'done' | 'error' | 'cancel', status: string, detail: string, holdMs = 2600) {
+  // 终态先停心跳:否则每秒的「已用时」重绘会把最终文案(含失败原因)覆盖掉
+  stopExportHeartbeat();
+  exportHeartbeatStart = 0;
+  exportStageDetail = detail;
   exportPercent.classList.add(kind === 'done' ? 'done' : kind === 'error' ? 'error' : 'cancel');
   // 成功时把「导出完成 ✓」的字符勾换成矢量对勾
   exportStatus.innerHTML = kind === 'done' ? ICON_CHECK + esc(status.replace(/\s*✓\s*/g, '')) : esc(status);
@@ -6684,13 +6743,40 @@ const WebAudioData = (window as any).AudioData;
  * 桌面 Chrome/Edge 的能力基本是「有或没有」两态,手机上却是连续谱:同样是 Chrome,
  * 中低端机型只支持到 1080p 甚至 720p 的 H.264 硬编、不支持 AAC、内存只有桌面的十几分之一。
  * 所以这里不假设任何能力,一律「先探测、不行就降级」,并把真实原因回显到浮层。 */
-/* 是否移动端。iPadOS 的 UA 伪装成 Macintosh,所以额外用 maxTouchPoints 兜一层。
- * 只影响三件事:导出分辨率的默认档位、是否做逐帧像素自检、导出期间是否申请屏幕常亮。 */
+/* 是否移动端(手机 / 平板)。影响:导出分辨率默认档位、是否做逐帧像素自检、
+ * 无压缩透明 AVI 的内存护栏、完成态文案与「保存到手机」按钮、导出期间申请屏幕常亮。
+ *
+ * ⚠ 不能只看 UA:手机浏览器切到「电脑模式 / 请求桌面网站」时 UA 会被改写成桌面字符串
+ *   (安卓 Chrome → "X11; Linux x86_64",iOS Safari → "Macintosh"),此时把手机当桌面处理,
+ *   导出就会按原始分辨率跑、开着逐帧像素自检、透明 AVI 也不拦 —— 在手机上表现正是
+ *   「点了导出就卡在初始化渲染器不动」。所以这里叠加若干**与 UA 无关**的硬件信号:
+ *   ① UA 关键字:普通模式最直接;
+ *   ② User-Agent Client Hints 的 mobile 位(Chromium 官方推荐的移动端判定)——
+ *      安卓 Chrome/Edge 在电脑模式下**仍然**是 true,因为它描述的是设备而不是 UA 文本;
+ *   ③ 主指针是粗指针(pointer: coarse)且触点数 > 1:手机/平板的触摸屏是主输入。
+ *      桌面触屏笔记本(Windows 触摸屏)主指针仍是鼠标(fine),不会被误判成手机;
+ *   ④ iPadOS 电脑模式:UA 变成 Macintosh/MacIntel 但触点数 > 1(真 Mac 恒为 0);
+ *   ⑤ 粗指针 + 多触点 + 屏幕短边较小:安卓/iPad「电脑模式」的兜底(UA 变了,硬件没变)。
+ * ⑤ 的屏幕短边阈值放宽到 1000:宁可把小尺寸触屏一体机当移动端(只是导出更保守),
+ * 也不要把手机漏掉(漏掉就是卡住/崩页面)。 */
 const IS_MOBILE = (() => {
   try {
     const ua = navigator.userAgent || '';
-    if (/Android|iPhone|iPod|Windows Phone|Mobile|HarmonyOS/i.test(ua)) return true;
-    return /Macintosh/.test(ua) && (navigator.maxTouchPoints ?? 0) > 1; // iPadOS
+    const touchPoints = navigator.maxTouchPoints ?? 0;
+    const uaMobile = /Android|iPhone|iPod|Windows Phone|Mobile|HarmonyOS|BlackBerry|Opera Mini|IEMobile|MicroMessenger|Quark|UCBrowser/i.test(ua);
+    // ② Chromium 的 UA-CH:电脑模式下 UA 变桌面,但这个位不变
+    const chMobile = (navigator as any).userAgentData?.mobile === true;
+    // ③ 主指针粗细:媒体查询描述的是设备输入能力,不受 UA 伪装影响
+    const coarse = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+    // ④ iPadOS 电脑模式(以及 iPad 上的桌面 UA)
+    const iPadDesktop = /Macintosh|MacIntel/i.test(ua + ' ' + ((navigator as any).platform || '')) && touchPoints > 1;
+    // ⑤ 兜底:粗指针 + 多触点 + 小屏 = 手机/平板,哪怕 UA 自称桌面
+    const shortSide = Math.min(window.screen?.width || 9999, window.screen?.height || 9999);
+    const touchDesktopMode = coarse && touchPoints > 1 && shortSide <= 1000;
+    if (import.meta.env.DEV) {
+      (window as any).__mobileDetect = { uaMobile, chMobile, coarse, touchPoints, iPadDesktop, shortSide, touchDesktopMode };
+    }
+    return uaMobile || chMobile || iPadDesktop || touchDesktopMode;
   } catch { return false; }
 })();
 
@@ -6770,6 +6856,26 @@ function avcMinLevelIndex(w: number, h: number, fps: number): number {
   return AVC_LEVELS.length - 1;
 }
 
+/* 探测一个编码配置本机能不能编,**并且限时**。
+ * 安卓/iOS 上 isConfigSupported 不是纯查询:系统会真的去实例化一个硬编码器来试,
+ * 个别机型会长时间不返回(媒体服务被占满时尤其明显)。这里 1.5s 不返回就按「探测不到」处理,
+ * 让调用方尽早放弃 —— 否则表现就是进度停在「正在探测本机编码能力」不动。
+ * 返回 TIMED_OUT 表示「探测器本身没响应」,与「明确不支持(false)」要区分开:
+ * 前者说明再试其他组合也没意义,应当直接改走兼容路径。 */
+const ENCODER_PROBE_TIMEOUT_MS = 1500;
+async function probeVideoConfig(cfg: any): Promise<boolean | TimedOut> {
+  try {
+    const r = await raceTimeout(Promise.resolve(WebVideoEncoder.isConfigSupported(cfg)), ENCODER_PROBE_TIMEOUT_MS);
+    if (r === TIMED_OUT) return TIMED_OUT;
+    return !!(r && r.supported);
+  } catch { return false; } // 该组合不被支持
+}
+
+/* 整轮探测的总护栏:15s / 40 次。正常机器(桌面 Chrome)几十次探测合计只要几十毫秒,
+ * 到不了这两个上限;它们只在「编码器明显有问题」的机器上生效。 */
+const PROBE_BUDGET_MS = 15000;
+const PROBE_MAX_COUNT = 40;
+
 /* 编码方案(plan)= codec string + 实际编码尺寸 + 帧率 + 码率。
  * 相比原来「只挑 codec string、尺寸固定为动画原始分辨率」,这里允许编码尺寸小于原始尺寸:
  * 手机的 H.264 硬编码器普遍不支持 4K(甚至只到 1080p),原来会直接报「不支持该配置」而整段导出失败。 */
@@ -6809,6 +6915,8 @@ async function resolveH264Plan(w: number, h: number, fps: number, reqScale = 1):
   const ladder = H264_SCALE_LADDER.filter((s) => s <= reqScale + 1e-6);
   const fpsList = fps > 30 ? [fps, 30] : [fps];
   const tried = new Set<string>();
+  const deadline = performance.now() + PROBE_BUDGET_MS;
+  let probes = 0;
   for (const scale of (ladder.length ? ladder : [1])) {
     const cw = evenDim(w * scale), ch = evenDim(h * scale);
     const bitrate = bitrateFor(cw, ch, w, h);
@@ -6822,11 +6930,14 @@ async function resolveH264Plan(w: number, h: number, fps: number, reqScale = 1):
       for (let i = start; i < AVC_LEVELS.length; i++) {
         const idc = AVC_LEVELS[i][1].toString(16).padStart(2, '0');
         for (const prof of profiles) {
+          /* 探测次数与总耗时都必须封顶:没有上限时一轮最坏要试近 300 个组合,
+           * 手机上每次探测都要真的起一次硬编码器,整段可能耗掉几十秒到几分钟(看着就是卡死)。 */
+          if (probes >= PROBE_MAX_COUNT || performance.now() > deadline) return null;
+          probes++;
           const codec = 'avc1.' + prof + idc;
-          try {
-            const r = await WebVideoEncoder.isConfigSupported({ codec, width: cw, height: ch, bitrate, framerate: f });
-            if (r && r.supported) return { codec, width: cw, height: ch, fps: f, scale: cw / w, bitrate };
-          } catch { /* 该组合不被支持,继续试下一档 */ }
+          const ok = await probeVideoConfig({ codec, width: cw, height: ch, bitrate, framerate: f });
+          if (ok === TIMED_OUT) return null; // 探测器不响应:直接改走兼容路径,别再一轮轮试
+          if (ok) return { codec, width: cw, height: ch, fps: f, scale: cw / w, bitrate };
         }
       }
     }
@@ -6854,6 +6965,12 @@ type MuxerLike = { addVideoChunk: (chunk: any, meta: any) => void; addAudioChunk
 /* 「本机编不了这个配置」专用错误:与导出中途的其他故障区分开 ——
  * 前者可以自动降一档分辨率重试或改走兼容格式,后者只能如实报错。 */
 class EncoderConfigError extends Error {}
+
+/* flush 的超时上限:编码器正常工作时 flush 只是把队列里剩下几帧吐出来(秒级);
+ * 60s 不是性能预期,而是「已经不正常了」的判定线 —— 到了就报错,不要让用户对着 99% 干等。
+ * 音频侧的队列短得多,给 20s。 */
+const VIDEO_FLUSH_TIMEOUT_MS = 60000;
+const AUDIO_FLUSH_TIMEOUT_MS = 20000;
 
 /* 统一的 WebCodecs 编码驱动:
  * ① 开跑前用 isConfigSupported 校验 codec / 分辨率,失败给出可读原因;
@@ -6887,15 +7004,23 @@ async function runWebCodecsExport(
   }
 
   try {
-    try {
-      const chk = await WebVideoEncoder.isConfigSupported({ codec, width: w, height: h, bitrate, framerate: fr });
-      if (!chk || !chk.supported) throw new Error('编码器拒绝该配置');
-    } catch (e) {
-      /* 走 EncoderConfigError 而不是普通 Error:调用方据此区分「本机编不了这个尺寸」
-       * 与「导出过程中出错」,前者可以自动降一档重试或改走兼容路径。 */
-      throw new EncoderConfigError('H.264 编码配置不受支持(' + avcProfileLevelName(codec) + ', ' + w + '×' + h + '): ' + ((e as Error).message || e));
+    const chk = await probeVideoConfig({ codec, width: w, height: h, bitrate, framerate: fr });
+    /* 探测器本身没响应:说明本机的媒体编码服务已经不可用,再试别的组合也会一路超时,
+     * 直接按「配置不可用」抛出,让调用方走兼容录制 / MJPEG 路径(而不是原地卡住)。 */
+    if (chk === TIMED_OUT) {
+      throw new EncoderConfigError('本机 H.264 编码器没有响应(能力探测超时,'
+        + avcProfileLevelName(codec) + ', ' + w + '×' + h + ')。请改用电脑上的 Chrome / Edge 导出,或勾选「透明背景」导出 AVI。');
     }
-    videoEncoder.configure({ codec, width: w, height: h, bitrate, framerate: fr });
+    if (!chk) {
+      throw new EncoderConfigError('H.264 编码配置不受支持(' + avcProfileLevelName(codec) + ', ' + w + '×' + h + ')');
+    }
+    try {
+      videoEncoder.configure({ codec, width: w, height: h, bitrate, framerate: fr });
+    } catch (e) {
+      /* 少数浏览器会先答「支持」再在 configure 时拒绝(见 H.264 选级那段注释):
+       * 归一到 EncoderConfigError,调用方据此自动降一档重试 / 改走兼容路径。 */
+      throw new EncoderConfigError('H.264 编码器拒绝该配置(' + w + '×' + h + '): ' + ((e as Error).message || e));
+    }
     // AAC-LC(mp4a.40.2)+ 48kHz:采样率必须与 exportVideoMp4 的重采样目标、muxer 里 audio.sampleRate 完全一致,
     // 对不上会出现音调偏移或时长漂移;192 kbps 对音效足够,声道数跟随素材(最多 2)。
     if (audioEncoder && audioSrc) audioEncoder.configure({ codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: audioSrc.numCh, bitrate: 192000 });
@@ -6924,15 +7049,26 @@ async function runWebCodecsExport(
       if (encError) throw encError; // 编码器已因错误关闭:抛出真实原因,而不是 closed codec
       if (videoEncoder.state !== 'configured') throw encError || new Error('H.264 编码器已关闭(state=' + videoEncoder.state + ')');
       await encodeFrame(videoEncoder, i);
-      // 每 12 帧刷新一次进度并 setTimeout(0) 让出一次事件循环:
-      // 逐帧渲染是同步重活,不让出的话导出期间取消按钮和进度条完全没有响应。
-      if (i % 12 === 0) { onProgress(Math.round((i / totalFrames) * 100), '正在编码帧 ' + (i + 1) + ' / ' + totalFrames); await new Promise((r) => setTimeout(r, 0)); }
+      /* 每 12 帧刷新一次进度并 setTimeout(0) 让出一次事件循环:
+       * 逐帧渲染是同步重活,不让出的话导出期间取消按钮和进度条完全没有响应。
+       * 前两帧额外回报一次:光栅化路径上一帧可能要几百毫秒到几秒,第一帧就给出反馈
+       * 才能让用户看见"确实在跑",而不是对着 0% + 「正在初始化渲染器」猜是不是死了。 */
+      if (i < 2 || i % 12 === 0) { onProgress(Math.round((i / totalFrames) * 100), '正在编码帧 ' + (i + 1) + ' / ' + totalFrames); await new Promise((r) => setTimeout(r, 0)); }
     }
 
     // flush 不能省:编码器内部还有排队中的帧,不 flush 就拿不到最后几个 chunk。
-    // flush 之后要再查一次错误回调 —— 有些编码错误只在收尾时才暴露出来。
-    if (audioEncoder) { await audioEncoder.flush(); if (encError) throw encError; }
-    await videoEncoder.flush();
+    // 之后要再查一次错误回调 —— 有些编码错误只在收尾时才暴露出来。
+    // flush 同时必须限时:个别硬编码器"收帧不吐帧"时 flush 永不 settle(进度会停在高位不动)。
+    if (audioEncoder) {
+      const af = await raceTimeout(audioEncoder.flush(), AUDIO_FLUSH_TIMEOUT_MS);
+      if (af === TIMED_OUT) throw new Error('音频编码器没有响应(AAC flush 超时):请重试,或在电脑上导出');
+      if (encError) throw encError;
+    }
+    const vf = await raceTimeout(videoEncoder.flush(), VIDEO_FLUSH_TIMEOUT_MS);
+    if (vf === TIMED_OUT) {
+      throw new Error('H.264 编码器没有响应(flush 超时,' + w + '×' + h + '):本机硬编码器可能无法胜任该规格。'
+        + '请把「分辨率」改成更低的档位,或在电脑上的 Chrome / Edge 导出。');
+    }
     if (encError) throw encError;
   } finally {
     try { videoEncoder.close(); } catch { /* ignore */ }
@@ -6946,54 +7082,81 @@ function findAudioAsset(): string | null {
   return def?.audioUrl ?? null;
 }
 
+/* 音频相关的超时上限。音轨只是画面之外的附加物:拿不到就当「这段导出没有音轨」,
+ * 绝不让它把整段导出钉死在进度 0%(手机上 decodeAudioData 偶发不回调、OfflineAudioContext
+ * 渲染卡住都属此类)。 */
+const AUDIO_FETCH_TIMEOUT_MS = 15000;
+const AUDIO_DECODE_TIMEOUT_MS = 20000;
+const AUDIO_RESAMPLE_TIMEOUT_MS = 30000;
+/* canvas.toBlob 的回调上限(MJPEG 回退路径逐帧用) */
+const CANVAS_TOBLOB_TIMEOUT_MS = 15000;
+
 /* 解码音效文件为浮点 PCM:每声道一个 Float32Array,取值 -1..1。
  * buf.slice(0) 是必需的:decodeAudioData 会「分离(detach)」传入的 ArrayBuffer,直接传 res.arrayBuffer()
  * 会让这块内存后续不可用。
  * 用临时 AudioContext 解码后立即 close():浏览器对同时存在的 AudioContext 数量有上限(约 6 个),
- * 泄漏会连带把预览音频一起搞哑。任何失败(404、格式不支持)都返回 null,导出继续但不带音轨。 */
+ * 泄漏会连带把预览音频一起搞哑 —— 所以 close() 放在 finally,超时/报错路径也必须关。
+ * 任何失败(404、格式不支持、超时)都返回 null,导出继续但不带音轨。 */
 async function decodeAudio(dataUrl: string): Promise<{ channels: Float32Array[]; sampleRate: number } | null> {
+  let ac: any = null;
   try {
-    const res = await fetch(dataUrl);
-    const buf = await res.arrayBuffer();
+    const res = await raceTimeout(fetch(dataUrl), AUDIO_FETCH_TIMEOUT_MS);
+    if (res === TIMED_OUT) return null;
+    const buf = await raceTimeout(res.arrayBuffer(), AUDIO_FETCH_TIMEOUT_MS);
+    if (buf === TIMED_OUT) return null;
     const ACtor = (window.AudioContext || (window as any).webkitAudioContext);
-    const ac = new ACtor();
-    const ab = await ac.decodeAudioData(buf.slice(0));
+    ac = new ACtor();
+    const ab = await raceTimeout(Promise.resolve(ac.decodeAudioData(buf.slice(0))), AUDIO_DECODE_TIMEOUT_MS);
+    if (ab === TIMED_OUT) return null;
     const channels: Float32Array[] = [];
     for (let c = 0; c < ab.numberOfChannels; c++) channels.push(ab.getChannelData(c));
-    const out = { channels, sampleRate: ab.sampleRate };
-    ac.close();
-    return out;
-  } catch { return null; }
+    return { channels, sampleRate: ab.sampleRate };
+  } catch {
+    return null;
+  } finally {
+    try { ac?.close(); } catch { /* ignore */ }
+  }
 }
 
 /* 用 OfflineAudioContext 重采样到目标采样率(MP4 的 AAC 轨固定 48000)。
  * 采样率相同则直接返回原数组(不复制);输出长度按 toRate/fromRate 比例取整,末尾可能有不到一个采样的零头,
- * 由调用方按视频时长截断 / 补静音。 */
-async function resampleTo(channels: Float32Array[], fromRate: number, toRate: number): Promise<Float32Array[]> {
+ * 由调用方按视频时长截断 / 补静音。
+ * 超时同样返回 null(= 本次导出不带音轨):OfflineAudioContext.startRendering 在个别手机上
+ * 会因为音频线程忙碌而长时间不 resolve,等它等于让导出卡在「初始化渲染器」。 */
+async function resampleTo(channels: Float32Array[], fromRate: number, toRate: number): Promise<Float32Array[] | null> {
   if (fromRate === toRate) return channels;
-  const numCh = channels.length;
-  const len = channels[0].length;
-  const off = new OfflineAudioContext(numCh, Math.ceil((len * toRate) / fromRate), toRate);
-  const src = off.createBufferSource();
-  const buf = off.createBuffer(numCh, len, fromRate);
-  for (let c = 0; c < numCh; c++) buf.copyToChannel(channels[c] as Float32Array<ArrayBuffer>, c);
-  src.buffer = buf;
-  src.connect(off.destination);
-  src.start();
-  const rendered = await off.startRendering();
-  const out: Float32Array[] = [];
-  for (let c = 0; c < rendered.numberOfChannels; c++) out.push(rendered.getChannelData(c));
-  return out;
+  try {
+    const numCh = channels.length;
+    const len = channels[0].length;
+    const off = new OfflineAudioContext(numCh, Math.ceil((len * toRate) / fromRate), toRate);
+    const src = off.createBufferSource();
+    const buf = off.createBuffer(numCh, len, fromRate);
+    for (let c = 0; c < numCh; c++) buf.copyToChannel(channels[c] as Float32Array<ArrayBuffer>, c);
+    src.buffer = buf;
+    src.connect(off.destination);
+    src.start();
+    const rendered = await raceTimeout(off.startRendering(), AUDIO_RESAMPLE_TIMEOUT_MS);
+    if (rendered === TIMED_OUT) return null;
+    const out: Float32Array[] = [];
+    for (let c = 0; c < rendered.numberOfChannels; c++) out.push(rendered.getChannelData(c));
+    return out;
+  } catch {
+    return null;
+  }
 }
 
 /* AAC 编码能力探测(MP4 音轨)。
  * 原来直接 configure('mp4a.40.2'):不支持 AAC 的浏览器会在这一步抛错,结果是**整段导出失败**,
  * 而用户其实只是拿不到音轨。现在先探测,不支持就退回「无声导出」并在浮层里说明。
- * AVI 的音频走自包含的 PCM,完全不经过这里。 */
+ * AVI 的音频走自包含的 PCM,完全不经过这里。探测同样限时并在超时后按「不支持」处理。 */
 async function aacSupported(numCh: number): Promise<boolean> {
   if (!WebAudioEncoder || !WebAudioData) return false;
   try {
-    const r = await WebAudioEncoder.isConfigSupported({ codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: numCh, bitrate: 192000 });
+    const r = await raceTimeout(
+      Promise.resolve(WebAudioEncoder.isConfigSupported({ codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: numCh, bitrate: 192000 })),
+      ENCODER_PROBE_TIMEOUT_MS,
+    );
+    if (r === TIMED_OUT) return false;
     return !!(r && r.supported);
   } catch { return false; }
 }
@@ -7050,7 +7213,11 @@ function downloadBlob(blob: Blob, filename: string) {
 async function exportVideoMp4(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void | Promise<void>, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, plan: H264Plan, animFrameOf: (i: number) => number = (i) => data.ip + i) {
   if (!WebVideoEncoder || !WebVideoFrame) throw new Error('当前浏览器不支持 WebCodecs 视频编码(请用 Chrome/Edge)');
   const w = plan.width, h = plan.height;
+  /* 先回报一次阶段:音轨解码 + 重采样在手机上可能要几秒(还要探测 AAC),
+   * 这段时间界面上如果还写着「正在初始化渲染器」,用户就会以为卡死了。
+   * 有音轨才提音轨,没有就直接说在准备编码器。 */
   const audioUrl = findAudioAsset();
+  onProgress(0, audioUrl ? '正在准备音轨…' : '正在准备编码器…');
   const audioInfo = audioUrl ? await decodeAudio(audioUrl) : null;
   const audioChannels = audioInfo ? await resampleTo(audioInfo.channels, audioInfo.sampleRate, 48000) : null;
   // 声道数上限 2:导出的 AAC 轨只声明立体声,多声道素材也只取前两路
@@ -7520,6 +7687,8 @@ async function buildPcm16(data: any, totalFrames: number, fr: number): Promise<{
  * 两条路都是「先把所有帧收进内存,最后一次性组装 AVI」,内存占用与帧数成正比。
  * 取消靠逐帧循环里的 exportCancelRequested 检查点。 */
 async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void | Promise<void>, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, mode: 'dib' | 'mjpeg', animFrameOf: (i: number) => number = (i) => data.ip + i) {
+  // 阶段回报(同 MP4):音轨准备 + 逐帧处理,先让浮层说清当前在做什么
+  onProgress(0, findAudioAsset() ? '正在准备音轨…' : '正在准备帧渲染…');
   const { pcm16, numCh, audioRate } = await buildPcm16(data, totalFrames, fr);
 
   let blob: Blob;
@@ -7536,7 +7705,7 @@ async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame:
       // 透明只能走 getImageData 直读像素:canvas 的 toBlob 只给 JPEG/PNG(JPEG 无 alpha),
       // 而这里要的是「预乘 alpha、自下而上」的 DIB 布局,转换在 rgbaToBgraBottomUp 里完成
       bgraFrames.push(rgbaToBgraBottomUp(ctx.getImageData(0, 0, data.w, data.h), data.w, data.h));
-      if (i % 12 === 0) { onProgress(Math.round((i / totalFrames) * 100), '正在处理帧 ' + (i + 1) + ' / ' + totalFrames); await new Promise((r) => setTimeout(r, 0)); }
+      if (i < 2 || i % 12 === 0) { onProgress(Math.round((i / totalFrames) * 100), '正在处理帧 ' + (i + 1) + ' / ' + totalFrames); await new Promise((r) => setTimeout(r, 0)); }
     }
     onProgress(99, '帧处理完成,正在组装 AVI(无压缩透明)…');
     blob = buildAviDib(data.w, data.h, fr, bgraFrames, pcm16, numCh, audioRate);
@@ -7549,9 +7718,14 @@ async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame:
       await ensureSeqDecoded(Math.round(animFrame));
       await renderFrame(animFrame);
       // JPEG 质量 0.92:MJPEG 每帧独立压缩,质量给足以减少色度毛边,同时别把体积推回 PNG 量级
-      const b = await new Promise<Blob>((res, rej) => canvas.toBlob((x) => (x ? res(x) : rej(new Error('toBlob 失败'))), 'image/jpeg', 0.92));
+      // toBlob 同样限时:内存吃紧时它的回调可能永远不触发(表现和"卡住"完全一样)。
+      const b = await raceTimeout(
+        new Promise<Blob>((res, rej) => canvas.toBlob((x) => (x ? res(x) : rej(new Error('toBlob 失败'))), 'image/jpeg', 0.92)),
+        CANVAS_TOBLOB_TIMEOUT_MS,
+      );
+      if (b === TIMED_OUT) throw new Error('画布导出 JPEG 失败(toBlob 超时,第 ' + (i + 1) + ' 帧):请改用 MP4,或在电脑上导出');
       jpegFrames.push(new Uint8Array(await b.arrayBuffer()));
-      if (i % 12 === 0) { onProgress(Math.round((i / totalFrames) * 100), '正在处理帧 ' + (i + 1) + ' / ' + totalFrames); await new Promise((r) => setTimeout(r, 0)); }
+      if (i < 2 || i % 12 === 0) { onProgress(Math.round((i / totalFrames) * 100), '正在处理帧 ' + (i + 1) + ' / ' + totalFrames); await new Promise((r) => setTimeout(r, 0)); }
     }
     onProgress(99, '帧处理完成,正在组装 AVI…');
     blob = buildAviMjpeg(data.w, data.h, fr, jpegFrames, pcm16, numCh, audioRate);
@@ -7565,6 +7739,8 @@ async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame:
  * 无 MJPEG 的色度毛边问题。strf 附加 avcC,帧数据为 AVCC 长度前缀格式。 */
 async function exportVideoAviH264(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void | Promise<void>, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, plan: H264Plan, animFrameOf: (i: number) => number = (i) => data.ip + i) {
   if (!WebVideoEncoder || !WebVideoFrame) throw new Error('当前浏览器不支持 H.264 编码(请用 Chrome/Edge)');
+  // 阶段回报(同 MP4):音轨准备走 PCM,先让浮层说清当前在做什么
+  onProgress(0, findAudioAsset() ? '正在准备音轨…' : '正在准备编码器…');
   const { pcm16, numCh, audioRate } = await buildPcm16(data, totalFrames, fr);
   // 编码尺寸取自编码方案:AVI 的 strf / avih 都必须声明「真正编码出来的尺寸」,
   // 与 MP4 一样支持手机等机型的自动降档(降档后写进容器头的也是降档尺寸)
@@ -7630,6 +7806,9 @@ async function exportVideoAviH264(data: any, canvas: HTMLCanvasElement, renderFr
  *   ② 不挂音轨(音轨要再把 WebAudio 推成一条媒体流,风险与收益不成比例)。
  * captureStream(0) 表示「不自动采样,等 requestFrame() 推帧」:只有推帧那一刻的画面会被录进去,
  * 所以录到的就是逐帧渲染的结果,不会掺入浏览器自己采样的中间态。 */
+/* 录制器 stop 之后等 onstop 的上限:超过就认为这个内核的录制能力不可用(见调用点注释) */
+const RECORDER_STOP_TIMEOUT_MS = 20000;
+
 function pickRecorderMime(): string | null {
   try {
     const MR = (window as any).MediaRecorder;
@@ -7664,7 +7843,12 @@ async function exportVideoRecorder(canvas: HTMLCanvasElement, renderFrame: (n: n
   const stopped = new Promise<void>((resolve) => { rec.onstop = () => resolve(); });
 
   onProgress(0, '正在兼容录制(按真实速度,约 ' + Math.ceil(totalFrames / fr) + ' 秒)…');
-  rec.start();
+  try {
+    rec.start();
+  } catch (e) {
+    try { track.stop(); } catch { /* ignore */ }
+    throw new Error('无法开始画布录制(MediaRecorder.start 失败):' + ((e as Error).message || e));
+  }
   const frameMs = 1000 / fr;
   const t0 = performance.now();
   try {
@@ -7680,13 +7864,20 @@ async function exportVideoRecorder(canvas: HTMLCanvasElement, renderFrame: (n: n
        * 渲染本身比 16ms 慢时(手机上常见)不做补偿 —— 那只会让录制时间更长,不影响画面正确性。 */
       const wait = t0 + (i + 1) * frameMs - performance.now();
       if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-      if (i % 12 === 0) onProgress(Math.round((i / totalFrames) * 100), '正在兼容录制帧 ' + (i + 1) + ' / ' + totalFrames);
+      // 前两帧也回报一次:第一帧之前可能有一段"什么都没发生"的空窗,先给出反馈
+      if (i < 2 || i % 12 === 0) onProgress(Math.round((i / totalFrames) * 100), '正在兼容录制帧 ' + (i + 1) + ' / ' + totalFrames);
     }
   } finally {
     try { if (rec.state !== 'inactive') rec.stop(); } catch { /* ignore */ }
     track.stop();
   }
-  await stopped;
+  /* 录制器的 onstop 在个别内核上不会回调(录制被系统静默掐断时):
+   * 不设上限就会永远停在这一步,所以超时后如实报错,并给出可用的替代路径。 */
+  const stoppedOk = await raceTimeout(stopped, RECORDER_STOP_TIMEOUT_MS);
+  if (stoppedOk === TIMED_OUT) {
+    throw new Error('兼容录制结束时浏览器没有回调(MediaRecorder.stop 超时):本机录制能力不稳定,'
+      + '请改用电脑上的 Chrome / Edge 导出,或勾选「透明背景」导出 AVI。');
+  }
   const isMp4 = mime.indexOf('mp4') !== -1;
   const blob = new Blob(chunks, { type: isMp4 ? 'video/mp4' : 'video/webm' });
   if (!blob.size) throw new Error('兼容录制没有产生任何数据(浏览器可能禁用了画布录制)');
@@ -7819,7 +8010,9 @@ function base64ToBytes(b64: string): Uint8Array | null {
   }
 }
 
-/* 光栅化用字体 CSS:全部用 blob URL 引用(见上)。每次导出只构建一次,导出结束统一释放。 */
+/* 光栅化用字体 CSS:全部用 blob URL 引用(见上)。每次导出只构建一次,导出结束统一释放。
+ * 单个字体取不回只是字形回退,因此每个 fetch 都限时并跳过失败项 —— 绝不让字体拖住整段导出。 */
+const FONT_FETCH_TIMEOUT_MS = 10000;
 async function buildSvgRasterFontCss(list: any[]): Promise<string> {
   let css = '';
   const seen = new Set<string>();
@@ -7844,8 +8037,8 @@ async function buildSvgRasterFontCss(list: any[]): Promise<string> {
       const ttfUrl = resolveFontUrl(fdef.fFamily, fdef.fName);
       const url = woff2Url || ttfUrl;
       if (!url) continue;
-      const buf = await fetchFontBinary(url);
-      if (!buf || !looksLikeFontBuffer(buf)) continue;
+      const buf = await raceTimeout(fetchFontBinary(url), FONT_FETCH_TIMEOUT_MS);
+      if (buf === TIMED_OUT || !buf || !looksLikeFontBuffer(buf)) continue;
       const mime = /woff2/.test(url) ? 'font/woff2' : 'font/ttf';
       uri = fontBytesToBlobUrl(buf, mime);
     }
@@ -7866,21 +8059,43 @@ let svgRasterLastKey = '';
 let svgRasterLastImg: HTMLImageElement | null = null;
 
 /* 外链图片 → data URI 缓存(SVG 作为 <img> 加载时不能引用外部资源) */
-const svgRasterImageCache = new Map<string, string>();
+const RASTER_IMAGE_TIMEOUT_MS = 8000;
+/* 把一帧 SVG 交给 <img> 解码的等待上限(见 rasterizeSvgFrameToCtx 里的注释) */
+const RASTER_LOAD_TIMEOUT_MS = 12000;
+/* null 表示「这张图取不回来」(404 / 超时):失败也要缓存,否则每一帧都会对同一个坏地址重试,
+ * 在手机上就是每帧白等几秒,表现和卡死无异。 */
+const svgRasterImageCache = new Map<string, string | null>();
 /* 外链图片 → data URI 并缓存(同一张图整个导出期间只读一次)。
  * 必须内联的原因:SVG 以 <img> 加载时是「禁止外部资源」的独立文档,外部 http/blob 图片会被静默丢弃(画面缺图)。 */
-async function svgRasterInlineImage(href: string): Promise<string> {
-  const hit = svgRasterImageCache.get(href);
-  if (hit) return hit;
-  const blob = await fetch(href).then((r) => r.blob());
-  const data = await new Promise<string>((resolve, reject) => {
-    const fr = new FileReader();
-    fr.onload = () => resolve(String(fr.result));
-    fr.onerror = () => reject(new Error('读取图片失败'));
-    fr.readAsDataURL(blob);
-  });
+async function svgRasterInlineImage(href: string): Promise<string | null> {
+  if (svgRasterImageCache.has(href)) return svgRasterImageCache.get(href) ?? null;
+  let data: string | null = null;
+  try {
+    const blob = await raceTimeout(
+      fetch(href).then((r) => (r.ok ? r.blob() : Promise.reject(new Error('HTTP ' + r.status)))),
+      RASTER_IMAGE_TIMEOUT_MS,
+    );
+    if (blob !== TIMED_OUT) {
+      const read = await raceTimeout(new Promise<string>((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(String(fr.result));
+        fr.onerror = () => reject(new Error('读取图片失败'));
+        fr.readAsDataURL(blob);
+      }), RASTER_IMAGE_TIMEOUT_MS);
+      if (read !== TIMED_OUT) data = read;
+    }
+  } catch { data = null; }
   svgRasterImageCache.set(href, data);
   return data;
+}
+
+/* 一次导出结束后释放栅格化用的图片缓存与上一帧的图片:
+ * 黑潮爆破这类动画会把上百张 data URI(合计几十 MB)留在内存里,连点几次导出就会持续堆积,
+ * 手机上的标签页很容易因此被系统回收(表现又是"卡住")。 */
+function releaseSvgRasterImageCache() {
+  svgRasterImageCache.clear();
+  svgRasterLastKey = '';
+  svgRasterLastImg = null;
 }
 
 /* 把当前已渲染到 DOM 的一帧 SVG 光栅化并画到目标画布 */
@@ -7937,11 +8152,11 @@ async function rasterizeSvgFrameToCtx(
   for (const im of imgs) {
     const href = im.getAttributeNS(XLINK, 'href') || im.getAttribute('href') || '';
     if (!href || href.startsWith('data:')) continue;
-    try {
-      const data = await svgRasterInlineImage(href);
-      im.setAttributeNS(XLINK, 'href', data);
-      im.setAttribute('href', data);
-    } catch { /* 单张图片失败不阻断整帧 */ }
+    const data = await svgRasterInlineImage(href);
+    // 取不回(404 / 超时)就先保留原地址:渲染时会静默丢这张图,但整帧与整段导出继续往下走
+    if (!data) continue;
+    im.setAttributeNS(XLINK, 'href', data);
+    im.setAttribute('href', data);
   }
   // 叠加序列调色用的是 SVG filter(feColorMatrix),滤镜定义挂在站点的隐藏 <svg> 里。
   // 序列化出来的这份 SVG 会被当作「独立文档」用 <img> 加载,看不到外部文档的滤镜定义,
@@ -7971,12 +8186,16 @@ async function rasterizeSvgFrameToCtx(
     const img = new Image();
     img.width = w;
     img.height = h;
-    const loaded = await new Promise<boolean>((resolve) => {
+    /* ⚠ 必须限时:SVG 作为 <img> 加载时,个别内核(部分安卓 WebView / 三星内核)在
+     * SVG 内含 blob: 字体、或内联图片很大时既不触发 load 也不触发 error ——
+     * 这个 Promise 就永远不 settle,导出会永久停在第 0 帧(界面停在「正在初始化渲染器」0%)。
+     * 超时按「这一帧栅格化失败」处理:连续失败到一定次数会由调用方抛出可读错误。 */
+    const loaded = await raceTimeout(new Promise<boolean>((resolve) => {
       img.onload = () => resolve(true);
       img.onerror = () => resolve(false);
       img.src = url;
-    });
-    if (!loaded) return false;
+    }), RASTER_LOAD_TIMEOUT_MS);
+    if (loaded !== true) return false;
     octx.drawImage(img, 0, 0, w, h);
     svgRasterLastKey = serialized;
     svgRasterLastImg = img;
@@ -8019,17 +8238,33 @@ async function exportVideo() {
   const formatLabel = (format === 'avi'
     ? (wantTransparent ? 'AVI · 无压缩透明' : 'AVI · H.264')
     : 'MP4 · H.264') + ' · ' + fr + 'fps' + (fr !== srcFps ? '(插值)' : '') + popupTag;
+  /* 兼容导出:遮罩源被共用的动画必须改用 SVG 渲染器逐帧光栅化(canvas 渲染器遮罩合成不正确)。
+   * 这个判定放在打开浮层之前 —— 手机上它决定"要不要提前告诉用户这段会慢",而不是让人对着
+   * 「正在初始化渲染器」猜。 */
+  const useRaster = needsSvgRasterExport(data);
+  const rasterMobileWarn = useRaster && IS_MOBILE
+    ? '该动画含共用轨道遮罩,手机上导出需要逐帧光栅化(每帧先把 SVG 转成位图),比桌面慢很多,可能要几分钟。'
+      + '进度会持续更新,请让页面保持在前台、不要锁屏(已申请屏幕常亮)。'
+    : undefined;
   const warn = wantTransparent
     ? '透明 AVI 为无压缩编码,预计文件约 ' + fmtSize(dibBytes) + ';已采用预乘 alpha(premultiplied),与 PotPlayer/Windows 渲染语义一致,半透明组件可正常显示。导出期间请勿关闭页面。'
-    : undefined;
+    : rasterMobileWarn;
   showExportOverlay({ formatLabel, warn });
 
   /* 手机上的无压缩透明 AVI:全部帧都要先在内存里排好(宽×高×4 字节 × 帧数),
    * 1080p 十秒就是 5 GB —— 手机标签页的内存配额远不到这个量级,必然崩。
-   * 这里提前拦下并说清楚怎么办,而不是让用户等几分钟后看到页面崩掉。 */
+   * 这里提前拦下并说清楚怎么办,而不是让用户等几分钟后看到页面崩掉。
+   * ⚠ 直接 throw 是错的:这句在下面的 try 之外,抛出会让 exporting 永远为 true、导出按钮永久禁用,
+   *   之后再点导出会直接 return(看起来就是"点了没反应")。所以走与失败一致的收尾路径。 */
   if (wantTransparent && IS_MOBILE && dibBytes > 8e8) {
-    throw new Error('手机上无法导出无压缩透明 AVI:预计文件 ' + fmtSize(dibBytes) + ',浏览器内存放不下。'
-      + '请改用 MP4 / AVI(取消勾选「透明背景」),或在电脑上导出透明版本。');
+    const msg = '手机上无法导出无压缩透明 AVI:预计文件 ' + fmtSize(dibBytes) + ',浏览器内存放不下。'
+      + '请改用 MP4 / AVI(取消勾选「透明背景」),或在电脑上导出透明版本。';
+    console.error('[导出错误]', msg);
+    finishExportOverlay('error', '导出失败', msg);
+    setStatus('导出失败: ' + msg, true);
+    exporting = false;
+    btnExport.disabled = false;
+    return;
   }
 
   /* 编码方案:按分辨率档位 + 本机能力选定「真正要编码的尺寸」。
@@ -8049,9 +8284,7 @@ async function exportVideo() {
     exportFormatTag.textContent = formatLabel
       + (lowRes ? ' → ' + plan.width + '×' + plan.height + '@' + plan.fps : '');
   }
-  updateExportProgress(0, '正在初始化渲染器…', '');
-  /* 兼容导出:遮罩源被共用的动画自动改用 SVG 渲染器逐帧光栅化(canvas 渲染器遮罩合成不正确) */
-  const useRaster = needsSvgRasterExport(data);
+  updateExportProgress(0, '正在准备导出渲染器…', '');
   let container: HTMLDivElement | null = null;
   let renderAnim: AnimationItem | null = null;
   let popupExportContainer: HTMLDivElement | null = null;
@@ -8065,7 +8298,7 @@ async function exportVideo() {
   try {
     setStatus(wantTransparent
       ? '导出中: 已选透明背景,自动导出 AVI…'
-      : '导出中: 初始化渲染器…');
+      : '导出中: 正在准备导出渲染器…');
     /* 屏幕常亮:手机导出期间屏幕一黑,系统就会冻结/回收标签页,导出直接「卡住不动」。
      * 申请失败(不支持或被系统拒绝)不影响导出,所以这里不 await 结果。 */
     void acquireExportWakeLock();
@@ -8110,13 +8343,16 @@ async function exportVideo() {
       if (!canvas) throw new Error('无法创建渲染画布');
     }
     // 兼容导出的字体 <style>(只构建一次):主动画 + 弹窗的文字都要能在栅格化时正确排版
-    const rasterStyleTag = useRaster
-      ? svgRasterStyleTag(await buildSvgRasterFontCss([...(data?.fonts?.list ?? []), ...(withPopup ? popupData?.fonts?.list ?? [] : [])]))
+    // 整段构建也限时:字体只是画面细节,取不回来就用系统字体渲染,不能让导出等它
+    const rasterFontCss = useRaster
+      ? await raceTimeout(buildSvgRasterFontCss([...(data?.fonts?.list ?? []), ...(withPopup ? popupData?.fonts?.list ?? [] : [])]), FONT_FETCH_TIMEOUT_MS * 2)
       : '';
+    const rasterStyleTag = typeof rasterFontCss === 'string' ? svgRasterStyleTag(rasterFontCss) : '';
     // 弹窗合成:导出时若开启弹窗,用同一帧号驱动弹窗渲染器,叠加到主动画之上
     if (withPopup) {
-      // 弹窗文字要先注册自带字体(FontFace):否则量文本宽度时用的是系统字体,排版会错位
-      await loadEmbeddedFonts(popupData);
+      // 弹窗文字要先注册自带字体(FontFace):否则量文本宽度时用的是系统字体,排版会错位。
+      // 字体注册 + document.fonts.ready 都限时:弹窗字体缺失只是字形回退,不该拦住整段导出。
+      await raceTimeout(loadEmbeddedFonts(popupData), FONT_FETCH_TIMEOUT_MS);
       popupExportContainer = document.createElement('div');
       popupExportContainer.style.cssText = 'position:fixed;left:-10000px;top:0;width:' + w + 'px;height:' + h + 'px;';
       document.body.appendChild(popupExportContainer);
@@ -8168,6 +8404,11 @@ async function exportVideo() {
       for (let k = 0; k < d.length; k++) { h ^= d[k]; h = Math.imul(h, 16777619) >>> 0; }
       return h;
     };
+    /* 兼容导出时统计「成功/失败」的帧数:全失败说明本机根本栅格化不出这一套 SVG
+     * (不是慢,而是画不出来)。连续 3 帧一帧都没成功就抛可读错误,
+     * 免得用户对着永远不动的 0% 干等 —— 这是"卡在初始化渲染器"最后一道兜底。 */
+    let rasterOkFrames = 0;
+    let rasterFailFrames = 0;
     /* 每帧渲染回调,参数 n 是【动画帧号】(可为小数,由 animFrameOf 映射得到):
      * 顺序与 lottie 的 AnimationItem.renderFrame 保持一致 —— 先同步表达式与帧状态,再整帧强制重绘;
      * 主动画与弹窗各渲染一次,然后依次叠到合成画布(透明模式不铺背景,保留 alpha)。
@@ -8192,7 +8433,13 @@ async function exportVideo() {
         // 兼容导出:把主/弹窗这一帧的 SVG 各自光栅化后叠加(与 SVG 预览完全一致)
         const __tr = import.meta.env.DEV ? performance.now() : 0;
         const mainSvg = (renderAnim as any).renderer?.svgElement as SVGSVGElement | null;
-        if (mainSvg) await rasterizeSvgFrameToCtx(mainSvg, octx, w, h, rasterStyleTag);
+        const mainOk = mainSvg ? await rasterizeSvgFrameToCtx(mainSvg, octx, w, h, rasterStyleTag) : false;
+        if (mainOk) rasterOkFrames++; else rasterFailFrames++;
+        if (rasterOkFrames === 0 && rasterFailFrames >= 3) {
+          throw new Error('本机无法把这个动画的 SVG 帧转成位图(前 3 帧都失败):'
+            + '该动画含共用轨道遮罩,手机上必须逐帧光栅化,而当前浏览器在这个环节没有响应。'
+            + '请改用电脑上的 Chrome / Edge 导出,或换一个不含共用轨道遮罩的动画。');
+        }
         const popupSvg = popupExportAnim ? ((popupExportAnim as any).renderer?.svgElement as SVGSVGElement | null) : null;
         if (popupSvg) await rasterizeSvgFrameToCtx(popupSvg, octx, w, h, rasterStyleTag);
         // DEV 性能统计:把光栅化耗时(rasterMs)与整帧耗时(totalMs)累计到 window.__exportStats,
@@ -8318,6 +8565,8 @@ async function exportVideo() {
   // 并恢复导出前的预览播放状态(导出开始时被主动暂停,见 previewWasPlaying)。
   } finally {
     releaseSvgRasterFontBlobUrls();
+    // 栅格化用的图片 data URI 缓存(黑潮爆破这类动画几十 MB)在这里释放,否则连续导出会把内存堆爆
+    releaseSvgRasterImageCache();
     if (renderAnim) { try { renderAnim.destroy(); } catch { /* ignore */ } }
     if (container) container.remove();
     if (popupExportAnim) { try { popupExportAnim.destroy(); } catch { /* ignore */ } }
@@ -8325,6 +8574,10 @@ async function exportVideo() {
     // 恢复导出前的预览播放状态(含音频)
     if (previewWasPlaying && anim) { try { anim.play(); } catch { /* ignore */ } }
     releaseExportWakeLock();
+    /* 到这里导出真的结束了:停掉进度心跳,否则它会继续每秒重写 detail
+     * (把「导出完成」后面的说明文字覆盖成「已用时 Ns」)。 */
+    stopExportHeartbeat();
+    exportHeartbeatStart = 0;
     exporting = false;
     btnExport.disabled = false;
   }
