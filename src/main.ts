@@ -1675,6 +1675,11 @@ const exportDetail = $<HTMLElement>('exportDetail');
 const exportFormatTag = $<HTMLElement>('exportFormatTag');
 const exportWarn = $<HTMLElement>('exportWarn');
 const btnExportCancel = $<HTMLButtonElement>('btnExportCancel');
+/* 导出分辨率档位:auto = 由本机能力决定(移动端默认降到 1080p 级,桌面端保持原始分辨率) */
+const selRes = $<HTMLSelectElement>('selRes');
+/* 导出结束后才出现的两个动作按钮:保存/分享(手机把文件落到相册或「文件」)与重新下载(自动下载被拦截时兜底) */
+const btnExportSave = $<HTMLButtonElement>('btnExportSave');
+const btnExportRedownload = $<HTMLButtonElement>('btnExportRedownload');
 
 /* 按动画数据尺寸设置画布框,并计算适配缩放:
  *  contain 取较小的缩放比(完整装下,四周留白)、cover 取较大的(铺满容器,可能被裁)、none = 1。
@@ -6609,8 +6614,16 @@ function finishExportOverlay(kind: 'done' | 'error' | 'cancel', status: string, 
   exportDetail.textContent = detail;
   btnExportCancel.disabled = false;
   btnExportCancel.textContent = '关闭';
+  /* 完成态:把「保存/分享」「重新下载」两个按钮亮出来(有素材可给时)。
+   * 手机上下载经常是「提示完成了,但相册/文件里找不到」——这两个按钮就是兜底出口。 */
+  const hasFile = kind === 'done' && !!lastExportBlob;
+  btnExportSave.hidden = !(hasFile && canShareFile());
+  btnExportRedownload.hidden = !hasFile;
   window.clearTimeout(exportOverlayTimer);
-  if (kind !== 'error') {
+  /* 移动端完成态不自动关闭:自动下载在手机上未必落盘,用户需要时间点「保存到手机」。
+   * 失败态本来就不自动关(常驻,免得用户还没看清原因就消失了)。 */
+  const keepOpen = hasFile && IS_MOBILE;
+  if (kind !== 'error' && !keepOpen) {
     exportOverlayTimer = window.setTimeout(() => { exportOverlay.hidden = true; }, holdMs);
   }
 }
@@ -6622,6 +6635,30 @@ btnExportCancel.addEventListener('click', () => {
   exportCancelRequested = true;
   btnExportCancel.disabled = true;
   updateExportProgress(exportLastPct, '正在取消,请稍候…');
+});
+
+/* 「保存到手机」:优先走系统分享(Web Share Level 2)。
+ * 手机上这是把视频真正落到「相册 / 文件」里最可靠的方式 —— blob 下载在 iOS 上经常
+ * 只留下一个临时视图,系统播放器之外的 App 根本看不到文件。
+ * 必须是用户手势触发的调用,所以它挂在按钮上而不是导出结束时的自动逻辑上。
+ * 分享面板被用户取消(AbortError)不算失败,只有系统不支持才退回普通下载。 */
+btnExportSave.addEventListener('click', async () => {
+  if (!lastExportBlob) return;
+  const { blob, filename } = lastExportBlob;
+  try {
+    const file = new File([blob], filename, { type: blob.type || 'video/mp4' });
+    if (typeof navigator.share === 'function' && typeof navigator.canShare === 'function' && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: filename });
+      return;
+    }
+  } catch (e) {
+    if ((e as Error).name === 'AbortError') return; // 用户自己取消了分享面板
+  }
+  downloadBlob(blob, filename);
+});
+// 「重新下载」:自动下载被浏览器拦截 / 手机上没找到文件时,再触发一次
+btnExportRedownload.addEventListener('click', () => {
+  if (lastExportBlob) downloadBlob(lastExportBlob.blob, lastExportBlob.filename);
 });
 
 /* ---------- 图标(内联 SVG,不使用 emoji / 文字符号当图标) ----------
@@ -6637,11 +6674,58 @@ const ICON_CHECK =
   '<path d="M13.9 3.5a.95.95 0 0 1 .05 1.34l-6.5 7.4a.95.95 0 0 1-1.4.05L2.2 8.6a.95.95 0 1 1 1.33-1.36l3.15 3.08 5.83-6.64a.95.95 0 0 1 1.34-.18z"/>' +
   '</svg>';
 // 启动时一次性取出 WebCodecs 的四个构造器(浏览器不支持时都是 undefined,导出前据此回退)。
-// 这些 API 只在安全上下文(https / localhost)可用,所以 pickH264Codec 里还要额外判断 isSecureContext。
+// 这些 API 只在安全上下文(https / localhost)可用,所以 resolveH264Plan 里还要额外判断 isSecureContext。
 const WebVideoEncoder = (window as any).VideoEncoder;
 const WebAudioEncoder = (window as any).AudioEncoder;
 const WebVideoFrame = (window as any).VideoFrame;
 const WebAudioData = (window as any).AudioData;
+
+/* ---------- 运行环境能力探测(移动端加固) ----------
+ * 桌面 Chrome/Edge 的能力基本是「有或没有」两态,手机上却是连续谱:同样是 Chrome,
+ * 中低端机型只支持到 1080p 甚至 720p 的 H.264 硬编、不支持 AAC、内存只有桌面的十几分之一。
+ * 所以这里不假设任何能力,一律「先探测、不行就降级」,并把真实原因回显到浮层。 */
+/* 是否移动端。iPadOS 的 UA 伪装成 Macintosh,所以额外用 maxTouchPoints 兜一层。
+ * 只影响三件事:导出分辨率的默认档位、是否做逐帧像素自检、导出期间是否申请屏幕常亮。 */
+const IS_MOBILE = (() => {
+  try {
+    const ua = navigator.userAgent || '';
+    if (/Android|iPhone|iPod|Windows Phone|Mobile|HarmonyOS/i.test(ua)) return true;
+    return /Macintosh/.test(ua) && (navigator.maxTouchPoints ?? 0) > 1; // iPadOS
+  } catch { return false; }
+})();
+
+/* 完成态那个按钮的文案随端变:手机上走系统分享面板(能直接存进相册 / 发给别人),
+ * 桌面上是给「下载被拦截 / 想再存一份」用的兜底入口。 */
+btnExportSave.textContent = IS_MOBILE ? '保存到手机' : '分享 / 保存';
+/* 能力不足的设备提前告知 —— 等用户按了导出才说就晚了。
+ * 提示条会被 syncExportFormatUI 随格式切换重写,所以这里只在启动时写一次做首屏提示;
+ * 真正导出时浮层里还有带完整原因与建议的说明。 */
+if (!WebVideoEncoder || !window.isSecureContext) {
+  exportHint.textContent = '本机不支持 WebCodecs H.264:MP4 将改用兼容录制(无音轨),AVI 将改用 MJPEG';
+  exportHint.classList.add('warn');
+}
+
+/* 屏幕常亮(Wake Lock):手机导出少则几十秒、多则十几分钟,屏幕一黑系统就把标签页冻结,
+ * 表现是「进度卡住不动」或直接被系统杀掉。不支持 / 被拒绝都不影响导出,失败一律忽略。 */
+let exportWakeLock: any = null;
+async function acquireExportWakeLock(): Promise<void> {
+  try {
+    const wl = (navigator as any).wakeLock;
+    if (!wl || document.visibilityState !== 'visible') return;
+    exportWakeLock = await wl.request('screen');
+    if (exportWakeLock && typeof exportWakeLock.addEventListener === 'function') {
+      exportWakeLock.addEventListener('release', () => { exportWakeLock = null; });
+    }
+  } catch { exportWakeLock = null; }
+}
+function releaseExportWakeLock(): void {
+  try { if (exportWakeLock && typeof exportWakeLock.release === 'function') exportWakeLock.release(); } catch { /* ignore */ }
+  exportWakeLock = null;
+}
+// 回到前台时补申请一次(系统会在切走时自动释放常亮锁)
+document.addEventListener('visibilitychange', () => {
+  if (exporting && document.visibilityState === 'visible') void acquireExportWakeLock();
+});
 
 /* ---------- H.264(codec string)自动选级 ----------
  * WebCodecs 的 codec string 里写死了 AVC Level(原为 4.2 = 0x2A),而 Level 4.2 的
@@ -6686,21 +6770,65 @@ function avcMinLevelIndex(w: number, h: number, fps: number): number {
   return AVC_LEVELS.length - 1;
 }
 
-/* 选本机可用的 codec string:从规格算出的最低 Level 逐级上试(Level 4.0 直接用原来的
- * 4.2 字符串,避免 1080p 导出的既有行为发生变化),High 不行再退 Main / Baseline。 */
-async function pickH264Codec(w: number, h: number, fps: number): Promise<string | null> {
-  if (!WebVideoEncoder || !window.isSecureContext) return null;
-  let start = avcMinLevelIndex(w, h, fps);
-  if (AVC_LEVELS[start] && AVC_LEVELS[start][0] === '4.0') start = 4; // → 4.2(原行为)
-  const profiles = [AVC_PROFILE_HIGH, AVC_PROFILE_MAIN, AVC_PROFILE_BASELINE];
-  for (let i = start; i < AVC_LEVELS.length; i++) {
-    const idc = AVC_LEVELS[i][1].toString(16).padStart(2, '0');
-    for (const prof of profiles) {
-      const codec = 'avc1.' + prof + idc;
-      try {
-        const r = await WebVideoEncoder.isConfigSupported({ codec, width: w, height: h, bitrate: H264_BITRATE, framerate: fps });
-        if (r && r.supported) return codec;
-      } catch { /* 该组合不被支持,继续试下一档 */ }
+/* 编码方案(plan)= codec string + 实际编码尺寸 + 帧率 + 码率。
+ * 相比原来「只挑 codec string、尺寸固定为动画原始分辨率」,这里允许编码尺寸小于原始尺寸:
+ * 手机的 H.264 硬编码器普遍不支持 4K(甚至只到 1080p),原来会直接报「不支持该配置」而整段导出失败。 */
+type H264Plan = { codec: string; width: number; height: number; fps: number; scale: number; bitrate: number };
+
+/* 分辨率降级阶梯:从用户选的档位(或 auto 推出来的档位)往下试。
+ * 降档同时带来两个好处:硬编码器更可能接受,内存与编码耗时也成比例下降
+ * ——手机长导出最容易挂在「4K×60fps 满载跑十几分钟」上(过热降频、被系统回收)。 */
+const H264_SCALE_LADDER = [1, 0.75, 0.5, 0.375];
+
+/* H.264 用 4:2:0 色度采样,编码尺寸必须能被 2 整除;奇数宽高会被硬编码器直接拒绝。 */
+function evenDim(n: number): number { return Math.max(2, Math.round(n / 2) * 2); }
+
+/* auto 档位的基准缩放:桌面 = 原始分辨率(与既有行为完全一致);
+ * 移动端等比压到 1080p 级(不裁切、不改宽高比),避免手机上动辄十几分钟的满载导出。
+ * 用户在下拉里显式选了百分比就完全按所选走,这里不再插手。 */
+function baseExportScale(w: number, h: number): number {
+  if (!IS_MOBILE) return 1;
+  return Math.min(1, 1920 / w, 1080 / h);
+}
+
+/* 按编码尺寸折算码率:30 Mbps 是按 4K 定的,降到 1080p 还用 30 Mbps 只会白白撑大文件。
+ * 按像素数等比缩放;scale = 1 时严格等于 H264_BITRATE,保证桌面端导出结果一字不变。 */
+function bitrateFor(w: number, h: number, baseW: number, baseH: number): number {
+  const k = (w * h) / Math.max(1, baseW * baseH);
+  return Math.max(4_000_000, Math.round(H264_BITRATE * k));
+}
+
+/* 选编码方案:沿阶梯逐档降分辨率,每档从「规格算出的最低 Level」往上试(Level 4.0 直接用原来的
+ * 4.2 字符串,避免 1080p 导出的既有行为发生变化),High 不行再退 Main / Baseline,
+ * 一档分辨率全试不通就把帧率从 60 降到 30 再试。全部失败返回 null —— 由调用方改走兼容路径,
+ * 所以这里不抛异常,只如实回报「试过哪些组合」。 */
+async function resolveH264Plan(w: number, h: number, fps: number, reqScale = 1): Promise<H264Plan | null> {
+  /* 四个构造器缺一不可:VideoFrame 缺失时即便编码器存在也无法从画布取帧
+   * ——这里一并挡掉,让调用方直接改走兼容录制,而不是跑到一半抛「构造器不存在」。 */
+  if (!WebVideoEncoder || !WebVideoFrame || !window.isSecureContext) return null;
+  const ladder = H264_SCALE_LADDER.filter((s) => s <= reqScale + 1e-6);
+  const fpsList = fps > 30 ? [fps, 30] : [fps];
+  const tried = new Set<string>();
+  for (const scale of (ladder.length ? ladder : [1])) {
+    const cw = evenDim(w * scale), ch = evenDim(h * scale);
+    const bitrate = bitrateFor(cw, ch, w, h);
+    for (const f of fpsList) {
+      const key = cw + 'x' + ch + '@' + f;
+      if (tried.has(key)) continue;
+      tried.add(key);
+      let start = avcMinLevelIndex(cw, ch, f);
+      if (AVC_LEVELS[start] && AVC_LEVELS[start][0] === '4.0') start = 4; // → 4.2(与既有 1080p 行为一致)
+      const profiles = [AVC_PROFILE_HIGH, AVC_PROFILE_MAIN, AVC_PROFILE_BASELINE];
+      for (let i = start; i < AVC_LEVELS.length; i++) {
+        const idc = AVC_LEVELS[i][1].toString(16).padStart(2, '0');
+        for (const prof of profiles) {
+          const codec = 'avc1.' + prof + idc;
+          try {
+            const r = await WebVideoEncoder.isConfigSupported({ codec, width: cw, height: ch, bitrate, framerate: f });
+            if (r && r.supported) return { codec, width: cw, height: ch, fps: f, scale: cw / w, bitrate };
+          } catch { /* 该组合不被支持,继续试下一档 */ }
+        }
+      }
     }
   }
   return null;
@@ -6723,6 +6851,10 @@ function avcProfileLevelName(codec: string | null): string {
 // 这样 runWebCodecsExport 不必关心最终封装成 MP4 还是 AVI。
 type MuxerLike = { addVideoChunk: (chunk: any, meta: any) => void; addAudioChunk: (chunk: any, meta: any) => void };
 
+/* 「本机编不了这个配置」专用错误:与导出中途的其他故障区分开 ——
+ * 前者可以自动降一档分辨率重试或改走兼容格式,后者只能如实报错。 */
+class EncoderConfigError extends Error {}
+
 /* 统一的 WebCodecs 编码驱动:
  * ① 开跑前用 isConfigSupported 校验 codec / 分辨率,失败给出可读原因;
  * ② 编码器因故关闭时抛出 error 回调里的真实原因,而不是「closed codec」;
@@ -6733,15 +6865,12 @@ type MuxerLike = { addVideoChunk: (chunk: any, meta: any) => void; addAudioChunk
  *   onProgress(p, detail) 每 12 帧回调一次,p 是输出帧进度(0..100),不含封装与下载阶段;
  *   audio 为 null 表示本次导出没有音轨(AVI 的音频走 PCM,另行封装)。 */
 async function runWebCodecsExport(
-  muxer: MuxerLike, w: number, h: number, fr: number, totalFrames: number,
+  muxer: MuxerLike, plan: H264Plan, totalFrames: number,
   onProgress: (p: number, detail?: string) => void,
   encodeFrame: (enc: any, i: number) => Promise<void>,
   audio: { numCh: number; frames: number; sample: (planar: Float32Array, off: number, n: number) => void } | null,
 ): Promise<void> {
-  const codec = await pickH264Codec(w, h, fr);
-  if (!codec) {
-    throw new Error('当前浏览器/显卡不支持 ' + w + '×' + h + ' @' + fr + 'fps 的 H.264 编码(已试到 Level 6.2),请改用 Chrome/Edge,或降低分辨率/帧率');
-  }
+  const { codec, width: w, height: h, fps: fr, bitrate } = plan;
   let encError: any = null;
   const fail = (e: any) => { if (!encError) encError = e; };
   const videoEncoder = new WebVideoEncoder({
@@ -6759,12 +6888,14 @@ async function runWebCodecsExport(
 
   try {
     try {
-      const chk = await WebVideoEncoder.isConfigSupported({ codec, width: w, height: h, bitrate: H264_BITRATE, framerate: fr });
+      const chk = await WebVideoEncoder.isConfigSupported({ codec, width: w, height: h, bitrate, framerate: fr });
       if (!chk || !chk.supported) throw new Error('编码器拒绝该配置');
     } catch (e) {
-      throw new Error('H.264 编码配置不受支持(' + avcProfileLevelName(codec) + ', ' + w + '×' + h + '): ' + ((e as Error).message || e));
+      /* 走 EncoderConfigError 而不是普通 Error:调用方据此区分「本机编不了这个尺寸」
+       * 与「导出过程中出错」,前者可以自动降一档重试或改走兼容路径。 */
+      throw new EncoderConfigError('H.264 编码配置不受支持(' + avcProfileLevelName(codec) + ', ' + w + '×' + h + '): ' + ((e as Error).message || e));
     }
-    videoEncoder.configure({ codec, width: w, height: h, bitrate: H264_BITRATE, framerate: fr });
+    videoEncoder.configure({ codec, width: w, height: h, bitrate, framerate: fr });
     // AAC-LC(mp4a.40.2)+ 48kHz:采样率必须与 exportVideoMp4 的重采样目标、muxer 里 audio.sampleRate 完全一致,
     // 对不上会出现音调偏移或时长漂移;192 kbps 对音效足够,声道数跟随素材(最多 2)。
     if (audioEncoder && audioSrc) audioEncoder.configure({ codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: audioSrc.numCh, bitrate: 192000 });
@@ -6855,9 +6986,47 @@ async function resampleTo(channels: Float32Array[], fromRate: number, toRate: nu
   return out;
 }
 
+/* AAC 编码能力探测(MP4 音轨)。
+ * 原来直接 configure('mp4a.40.2'):不支持 AAC 的浏览器会在这一步抛错,结果是**整段导出失败**,
+ * 而用户其实只是拿不到音轨。现在先探测,不支持就退回「无声导出」并在浮层里说明。
+ * AVI 的音频走自包含的 PCM,完全不经过这里。 */
+async function aacSupported(numCh: number): Promise<boolean> {
+  if (!WebAudioEncoder || !WebAudioData) return false;
+  try {
+    const r = await WebAudioEncoder.isConfigSupported({ codec: 'mp4a.40.2', sampleRate: 48000, numberOfChannels: numCh, bitrate: 192000 });
+    return !!(r && r.supported);
+  } catch { return false; }
+}
+
+/* 导出失败时显示的一行「本机能力摘要」:让用户(和远程排障的人)一眼看清
+ * 是浏览器没有 WebCodecs、不是安全上下文,还是编码器不支持这个分辨率。 */
+function encodeSupportSummary(): string {
+  const parts: string[] = [];
+  parts.push('WebCodecs=' + (WebVideoEncoder && WebVideoFrame ? '有' : '无'));
+  parts.push('安全上下文=' + (window.isSecureContext ? '是' : '否'));
+  parts.push('音频编码=' + (WebAudioEncoder && WebAudioData ? '有' : '无'));
+  return parts.join(' · ');
+}
+
+/* 最近一次导出的产物。<a download> 在移动端(尤其 iOS)未必真的把文件落到「文件/相册」里,
+ * 所以导出完成后还会在浮层上给两个按钮:「保存到手机」(Web Share,可存进相册/发给别人)
+ * 与「重新下载」。两者都从这里取字节。 */
+let lastExportBlob: { blob: Blob; filename: string } | null = null;
+
+/* 本机是否支持用系统分享把文件交出去(移动端落地视频最可靠的一条路)。
+ * canShare 需要一个真实的 File 才能判,这里用 1 字节的占位文件探测能力,代价可忽略。 */
+function canShareFile(): boolean {
+  try {
+    if (typeof navigator.share !== 'function' || typeof navigator.canShare !== 'function') return false;
+    return navigator.canShare({ files: [new File([new Uint8Array(1)], 'prob.mp4', { type: 'video/mp4' })] });
+  } catch { return false; }
+}
+
 // 触发浏览器下载。blob URL 不能立刻 revoke:部分浏览器在大文件真正开始落盘前会被中断,
 // 所以延迟 10 秒释放;<a> 用完即从 DOM 移除,避免节点堆积。
 function downloadBlob(blob: Blob, filename: string) {
+  // 记住本次产物:浮层上的「保存/分享」「重新下载」要靠它再取一次
+  lastExportBlob = { blob, filename };
   // 开发模式:把同一份字节流上传到 dev server 落盘(tools/user-export.avi),
   // 用于分析真实导出的文件结构(仅 dev,不影响生产)
   if (import.meta.env.DEV) {
@@ -6878,14 +7047,17 @@ function downloadBlob(blob: Blob, filename: string) {
  * 音频先解码音效再重采样到 48kHz(与 AAC 轨声明一致),然后按视频时长截断 / 补静音,
  * 保证音轨与视频严格等长,导入剪辑软件不会音画不同步。
  * animFrameOf 负责把输出帧序号 i 映射到动画帧号。 */
-async function exportVideoMp4(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void | Promise<void>, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, animFrameOf: (i: number) => number = (i) => data.ip + i) {
+async function exportVideoMp4(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void | Promise<void>, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, plan: H264Plan, animFrameOf: (i: number) => number = (i) => data.ip + i) {
   if (!WebVideoEncoder || !WebVideoFrame) throw new Error('当前浏览器不支持 WebCodecs 视频编码(请用 Chrome/Edge)');
-  const w = data.w, h = data.h;
+  const w = plan.width, h = plan.height;
   const audioUrl = findAudioAsset();
   const audioInfo = audioUrl ? await decodeAudio(audioUrl) : null;
   const audioChannels = audioInfo ? await resampleTo(audioInfo.channels, audioInfo.sampleRate, 48000) : null;
   // 声道数上限 2:导出的 AAC 轨只声明立体声,多声道素材也只取前两路
-  const numCh = audioChannels ? Math.min(audioChannels.length, 2) : 0;
+  let numCh = audioChannels ? Math.min(audioChannels.length, 2) : 0;
+  /* 先确认本机能编 AAC 再决定「要不要音轨」:mp4-muxer 的音轨是在构造时声明的,
+   * 声明了却没有帧喂进去会得到一个空的音频轨。不支持就拿掉音轨继续导出(见 aacSupported)。 */
+  if (numCh > 0 && !(await aacSupported(numCh))) numCh = 0;
   const videoSec = totalFrames / fr;
   // 音轨长度严格按视频时长(秒 × 48000)定:多出来的音频丢掉,不够的补静音
   const audioFrames = audioChannels ? Math.round(videoSec * 48000) : 0;
@@ -6918,13 +7090,23 @@ async function exportVideoMp4(data: any, canvas: HTMLCanvasElement, renderFrame:
       }
     : null;
 
-  await runWebCodecsExport(muxer, w, h, fr, totalFrames, onProgress, async (enc, i) => {
+  /* 编码尺寸小于合成画布(手机等自动降档)时,先把整帧缩到编码尺寸再交给编码器。
+   * 一次 GPU 侧的 drawImage 代价远低于让硬编码器去拒绝一个它不支持的尺寸。 */
+  const srcW = canvas.width, srcH = canvas.height;
+  const needScale = w !== srcW || h !== srcH;
+  const encCanvas = needScale ? document.createElement('canvas') : canvas;
+  if (needScale) { encCanvas.width = w; encCanvas.height = h; }
+  const encCtx = needScale ? encCanvas.getContext('2d') : null;
+  if (needScale && !encCtx) throw new Error('无法创建缩放画布');
+
+  await runWebCodecsExport(muxer, plan, totalFrames, onProgress, async (enc, i) => {
     const animFrame = animFrameOf(i);
     await ensureSeqDecoded(Math.round(animFrame));
     await renderFrame(animFrame);
+    if (encCtx) encCtx.drawImage(canvas, 0, 0, w, h);
     // VideoFrame 的 timestamp / duration 单位是【微秒】:第 i 帧时间戳 = i/fr 秒。
     // 关键帧每 60 帧(约 1 秒)一个 —— 太稀会让播放与剪辑 seek 变慢,太密则白白增大文件。
-    const frame = new WebVideoFrame(canvas, { timestamp: Math.round((i * 1e6) / fr), duration: Math.round(1e6 / fr) });
+    const frame = new WebVideoFrame(encCanvas, { timestamp: Math.round((i * 1e6) / fr), duration: Math.round(1e6 / fr) });
     enc.encode(frame, { keyFrame: i % 60 === 0 });
     frame.close();
   }, audio);
@@ -7381,10 +7563,12 @@ async function exportVideoAvi(data: any, canvas: HTMLCanvasElement, renderFrame:
 
 /* H.264 编码 AVI(非透明):与 MP4 同款 WebCodecs 编码,PotPlayer/VLC 可硬解,
  * 无 MJPEG 的色度毛边问题。strf 附加 avcC,帧数据为 AVCC 长度前缀格式。 */
-async function exportVideoAviH264(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void | Promise<void>, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, animFrameOf: (i: number) => number = (i) => data.ip + i) {
+async function exportVideoAviH264(data: any, canvas: HTMLCanvasElement, renderFrame: (n: number) => void | Promise<void>, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, plan: H264Plan, animFrameOf: (i: number) => number = (i) => data.ip + i) {
   if (!WebVideoEncoder || !WebVideoFrame) throw new Error('当前浏览器不支持 H.264 编码(请用 Chrome/Edge)');
   const { pcm16, numCh, audioRate } = await buildPcm16(data, totalFrames, fr);
-  const w = data.w, h = data.h;
+  // 编码尺寸取自编码方案:AVI 的 strf / avih 都必须声明「真正编码出来的尺寸」,
+  // 与 MP4 一样支持手机等机型的自动降档(降档后写进容器头的也是降档尺寸)
+  const w = plan.width, h = plan.height;
 
   const frames: { data: Uint8Array<ArrayBuffer>; key: boolean }[] = [];
   /* 裸 WebCodecs 输出:帧数据收集 + 从首个 chunk 的 decoderConfig 取 avcC(附加到 AVI strf)。
@@ -7403,14 +7587,23 @@ async function exportVideoAviH264(data: any, canvas: HTMLCanvasElement, renderFr
   };
   // 复用统一的 WebCodecs 驱动,但 muxer 换成「只收集帧数据」的收集器 —— 封装交给 AVI 自己写;
   // AVI 的音频走 PCM,所以 addAudioChunk(即 AAC 编码)整个不用,audio 参数传 null。
+  // 编码尺寸小于合成画布时先缩放(与 MP4 路径同一套处理)
+  const srcW = canvas.width, srcH = canvas.height;
+  const needScale = w !== srcW || h !== srcH;
+  const encCanvas = needScale ? document.createElement('canvas') : canvas;
+  if (needScale) { encCanvas.width = w; encCanvas.height = h; }
+  const encCtx = needScale ? encCanvas.getContext('2d') : null;
+  if (needScale && !encCtx) throw new Error('无法创建缩放画布');
+
   await runWebCodecsExport(
     { addVideoChunk: collect, addAudioChunk: () => { /* AVI 音频走 PCM,不用 AAC */ } },
-    w, h, fr, totalFrames, onProgress,
+    plan, totalFrames, onProgress,
     async (enc, i) => {
       const animFrame = animFrameOf(i);
       await ensureSeqDecoded(Math.round(animFrame));
       await renderFrame(animFrame);
-      const frame = new WebVideoFrame(canvas, { timestamp: Math.round((i * 1e6) / fr), duration: Math.round(1e6 / fr) });
+      if (encCtx) encCtx.drawImage(canvas, 0, 0, w, h);
+      const frame = new WebVideoFrame(encCanvas, { timestamp: Math.round((i * 1e6) / fr), duration: Math.round(1e6 / fr) });
       enc.encode(frame, { keyFrame: i % 60 === 0 });
       frame.close();
     },
@@ -7426,6 +7619,79 @@ async function exportVideoAviH264(data: any, canvas: HTMLCanvasElement, renderFr
   const blob = buildAvi(w, h, fr, 'H264', h264Strf(w, h, avcCLocal), '00dc', frames.map((f) => f.data), pcm16, numCh, audioRate, frames.map((f) => f.key));
   onProgress(100, 'AVI 组装完成,正在下载…');
   downloadBlob(blob, 'animation.avi');
+}
+
+/* ---------- 兼容录制(MediaRecorder):本机没有可用的 WebCodecs H.264 编码器时的最后一条路 ----------
+ * 有这类机型:手机上浏览器自带视频能力(能录屏、能用 MediaRecorder),但 WebCodecs 的
+ * VideoEncoder 要么不存在、要么不提供 H.264。原来遇到这种机器 MP4 直接失败,只剩「请用 Chrome/Edge」
+ * ——而手机用户换不了浏览器内核。这里改用「画布录制」出片,产出的 MP4(H.264,部分地区)/ WebM 都能直接播。
+ * 两个已知代价,都会写进完成提示:
+ *   ① 录制按真实时间走(10 秒动画就要录 10 秒),不能像 WebCodecs 那样离线快跑;
+ *   ② 不挂音轨(音轨要再把 WebAudio 推成一条媒体流,风险与收益不成比例)。
+ * captureStream(0) 表示「不自动采样,等 requestFrame() 推帧」:只有推帧那一刻的画面会被录进去,
+ * 所以录到的就是逐帧渲染的结果,不会掺入浏览器自己采样的中间态。 */
+function pickRecorderMime(): string | null {
+  try {
+    const MR = (window as any).MediaRecorder;
+    if (!MR || typeof MR.isTypeSupported !== 'function') return null;
+    // 优先 MP4(Safari 与部分 Android 能直接录 MP4),否则退 WebM(Android/桌面 Chrome 都认)
+    const cands = [
+      'video/mp4;codecs=avc1.42E01E',
+      'video/mp4',
+      'video/webm;codecs=vp9',
+      'video/webm;codecs=vp8',
+      'video/webm',
+    ];
+    for (const m of cands) if (MR.isTypeSupported(m)) return m;
+  } catch { /* ignore */ }
+  return null;
+}
+
+async function exportVideoRecorder(canvas: HTMLCanvasElement, renderFrame: (n: number) => void | Promise<void>, totalFrames: number, fr: number, onProgress: (p: number, detail?: string) => void, animFrameOf: (i: number) => number): Promise<void> {
+  const mime = pickRecorderMime();
+  const capture = (canvas as any).captureStream;
+  if (!mime || typeof capture !== 'function') {
+    throw new Error('本机既没有可用的 H.264 编码器,也不支持画布录制(' + encodeSupportSummary()
+      + ')。请改用电脑上的 Chrome / Edge 导出,或在该浏览器里勾选「透明背景」导出 AVI。');
+  }
+  const stream: MediaStream = capture.call(canvas, 0) as MediaStream;
+  const track: any = stream.getVideoTracks()[0];
+  if (!track) throw new Error('画布录制失败:没有取到视频轨');
+  const hasRequestFrame = typeof track.requestFrame === 'function';
+  const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 20_000_000 });
+  const chunks: BlobPart[] = [];
+  rec.ondataavailable = (ev: BlobEvent) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
+  const stopped = new Promise<void>((resolve) => { rec.onstop = () => resolve(); });
+
+  onProgress(0, '正在兼容录制(按真实速度,约 ' + Math.ceil(totalFrames / fr) + ' 秒)…');
+  rec.start();
+  const frameMs = 1000 / fr;
+  const t0 = performance.now();
+  try {
+    for (let i = 0; i < totalFrames; i++) {
+      if (exportCancelRequested) throw new ExportCancelledError('导出已取消');
+      const animFrame = animFrameOf(i);
+      await ensureSeqDecoded(Math.round(animFrame));
+      await renderFrame(animFrame);
+      // 推帧:requestFrame 不可用时(Microsoft 系旧实现)只能靠 captureStream 的自动采样,
+      // 此时录制时间轴仍由下面的等时逻辑对齐
+      if (hasRequestFrame) track.requestFrame();
+      /* 录制器的时间轴是「墙钟」:推帧必须按 1/fr 秒的节奏走,推太快会把 10 秒的动画录成几秒。
+       * 渲染本身比 16ms 慢时(手机上常见)不做补偿 —— 那只会让录制时间更长,不影响画面正确性。 */
+      const wait = t0 + (i + 1) * frameMs - performance.now();
+      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+      if (i % 12 === 0) onProgress(Math.round((i / totalFrames) * 100), '正在兼容录制帧 ' + (i + 1) + ' / ' + totalFrames);
+    }
+  } finally {
+    try { if (rec.state !== 'inactive') rec.stop(); } catch { /* ignore */ }
+    track.stop();
+  }
+  await stopped;
+  const isMp4 = mime.indexOf('mp4') !== -1;
+  const blob = new Blob(chunks, { type: isMp4 ? 'video/mp4' : 'video/webm' });
+  if (!blob.size) throw new Error('兼容录制没有产生任何数据(浏览器可能禁用了画布录制)');
+  onProgress(100, '录制完成,正在保存…');
+  downloadBlob(blob, 'animation.' + (isMp4 ? 'mp4' : 'webm'));
 }
 
 /* 导出实例的「每帧状态同步」:导出直接调 renderer.renderFrame() 逐帧渲染,
@@ -7748,14 +8014,41 @@ async function exportVideo() {
   const animFrameOf = (i: number) => (data.ip ?? 0) + (i * srcFps) / fr;    // 可为小数
   const withPopup = popupVisible && !!popupData;
   const popupTag = withPopup ? ' · 含弹窗' : '';
+  // 无压缩透明 AVI 的体积 ≈ 宽 × 高 × 4 字节(BGRA)× 帧数,不含音频与封装开销
+  const dibBytes = w * h * 4 * totalFrames;
   const formatLabel = (format === 'avi'
     ? (wantTransparent ? 'AVI · 无压缩透明' : 'AVI · H.264')
     : 'MP4 · H.264') + ' · ' + fr + 'fps' + (fr !== srcFps ? '(插值)' : '') + popupTag;
-  // 无压缩透明 AVI 的体积 ≈ 宽 × 高 × 4 字节(BGRA)× 帧数,不含音频与封装开销
   const warn = wantTransparent
-    ? '透明 AVI 为无压缩编码,预计文件约 ' + fmtSize(w * h * 4 * totalFrames) + ';已采用预乘 alpha(premultiplied),与 PotPlayer/Windows 渲染语义一致,半透明组件可正常显示。导出期间请勿关闭页面。'
+    ? '透明 AVI 为无压缩编码,预计文件约 ' + fmtSize(dibBytes) + ';已采用预乘 alpha(premultiplied),与 PotPlayer/Windows 渲染语义一致,半透明组件可正常显示。导出期间请勿关闭页面。'
     : undefined;
   showExportOverlay({ formatLabel, warn });
+
+  /* 手机上的无压缩透明 AVI:全部帧都要先在内存里排好(宽×高×4 字节 × 帧数),
+   * 1080p 十秒就是 5 GB —— 手机标签页的内存配额远不到这个量级,必然崩。
+   * 这里提前拦下并说清楚怎么办,而不是让用户等几分钟后看到页面崩掉。 */
+  if (wantTransparent && IS_MOBILE && dibBytes > 8e8) {
+    throw new Error('手机上无法导出无压缩透明 AVI:预计文件 ' + fmtSize(dibBytes) + ',浏览器内存放不下。'
+      + '请改用 MP4 / AVI(取消勾选「透明背景」),或在电脑上导出透明版本。');
+  }
+
+  /* 编码方案:按分辨率档位 + 本机能力选定「真正要编码的尺寸」。
+   * 这是移动端加固的核心 —— 手机编不了 4K 时自动降到它能编的尺寸,而不是直接报错。 */
+  const resMode = selRes.value;
+  const reqScale = resMode === 'auto' ? baseExportScale(w, h) : Math.max(0.1, parseFloat(resMode) || 1);
+  updateExportProgress(0, '正在探测本机编码能力…', '');
+  const plan = wantTransparent ? null : await resolveH264Plan(w, h, fr, reqScale);
+  /* 编码帧数 / 帧率:方案若把帧率降到 30,就按整帧步进取帧(帧数减半、时间戳按新帧率写),
+   * 成片时长不变。没有方案(透明 AVI、MJPEG 回退、兼容录制)时按原始 60fps 走。 */
+  const stepOfPlan = (p: H264Plan) => Math.max(1, Math.round(fr / p.fps));
+  const framesOfPlan = (p: H264Plan) => Math.max(1, Math.floor(totalFrames / stepOfPlan(p)));
+  const animFrameOfPlan = (p: H264Plan) => (i: number) => animFrameOf(i * stepOfPlan(p));
+  const lowRes = !!plan && (plan.width !== w || plan.height !== h || plan.fps !== fr);
+  if (plan) {
+    // 把实际编码规格写进浮层标题:用户随时看得到「这段视频到底按什么规格在导」
+    exportFormatTag.textContent = formatLabel
+      + (lowRes ? ' → ' + plan.width + '×' + plan.height + '@' + plan.fps : '');
+  }
   updateExportProgress(0, '正在初始化渲染器…', '');
   /* 兼容导出:遮罩源被共用的动画自动改用 SVG 渲染器逐帧光栅化(canvas 渲染器遮罩合成不正确) */
   const useRaster = needsSvgRasterExport(data);
@@ -7773,6 +8066,9 @@ async function exportVideo() {
     setStatus(wantTransparent
       ? '导出中: 已选透明背景,自动导出 AVI…'
       : '导出中: 初始化渲染器…');
+    /* 屏幕常亮:手机导出期间屏幕一黑,系统就会冻结/回收标签页,导出直接「卡住不动」。
+     * 申请失败(不支持或被系统拒绝)不影响导出,所以这里不 await 结果。 */
+    void acquireExportWakeLock();
     // 导出容器挂在文档里但推到视口外(left:-10000px):渲染器必须在文档中才能正确测量与绘制,
     // 又不能被用户看到;dpr:1 让渲染像素 = 动画坐标像素,取帧时不需要任何缩放换算。
     container = document.createElement('div');
@@ -7848,18 +8144,23 @@ async function exportVideo() {
     outCanvas.height = h;
     const octx = outCanvas.getContext('2d');
     if (!octx) throw new Error('无法创建导出画布');
+    // DEV 调试钩子:把合成画布与动画画布暴露出来,便于在浏览器里逐帧核对导出到底取了什么画面
+    if (import.meta.env.DEV) { (window as any).__exportCanvas = outCanvas; (window as any).__exportLottieCanvas = canvas; }
     /* 导出自检:逐帧记录「合成画面」指纹,统计与上一帧完全相同的帧数。
      * 用途:导出后画面看起来只有 30fps 时,先分清是「渲染侧丢了帧」还是
      * 「编码器/播放器把同一帧显示了两次」——自检报重复帧 → 渲染侧问题(有确切帧号);
      * 自检为 0 但播放仍重复 → 编码/播放侧问题(与渲染无关)。 */
     // 自检缩略图 240×135(约 3.2 万像素):把合成帧缩到小图再取像素做指纹,
     // 即便是 4K 帧也只读这么点数据,单帧成本不到 1ms,不会拖慢导出。
+    /* 自检要把每帧从 GPU 读回 CPU(getImageData),手机上每帧要几毫秒、还会打断渲染管线,
+     * 所以移动端整个跳过 —— 它只是「导出结果看着卡顿」时用来归因的诊断信息,不影响成片。 */
+    const wantSelfCheck = !IS_MOBILE;
     const checkCanvas = document.createElement('canvas');
     checkCanvas.width = 240; checkCanvas.height = 135;
     const checkCtx = checkCanvas.getContext('2d', { willReadFrequently: true });
     let prevSig = -1, dupFrames = 0, firstDup = -1, checkedFrames = 0;
     const frameSignature = (): number => {
-      if (!checkCtx) return -1;
+      if (!wantSelfCheck || !checkCtx) return -1;
       checkCtx.clearRect(0, 0, 240, 135);
       checkCtx.drawImage(outCanvas, 0, 0, 240, 135);
       const d = checkCtx.getImageData(0, 0, 240, 135).data;
@@ -7920,39 +8221,84 @@ async function exportVideo() {
     // 各导出函数统一从合成画布取帧:它们只管编码与封装,不关心画面上叠了哪些图层
     const srcCanvas = outCanvas;
 
-    // 格式分发:AVI 有三条路(透明无压缩 → H.264 → MJPEG 回退);
-    // MP4 只有 WebCodecs 一条路(不支持时 exportVideoMp4 内部会直接抛错)
+    // 走兼容录制(本机没有 H.264 编码器)时,尾部文案要换一套说法
+    let usedRecorder = false;
+
+    /* 格式分发 —— 每条路都要能在手机上走通:
+     *  AVI + 透明   → 无压缩 BGRA,不经过编码器(手机上的内存护栏见上方 dibBytes 那段);
+     *  AVI + 非透明 → 有方案走 H.264,方案被拒或压根没有就退 MJPEG 兼容格式(老浏览器也能出片);
+     *  MP4         → H.264 是唯一通路:先按方案导,被拒时自动降一档重试,
+     *                完全没有可用方案时改走 MediaRecorder 兼容录制(录出 MP4 或 WebM,手机上能直接播)。 */
+    const onAviH264 = (p: number, detail?: string) => {
+      updateExportProgress(p, '正在导出 AVI(H.264)', detail ?? '');
+      setStatus('导出 AVI(H.264): ' + p + '%');
+    };
+    const onMjpeg = (p: number, detail?: string) => {
+      updateExportProgress(p, '正在导出 AVI(MJPEG 兼容格式)', detail ?? '');
+      setStatus('导出 AVI(MJPEG): ' + p + '%');
+    };
+    const onMp4 = (p: number, detail?: string) => {
+      updateExportProgress(p, usedRecorder ? '正在兼容录制' : '正在导出 MP4(H.264)', detail ?? '');
+      setStatus((usedRecorder ? '兼容录制: ' : '导出 MP4: ') + p + '%');
+    };
+
     if (format === 'avi') {
       if (wantTransparent) {
         await exportVideoAvi(data, srcCanvas, renderFrame, totalFrames, fr, (p, detail) => {
           updateExportProgress(p, '正在导出透明 AVI(无压缩)', detail ?? '');
           setStatus('导出透明 AVI(无压缩): ' + p + '%');
         }, 'dib', animFrameOf);
-      } else if (WebVideoEncoder && WebVideoFrame) {
-        await exportVideoAviH264(data, srcCanvas, renderFrame, totalFrames, fr, (p, detail) => {
-          updateExportProgress(p, '正在导出 AVI(H.264)', detail ?? '');
-          setStatus('导出 AVI(H.264): ' + p + '%');
-        }, animFrameOf);
+      } else if (plan) {
+        try {
+          await exportVideoAviH264(data, srcCanvas, renderFrame, framesOfPlan(plan), plan.fps, onAviH264, plan, animFrameOfPlan(plan));
+        } catch (e) {
+          // 取消照原样抛出;只有「本机编不了这个尺寸」才降级到 MJPEG
+          if (!(e instanceof EncoderConfigError)) throw e;
+          updateExportProgress(0, 'H.264 编码不可用,改用兼容格式(MJPEG)…', (e as Error).message);
+          exportFormatTag.textContent = 'AVI · MJPEG 兼容格式 · ' + fr + 'fps' + popupTag;
+          await exportVideoAvi(data, srcCanvas, renderFrame, totalFrames, fr, onMjpeg, 'mjpeg', animFrameOf);
+        }
       } else {
-        await exportVideoAvi(data, srcCanvas, renderFrame, totalFrames, fr, (p, detail) => {
-          updateExportProgress(p, '正在导出 AVI(MJPEG 回退)', detail ?? '');
-          setStatus('导出 AVI(MJPEG): ' + p + '%');
-        }, 'mjpeg', animFrameOf);
+        updateExportProgress(0, '本机没有可用的 H.264 编码器,改用兼容格式(MJPEG)…', encodeSupportSummary());
+        exportFormatTag.textContent = 'AVI · MJPEG 兼容格式 · ' + fr + 'fps' + popupTag;
+        await exportVideoAvi(data, srcCanvas, renderFrame, totalFrames, fr, onMjpeg, 'mjpeg', animFrameOf);
+      }
+    } else if (plan) {
+      try {
+        await exportVideoMp4(data, srcCanvas, renderFrame, framesOfPlan(plan), plan.fps, onMp4, plan, animFrameOfPlan(plan));
+      } catch (e) {
+        /* 少数浏览器会先答「支持」再在 configure / encode 时拒绝(见 H.264 选级那段注释)。
+         * 这时按更低一档重来一次,总好过让用户对着报错自己再点一遍导出。 */
+        if (!(e instanceof EncoderConfigError)) throw e;
+        const lower = await resolveH264Plan(w, h, fr, Math.max(0.2, plan.scale * 0.7));
+        if (!lower || (lower.width >= plan.width && lower.height >= plan.height)) throw e;
+        updateExportProgress(0, '编码器拒绝了 ' + plan.width + '×' + plan.height + ',正在按 ' + lower.width + '×' + lower.height + ' 重试…', (e as Error).message);
+        exportFormatTag.textContent = formatLabel + ' → ' + lower.width + '×' + lower.height + '@' + lower.fps + '(重试)';
+        await exportVideoMp4(data, srcCanvas, renderFrame, framesOfPlan(lower), lower.fps, onMp4, lower, animFrameOfPlan(lower));
       }
     } else {
-      await exportVideoMp4(data, srcCanvas, renderFrame, totalFrames, fr, (p, detail) => {
-        updateExportProgress(p, '正在导出 MP4(H.264)', detail ?? '');
-        setStatus('导出 MP4: ' + p + '%');
-      }, animFrameOf);
+      usedRecorder = true;
+      updateExportProgress(0, '本机没有可用的 H.264 编码器,改用兼容录制…', encodeSupportSummary());
+      // 浮层标题如实反映真实路径:这条录出来可能是 MP4,也可能是 WebM
+      exportFormatTag.textContent = '兼容录制(无音轨) · ' + fr + 'fps' + popupTag;
+      await exportVideoRecorder(srcCanvas, renderFrame, totalFrames, fr, onMp4, animFrameOf);
     }
     /* 重复帧占比很高(如约一半)时,更可能是「动画内容本身按 30fps 更新」:
      * 表达式里做时间量化(posterizeTime(30)、Math.floor(time*30)/30 等)、
      * 或 AE 里按半速/步进打的关键帧,都会让 60fps 视频每隔一帧才换一次画面。 */
-    const dupNote = dupFrames === 0
-      ? ' · 自检:未发现重复帧'
-      : ' · 自检:' + dupFrames + '/' + checkedFrames + ' 帧与上一帧完全相同' + (firstDup >= 0 ? '(首处 #' + firstDup + ')' : '')
-        + '(画面静止段或运动极慢时属正常,不代表导出丢帧)';
-    finishExportOverlay('done', '导出完成', '文件已开始下载' + dupNote);
+    const dupNote = !wantSelfCheck
+      ? ' · 移动端已跳过逐帧自检'
+      : dupFrames === 0
+        ? ' · 自检:未发现重复帧'
+        : ' · 自检:' + dupFrames + '/' + checkedFrames + ' 帧与上一帧完全相同' + (firstDup >= 0 ? '(首处 #' + firstDup + ')' : '')
+          + '(画面静止段或运动极慢时属正常,不代表导出丢帧)';
+    /* 手机上下载经常「提示完成了,但相册里找不到」:把引导写进完成提示,
+     * 配合浮层上那两个按钮(保存到手机 / 重新下载)给出一条明确的落地路径。 */
+    const saveTip = IS_MOBILE
+      ? '文件已开始下载;若相册 / 文件里没看到,点下方「保存到手机」。'
+      : '文件已开始下载';
+    const recNote = usedRecorder ? ' · 兼容录制模式(无音轨,时长可能与原动画略有出入)' : '';
+    finishExportOverlay('done', '导出完成', saveTip + dupNote + recNote);
     setStatus('导出完成' + dupNote);
   // 取消与失败分开处理:取消是用户主动行为,静默收尾即可;失败要打完整堆栈并回显可读原因
   } catch (e) {
@@ -7961,8 +8307,12 @@ async function exportVideo() {
       setStatus('导出已取消');
     } else {
       console.error('[导出错误]', (e as Error).stack || e);
-      finishExportOverlay('error', '导出失败', (e as Error).message);
-      setStatus('导出失败: ' + (e as Error).message, true);
+      const msg = (e as Error).message || String(e);
+      /* 编码相关的失败额外附一行本机能力摘要:远程排障时(用户截图发过来)
+       * 一眼就能分清是「浏览器没有 WebCodecs」「不是安全上下文」还是「编码器不认这个分辨率」。 */
+      const hint = /H\.264|编码|WebCodecs/.test(msg) ? ' · 本机:' + encodeSupportSummary() : '';
+      finishExportOverlay('error', '导出失败', msg + hint);
+      setStatus('导出失败: ' + msg, true);
     }
   // 收尾(成功 / 失败 / 取消都会走到):释放字体 blob URL、销毁导出专用渲染器与容器、解除按钮锁,
   // 并恢复导出前的预览播放状态(导出开始时被主动暂停,见 previewWasPlaying)。
@@ -7974,6 +8324,7 @@ async function exportVideo() {
     if (popupExportContainer) popupExportContainer.remove();
     // 恢复导出前的预览播放状态(含音频)
     if (previewWasPlaying && anim) { try { anim.play(); } catch { /* ignore */ } }
+    releaseExportWakeLock();
     exporting = false;
     btnExport.disabled = false;
   }

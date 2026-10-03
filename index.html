@@ -131,6 +131,17 @@
               <option value="avi">AVI</option>
             </select>
           </label>
+          <!-- 导出分辨率:「自动」= 桌面按原始分辨率、移动端按 1080p 级;
+               实际编码尺寸还会再按本机编码器能力向下压(手机编不了 4K 时自动降档,不会导出失败),
+               当前实际规格会显示在导出浮层的标题上。 -->
+          <label>分辨率
+            <select id="selRes" title="导出分辨率:自动 = 按本机能力选择(移动端默认 1080p 级,桌面端保持原始分辨率)">
+              <option value="auto">自动</option>
+              <option value="1">原始</option>
+              <option value="0.75">75%</option>
+              <option value="0.5">50%</option>
+            </select>
+          </label>
           <span class="export-hint" id="exportHint"></span>
           <button id="btnExport" type="button" title="导出视频(含音频,使用当前背景色;透明背景自动导出 AVI)">导出视频</button>
           <span class="spacer"></span>
@@ -337,7 +348,11 @@
         <div class="export-bar"><div class="export-bar-fill" id="exportBarFill"></div></div>
         <div class="export-detail" id="exportDetail"></div>
         <div class="export-warn" id="exportWarn" hidden></div>
+        <!-- 完成后才出现:保存到手机(Web Share,手机把视频存进相册/文件最可靠的一条路)、
+             重新下载(自动下载被拦截或没找到文件时再触发一次);导出中与失败态下都隐藏。 -->
         <div class="export-actions">
+          <button id="btnExportSave" type="button" class="primary" hidden>保存到手机</button>
+          <button id="btnExportRedownload" type="button" hidden>重新下载</button>
           <button id="btnExportCancel" type="button">取消导出</button>
         </div>
       </div>

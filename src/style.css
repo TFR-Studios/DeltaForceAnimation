@@ -2,7 +2,8 @@
  * 纯静态单页,无预处理器、无 CSS 框架,样式全部集中在本文件(由 src/main.ts 顶部 import 后进产物)。
  * 阅读顺序:设计令牌 -> 顶栏(含「制作声明」徽标的全套动效) -> 主区(预览舞台、时间轴、播放控制条)
  *           -> 侧栏(动画信息、时长、文字/形状/图片/图标/弹窗图层) -> 状态栏 -> 导出浮层 -> 数据加载浮层
- *           -> 动画画廊(顶栏触发器的展开面板:搜索 + 分组 + 卡片网格)。
+ *           -> 动画画廊(顶栏触发器的展开面板:搜索 + 分组 + 卡片网格)
+ *           -> 移动端布局(≤860px 的单栏化与触屏尺寸,文件末尾)。
  * 约定:index.html 只搭骨架,里面的 .craft-ready / .is-active / .panning / .indet / .error / .done
  * 等状态类都由 main.ts 在运行时增删;改类名必须两边同步,写错不会报错,只会静默失去样式。 */
 :root {
@@ -176,11 +177,22 @@ html.craft-ready .craft-note::before {
 }
 
 /* ---------- 响应式与可访问性 ----------
- * 全文件只有这两处媒体查询。主布局本身不写媒体查询:顶栏与播放控制条靠 flex-wrap 换行自适应,
- * 而侧栏固定 320px 且 flex-shrink:0 不参与收缩,所以极窄视口(约 400px 以下)里预览区会被压得很小。 */
-/* 窄屏(≤480px):放开徽标换行,避免 320px 级别宽度被 nowrap 顶出横向滚动 */
+ * 桌面主布局不写媒体查询:顶栏与播放控制条靠 flex-wrap 换行自适应。
+ * 全文件的媒体查询各管一件事,互不重叠,改窄屏表现时按下表找:
+ *   1) 文件末尾「移动端布局(≤860px)」—— 单栏化 + 触屏尺寸,这是唯一改主布局的地方;
+ *   2) 下面这条(≤480px)—— 顶栏细节;
+ *   3) 动画画廊段里的(≤720px)—— 画廊面板铺满整屏。
+ * 另外两处 prefers-reduced-motion 只关动效,不动布局。 */
+/* 窄屏(≤480px):放开徽标换行,避免 320px 级别宽度被 nowrap 顶出横向滚动;
+ * 品牌后缀标签「编辑 · 预览 · 导出」只是装饰(无链接、无信息量),
+ * 在手机上留着会把顶栏顶出第三行、把「动画选择器」挤下去,所以直接隐藏,品牌名与 logo 保留。 */
 @media (max-width: 480px) {
   .craft-note { white-space: normal; padding: 3px 8px; font-size: 11.5px; }
+  .brand .tag { display: none; }
+  /* 「动画」二字在窄屏上是多余的:触发器自己就带着缩略图 + 当前动画名 + 下拉箭头,
+   * 而且它是顶栏右侧唯一的控件。去掉这 24px 后品牌与选择器能在 360px 视口并排一行,
+   * 顶栏从三行(117px)回到两行(83px)。 */
+  .anim-switch-label { display: none; }
 }
 /* 系统开启「减少动态效果」时:不放动效,直接呈现终态(下划线常驻、不扫光) */
 @media (prefers-reduced-motion: reduce) {
@@ -473,7 +485,9 @@ label.btn-file:hover { border-color: var(--accent); }
  * 这里统一降到 55% 不透明度并换成 not-allowed 光标,避免用户以为点了没反应。
  * color 输入框写死 34×26:各浏览器默认尺寸差异很大,不写死就没法和旁边的按钮对齐。 */
 select:disabled { opacity: 0.55; cursor: not-allowed; }
-input[type="color"] { padding: 0; width: 34px; height: 26px; }
+/* flex:none 必不可少:色块落在 flex 行(播放条、侧栏的颜色行)里时默认会被压缩,
+ * 窄屏实测被压到 22px 宽,和旁边的十六进制输入框对不齐。 */
+input[type="color"] { padding: 0; width: 34px; height: 26px; flex: none; }
 
 /* 侧边栏「动画时长」区块 */
 /* 「动画时长」区块:整块默认 hidden,只有位置暴露动画才由 main.ts 打开(timingSection.hidden = !isExposed)。
@@ -981,9 +995,14 @@ input[type="color"] { padding: 0; width: 34px; height: 26px; }
   line-height: 1.5;
   text-align: left;
 }
-.export-actions { margin-top: 18px; }
+.export-actions { margin-top: 18px; display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
 .export-actions button { min-width: 110px; padding: 8px 16px; font-size: 14px; }
 .export-actions button:disabled { opacity: 0.5; cursor: default; }
+/* 完成态的「保存到手机」是主行动(手机上真正把视频落地的那条路),给主色描边突出一下;
+ * hidden 的按钮必须真的不占位 —— 三个按钮会随导出状态互相切换。 */
+.export-actions button.primary { border-color: var(--accent); color: var(--accent); }
+.export-actions button.primary:hover { background: rgba(59, 130, 246, 0.12); }
+.export-actions button[hidden] { display: none; }
 /* 动画数据按需加载浮层:切换动画下载数据包时的进度提示 */
 /* 层级说明:这里是 9999,与 index.html 内联的启动加载层同层,保证两层进度提示都盖在最上面。
  * 显示 / 进度 / 隐藏分别由 main.ts 的 showDataLoading、setDataLoadingProgress、hideDataLoading 控制。 */
@@ -1382,5 +1401,95 @@ input[type="color"] { padding: 0; width: 34px; height: 26px; }
   .ap-card, .ap-card-cover img, .anim-trigger-caret { transition: none; }
   .ap-card:hover { transform: none; }
   .ap-card:hover .ap-card-cover img { transform: none; }
+}
+
+/* ==================== 移动端布局(≤860px) ====================
+ * 桌面端是「左预览 + 右固定 320px 侧栏」的两栏结构,这个结构在手机竖屏下会整体塌掉:
+ * 侧栏 flex-shrink:0 不参与收缩,390px 视口里预览区只剩 70px 宽 ——
+ * 舞台被压成 46×2(tools 里实测),applyFit 据此算出的 baseScale 是 0,动画完全看不见;
+ * 播放控制条被挤成一列 70px 宽的竖排文字(高 843px);页面还会同时出现「整页滚动 + 侧栏内滚动」两层滚动。
+ * 所以窄屏改成上下单栏,只动布局与触屏命中区,不改配色、不改 DOM 结构:
+ *   1) 整页纵向滚动:html/body 不再 height:100%,顶栏与状态栏随页面走,滚动条只剩页面这一层;
+ *   2) 预览区排在最上,舞台按 16:9 给固定高度(并封顶 46svh,手机横屏也放得下)——
+ *      高度必须给定值,不能再靠 flex:1 分配,高度为 0 时 baseScale 会算成 0;
+ *   3) 侧栏落到下方占满整宽、自身不再滚动(overflow 交给页面),并撑满剩余高度让面板底色延续到底;
+ *   4) 播放控制条铺满整宽后换行,同时撤掉桌面端下拉框 200px 的最小宽度(窄屏会把一行撑破);
+ *   5) 触屏尺寸:图标按钮 44×40,下拉 / 标签行 / 次要按钮加高命中区,色块不再被 flex 压扁;
+ *   6) 顶栏收紧成两行:品牌 + 动画选择器留在第一行,「制作声明」徽标用 order 排到末行;
+ *   7) 状态栏吸底,否则它会掉到几像素长页面的最末尾(桌面端页面不滚动,本来不需要这条)。
+ * 桌面端(>860px)完全不受影响 —— 以下规则全部写在媒体查询里。
+ * 断点选 860px 的理由:桌面两栏再窄下去,预览区会小于 520px,竖屏平板(768~834)也一并折成单栏更好用。 */
+@media (max-width: 860px) {
+  /* 1) 整页滚动。桌面端是「页面不滚、侧栏内部滚」,窄屏反过来:只保留页面这一层滚动条。
+   * 100vh 先写一遍是为了给不认 svh 的老浏览器兜底(svh 把手机地址栏算进去,不会多出一小截滚动)。 */
+  html, body { height: auto; }
+  body { min-height: 100vh; min-height: 100svh; }
+  .layout { flex-direction: column; min-height: 0; }
+
+  /* 2) 预览区:舞台给定高,时间轴与播放条在下方铺满整宽 */
+  .preview-panel { flex: none; }
+  .preview-stage {
+    flex: none;
+    height: clamp(200px, 56.25vw, 46vh);
+    height: clamp(200px, 56.25vw, 46svh);
+    margin: 10px 10px 0;
+  }
+  .timeline { padding: 10px 12px 0; }
+
+  /* 3) 侧栏:整宽铺在预览区下方,自身不再滚动 */
+  .side-panel {
+    flex: 1;
+    width: auto;
+    border-left: 0;
+    border-top: 1px solid var(--border);
+    overflow-y: visible;
+    padding: 14px 14px 24px;
+  }
+
+  /* 4) 播放控制条:标签用 flex-grow 吃掉行内余量,让换行后的每一行左右都填满(而不是参差留白);
+   * 下拉、滑杆一律允许收缩,否则一行只塞得下一个控件、控制条会被拉得很长。 */
+  .transport { gap: 10px 12px; padding: 10px 12px 14px; }
+  /* flex-basis 120px 是实测选出来的:默认的 auto(= 内容宽)会让「速度」这类带滑杆的标签
+   * 独占一行,360/320px 视口下控制条会涨到 350/375px;120px 起排则一行稳定塞下 2~3 个控件,
+   * 360px 降到 306px,且不影响 390px。min-width:0 允许标签内的滑杆继续收缩。 */
+  .transport label { flex: 1 1 120px; min-width: 0; min-height: 34px; }
+  .transport select { flex: 1 1 90px; min-width: 0; max-width: none; }
+  .transport input[type="range"] { flex: 1 1 96px; min-width: 0; height: 28px; }
+  .transport input[type="color"] { width: 42px; height: 34px; }
+  .transport input[type="checkbox"] { width: 18px; height: 18px; }
+  /* .spacer 在这里当「分组换行符」:占满一行、高度 0,把「渲染器 / 适配 / 背景色 / 透明背景」
+   * 整组推到新的一行,和左边的播放、导出控件分开 —— 窄屏下比靠 flex:1 顶到最右清楚得多。 */
+  .spacer { flex-basis: 100%; height: 0; }
+  .export-hint { white-space: normal; }
+
+  /* 5) 触屏尺寸:主操作按 40px 以上给,列表里的次要按钮与标签行 30px 以上。
+   * 只放大命中区(内边距 / 高度),字号与配色一概不动。 */
+  .transport .icon-btn { width: 44px; height: 40px; }
+  .transport .icon-btn .bi { width: 17px; height: 17px; }
+  #btnResetView, #btnExport { min-height: 40px; padding: 8px 14px; }
+  .t-reset { min-height: 30px; padding: 4px 10px; }
+  .t-input { font-size: 14px; }
+  .t-color { width: 40px; height: 30px; }
+  .hex-input { width: 84px; height: 32px; font-size: 13px; }
+  .t-color-label, .popup-toggle, .icon-follow { min-height: 30px; }
+  .t-opacity, .timing-item { min-height: 32px; }
+  .icon-upload { min-height: 40px; }
+  .icon-nudge .nudge-btn { min-height: 34px; padding: 5px 10px; }
+  .icon-scope-btn { padding: 8px 10px; }
+  .icon-item { padding: 8px 4px; }
+
+  /* 6) 顶栏:收紧间距,「制作声明」徽标 order 排到最后一行。
+   * order 只改视觉顺序,不改 DOM:徽标是 <span role="note">,不可聚焦、不参与 Tab 顺序,
+   * 键盘可达性不受影响;若哪天把它改成可点元素,这里要一并复核。 */
+  .topbar { gap: 8px 12px; padding: 9px 12px; }
+  .craft-note { order: 3; }
+  .brand { font-size: 14px; }
+
+  /* 7) 状态栏吸底。桌面端页面本身不滚动,状态栏天然常驻视野底部;
+   * 窄屏改成整页滚动后,它会掉到 5000px 长页面的最末尾 ——
+   * 而侧栏里每一次改色 / 改文案 / 上传图标的结果与报错都只写在这个状态栏里,
+   * 看不见就等于「点了没反应」。所以窄屏把它吸在视口底部
+   * (sticky 元素仍占文档流位置,不会盖住任何内容;只在滚出视野时浮在底部)。 */
+  .statusbar { position: sticky; bottom: 0; z-index: 50; }
 }
 
