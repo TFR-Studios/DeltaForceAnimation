@@ -29,7 +29,8 @@ export default defineConfig({
          * 各分支分别是:撤离(animations/animation_1/animation_data.json 与 windows animation/windows_animation.json)、
          * 位置暴露(animations/animation_2/ 下的 animation_data*.json)、任务弹窗(animations/animation_4/animation_data.json)、
          * 地图标题(animations/animation_5/animation_data.json)、
-         * 黑潮爆破默认弹窗(animations/animation_6/animation_data.json)。 */
+         * 黑潮爆破默认弹窗(animations/animation_6/animation_data.json)、
+         * 制导导弹弹窗(animations/animation_7/animation_data.json)。 */
         manualChunks(id: string) {
           const q = id.split('?')[0].replace(/\\/g, '/');
           if (q.endsWith('animations/animation_1/animation_data.json') || q.includes('windows animation/windows_animation.json')) return 'data-extraction';
@@ -40,6 +41,8 @@ export default defineConfig({
           if (q.includes('/animations/animation_5/') && /[\/]animation_data\.json$/.test(q)) return 'data-maptitle';
           // 黑潮爆破默认弹窗动画的数据(78KB 左右,资源是四张小位图),同样单独成 chunk 只为与其它动画保持一致
           if (q.includes('/animations/animation_6/') && /[\/]animation_data\.json$/.test(q)) return 'data-blast';
+          // 制导导弹弹窗动画的数据(67KB 左右,资源只有一张小图标),同样单独成 chunk 只为与其它动画保持一致
+          if (q.includes('/animations/animation_7/') && /[\/]animation_data\.json$/.test(q)) return 'data-missile';
           return undefined;
         },
       },

@@ -13,11 +13,13 @@
  *   图片序列驱动(逐帧换 src / <image> href,并强制 lottie 重绘,否则静态层画过一次就不再更新)、
  *   叠加序列调色(feColorMatrix 做 colorize,滤镜宿主挂在 body 的隐藏 svg 上,预览与导出共用)。
  *
- * 五套动画(ANIMATIONS,按需加载):撤离动画(1920×1080)、位置暴露动画(画布加宽为 3840×1080,
+ * 七套动画(ANIMATIONS,按需加载):撤离动画(1920×1080)、位置暴露动画(画布加宽为 3840×1080,
  *   可把「二次扫描」第二段合并进同一条时间轴)、核电站功率动画(两条 359 帧透明序列叠加)、
  *   任务弹窗动画(1920×1080,自带一枚货币图标,可在「图标选择」里替换/上传并调不透明度)、
  *   地图标题动画(宽画布 2560×1024,纯文字 + 形状的「地图名称 / 地图地点」标题卡,
- *   文字左对齐、底框与描边随文字宽度自适应)。
+ *   文字左对齐、底框与描边随文字宽度自适应)、
+ *   黑潮爆破默认弹窗动画(1920×1080,两张位图 + 696 帧逐帧序列 + 毛边/模糊形状做轨道遮罩)、
+ *   制导导弹弹窗动画(1920×1080,两张文字 + 一条 HUD 弹窗 + 一张小图标)。
  *
  * 编辑面板(所有编辑都是就地改渲染用的 JSON,再走 reRenderPreservingState() 单飞重建并恢复播放位置):
  *   • 文字 / 形状 / 图片图层列表 —— 顶层与被引用的预合成(assets[] 里的合成)内部都列出,预合成项名字带「合成名 ›」前缀;
@@ -4880,6 +4882,7 @@ import animation3DataUrl from '../animations/animation_3/animation_data.json?url
 import missionDataUrl from '../animations/animation_4/animation_data.json?url';
 import mapTitleDataUrl from '../animations/animation_5/animation_data.json?url';
 import blastDataUrl from '../animations/animation_6/animation_data.json?url';
+import guidedMissileDataUrl from '../animations/animation_7/animation_data.json?url';
 /* 黑潮爆破默认弹窗动画的位图素材(animations/animation_6/images/*.png):
  * JSON 里是相对路径(u:"images/"),站点产物里没有 images/ 目录,必须按静态资源打包后改写资源地址
  * (见 ensureBlastData)。目录里同时还有一份 AE 视频图层的素材(.gif / .mp4),它们随 ty:9 视频图层一起被丢掉。
@@ -4889,6 +4892,15 @@ import blastDataUrl from '../animations/animation_6/animation_data.json?url';
  * 613KB 顶到 2.1MB(实测),而这些帧只有切到本动画时才用得上。加 no-inline 让它们照常产出独立文件,
  * 主 chunk 只保留 700 条 URL 字符串,帧图仍旧按需加载。 */
 const blastImageModules = import.meta.glob('../animations/animation_6/images/*.png', {
+  eager: true,
+  query: '?url&no-inline',
+  import: 'default',
+}) as Record<string, string>;
+/* 制导导弹弹窗动画的位图素材(animations/animation_7/images/*.png):
+ * 与黑潮爆破同一套做法 —— 数据里是相对路径(u:"images/" + p:"167.png"),站点产物里没有那个目录,
+ * 必须按静态资源打包再改写地址(见 ensureGuidedMissileData)。同目录的 .gif/.mp4 是 AE 视频图层素材,
+ * 随 ty:9 图层一起被丢掉,不会走这里。用 glob 而不是写死 167.png:重导出换名/加图都不用改代码。 */
+const guidedMissileImageModules = import.meta.glob('../animations/animation_7/images/*.png', {
   eager: true,
   query: '?url&no-inline',
   import: 'default',
@@ -5544,6 +5556,85 @@ async function ensureBlastData(onProgress?: (p: number | null) => void): Promise
   return blastDataPromise;
 }
 
+/* ---------- 制导导弹弹窗动画(animations/animation_7)----------
+ * 数据 = animations/animation_7/animation_data.json(1920×1080 / 60fps / op=161 = 161 帧 ≈ 2.68s;
+ * 和黑潮爆破一样**不配 caps.defaultDuration**、侧栏没有「动画时长」区块 —— 改时长的实现是搬运末尾
+ * 淡出关键帧,对弹窗类动画属于改数据,不如保持 AE 导出原样)。
+ * 画面内容:「我军已发射制导导弹」(ProjectDTypeCurve-Bold)+「评估目标区域损害,快速清理残余敌人」
+ *      (ProjectDType-Medium)两个文字层,配一条由底板 / 底框 / 虚线 / 蒙版叠出来的 HUD 弹窗,
+ *      以及一张 91×92 的小图标(167.png,出场时淡入)。
+ * 两个文字层的文字与颜色都由侧栏「文字图层」列表通用编辑(collectTextLayers 自动发现 ty:5 图层),
+ * 因此本函数只负责把数据准备好,没有额外的专用编辑逻辑。
+ * 载入时做两件事:
+ *  ① 位图资源是相对路径(u:"images/",p:"167.png"),站点产物里没有 images/ 目录,原样渲染必 404。
+ *     按**文件基名**把 animations/animation_7/images/*.png 换成本地打包地址(p 指向 ?url 产物、u 置空、
+ *     e 置 1 —— 只有 e 为真时 lottie 才把 p 当完整地址);只认相对路径,重新导出若已写成 data: URI
+ *     或绝对地址就不去动它。与任务弹窗 / 黑潮爆破同规则。
+ *  ② 防御性丢掉视频图层(ty:9)与「删完之后没有任何图层再引用」的资源:本套导出里没有这两样,
+ *     但 AE 工程里隐藏的视频素材照样会被导出,留着就是 DOMLoaded 永不触发的整帧黑屏(详见 ensureBlastData)。
+ * 字体与其它动画一致(fName = ProjectDType-Medium / ProjectDTypeCurve-Bold),运行时由 loadEmbeddedFonts
+ * 从 animations/animation_1/fonts/ 注册;chars 只烘焙了导出时的那些字,改字后由 dropCharsIfUncovered
+ * 自动退回浏览器文本引擎,不会出现「新字消失」。 */
+let guidedMissileData: any = null;
+let guidedMissileDataPromise: Promise<void> | null = null;
+/* 位图素材的「文件基名 → 打包地址」表:重新导出时 AE 可能把素材归到子目录,只比对完整 p 会漏改 */
+const guidedMissileImageUrlByBase = new Map<string, string>();
+for (const [path, url] of Object.entries(guidedMissileImageModules)) {
+  const base = path.split('/').pop();
+  if (base) guidedMissileImageUrlByBase.set(base, url);
+}
+
+async function ensureGuidedMissileData(onProgress?: (p: number | null) => void): Promise<void> {
+  if (guidedMissileData) return;
+  if (guidedMissileDataPromise) {
+    if (onProgress) onProgress(null); // 已在加载中:以不确定进度显示
+    return guidedMissileDataPromise;
+  }
+  guidedMissileDataPromise = (async () => {
+    try {
+      const [raw] = await fetchJsonBundle([guidedMissileDataUrl], onProgress);
+      const data = JSON.parse(raw);
+      /* ① 把相对路径的位图资源改写成打包地址 */
+      const isAbsoluteAssetUrl = (p: string) => /^(data:|https?:|\/\/|\/|\.\.?[\/\\])/i.test(p);
+      for (const a of data.assets ?? []) {
+        if (typeof a?.p !== 'string' || isAbsoluteAssetUrl(a.p)) continue;
+        const base = a.p.split(/[\/\\]/).pop() ?? '';
+        const url = guidedMissileImageUrlByBase.get(base);
+        if (!url) continue; // 视频 / GIF 素材:引用它们的图层随后会被删掉,这里不动
+        a.p = url;
+        a.u = '';
+        a.e = 1;
+      }
+      /* ② 递归丢掉视频图层(ty:9),预合成内部也一并处理 */
+      const dropVideoLayers = (layers: any[]): any[] => (layers ?? []).filter((l) => {
+        if (l && l.ty === 9) return false;
+        if (Array.isArray(l?.layers)) l.layers = dropVideoLayers(l.layers);
+        return true;
+      });
+      data.layers = dropVideoLayers(data.layers);
+      for (const a of data.assets ?? []) if (Array.isArray(a.layers)) a.layers = dropVideoLayers(a.layers);
+      /* ②续 删掉没有任何图层引用的资源(必须在删完视频图层之后再收集引用表) */
+      const usedRefs = new Set<string>();
+      const collectRefs = (layers: any[]) => {
+        for (const l of layers ?? []) {
+          if (typeof l?.refId === 'string') usedRefs.add(l.refId);
+          if (Array.isArray(l?.layers)) collectRefs(l.layers);
+        }
+      };
+      collectRefs(data.layers);
+      for (const a of data.assets ?? []) if (Array.isArray(a.layers)) collectRefs(a.layers);
+      data.assets = (data.assets ?? []).filter((a: any) => usedRefs.has(String(a.id)));
+      guidedMissileData = data;
+    } catch (e) {
+      console.error('[制导导弹弹窗动画数据解析失败]', e);
+      setStatus('制导导弹弹窗动画数据解析失败: ' + (e as Error).message, true);
+    }
+    // 失败时允许下次重试
+    if (!guidedMissileData) guidedMissileDataPromise = null;
+  })();
+  return guidedMissileDataPromise;
+}
+
 /* 递归偏移对象中所有动画属性({a:1, k:[{t,...}]})的关键帧时刻 t */
 /* 说明：只平移动画属性（{a:1}）里关键帧的 t（帧号，60fps 下一帧 = 1）；数组直接递归；
  * 遇到 a===1 的 k 数组后不再向下递归，避免把关键帧的 s/e 值当成嵌套属性处理；
@@ -5945,6 +6036,27 @@ const ANIMATIONS: AnimDef[] = [
      * 侧栏里的透明度关键帧就和 AE 对不上了。
      * 同理也**不要**加 nextScan:这是单段弹窗动画,没有第二段可接。
      * 日后若确实需要给用户改时长的能力,把 timing: true 加回来即可(区块会自动出现,无需改别的代码)。 */
+    caps: {},
+  },
+  {
+    key: 'missile',
+    label: '制导导弹弹窗动画',
+    meta: {
+      tags: ['制导导弹', '导弹', '制导', '弹窗', '打击', '锁定', '目标区域', 'missile', 'guided'],
+      accent: '#ef4444',
+      /* 161 帧 @60fps ≈ 2.68s(数据 op=161);载入后会按实测值校准 */
+      w: 1920, h: 1080, fps: 60, frames: 161,
+      features: ['文字可编辑', '颜色可调'],
+    },
+    poster: posterOf('missile'),
+    data: () => guidedMissileData,
+    popup: () => null,
+    audioUrl: null,
+    loaded: () => !!guidedMissileData,
+    load: (p) => ensureGuidedMissileData(p),
+    /* caps 全空:与黑潮爆破默认弹窗同理由 —— 侧栏不出现「动画时长」区块,时间轴完全按 AE 导出原样
+     * (161 帧 / 2.68s);改时长的实现会搬动末尾淡出关键帧,对这套弹窗动画等于改数据。
+     * 也**没有 nextScan**:单段弹窗动画,没有第二段可接。 */
     caps: {},
   },
 ];
