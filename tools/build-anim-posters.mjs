@@ -43,9 +43,33 @@ const FRAME_RATIO = {
   // 黑潮爆破默认弹窗:比例是相对**载入后的时间轴**算的 —— 该动画的默认时长是 4.3s(263 帧),
   // 画面在第 ~252 帧淡完,所以 0.45(≈ 第 118 帧)正好落在「HUD + 提示条 + 标题」都在的展示段。
   blast: 0.45,
-  // 制导导弹弹窗动画:两个文字层分别到第 48 / 72 帧才淡入完成、图标第 30~36 帧淡入、第 130 帧起整体淡出,
-  // 所以取 0.68(≈ 第 110 帧)正好落在「两行文字 + 图标 + HUD 底框」全在展示段。
-  missile: 0.68,
+  // 大战场弹窗动画:两行文字分别到第 48 / 72 帧才淡入完成、图标第 30~36 帧淡入、第 130~144 帧整体淡出
+  // (时间轴 op=180,画面第 144 帧就淡完,后面是空尾),所以取 0.6(第 108 帧)落在全在的展示段。
+  battlefield: 0.6,
+  // 撤离点开启动画:文字与图标第 32~37 帧淡入、形状 20~25 帧淡入,整体在第 118~124 帧淡出,
+  // 所以取 0.45(≈ 第 89 帧)落在「文字 + 图标 + 边框角标 + 黑底」全在的展示段。
+  evacpoint: 0.45,
+};
+
+/* 需要在封面上**标出「这块能换」**的动画:给目标元素画一个高亮圈 + 一句说明,
+ * 让用户在看画廊卡片时就一眼知道这套动画的哪个部位是可替换的。
+ *   find: 在页面里定位该元素的函数(由 puppeteer 投到浏览器里执行,必须是自包含的),
+ *         返回**相对 stage 的 CSS 矩形**;找不到返回 null(此时封面按老样子生成,不画标注)。
+ *   label: 画在圆圈下方的说明文字(用系统字体,不走站点字体)。 */
+const POSTER_HIGHLIGHT = {
+  battlefield: {
+    label: '图标可换',
+    // 大战场弹窗动画的图标位:预览 SVG 里那条真正参与渲染的 <image>
+    // (lottie 还会在 <defs> 里放一份无 width 的预加载 <image>,必须排除,否则量到的是 0×0)
+    find: () => {
+      const hit = [...document.querySelectorAll('#previewInner svg image')]
+        .filter((im) => !im.closest('defs') && im.getAttribute('width'))
+        .map((im) => ({ im, r: im.getBoundingClientRect() }))
+        .filter((o) => o.r.width > 1 && o.r.height > 1)
+        .sort((a, b) => b.r.width * b.r.height - a.r.width * a.r.height)[0];
+      return hit ? { x: hit.r.x, y: hit.r.y, width: hit.r.width, height: hit.r.height } : null;
+    },
+  },
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -84,7 +108,7 @@ async function ensureServer() {
  *   ④ 等比缩放着放进 640×360,四周用背景色补齐 —— 所有封面统一 16:9,
  *      卡片网格用同一套 object-fit,宽画布动画(位置暴露 3840×1080)也不会被裁掉内容。
  *   找不到内容(纯色帧)时退回整帧,不会产出一张空图。 */
-const POSTER_IN_PAGE = async (b64, stageRect, innerRect, bgHex, outWidth, outHeight) => {
+const POSTER_IN_PAGE = async (b64, stageRect, innerRect, bgHex, outWidth, outHeight, highlightRect, highlightLabel) => {
   const img = new Image();
   img.src = 'data:image/png;base64,' + b64;
   await img.decode();
@@ -169,6 +193,71 @@ const POSTER_IN_PAGE = async (b64, stageRect, innerRect, bgHex, outWidth, outHei
   const dw = Math.max(1, Math.round(cw * scale));
   const dh = Math.max(1, Math.round(ch * scale));
   ctx.drawImage(src, cx, cy, cw, ch, Math.round((outWidth - dw) / 2), Math.round((outHeight - dh) / 2), dw, dh);
+
+  /* ⑤ 高亮标注:告诉用户「这块能换」。把页面里的 CSS 矩形映射到最终封面的像素坐标:
+   *   ① 相对 stage 的 CSS 坐标 → 截图像素(乘 k);② 减去画布裁剪原点(sx, sy)得到 src 画布内的坐标;
+   *   ③ 再按「内容包围盒 → 封面」的缩放与居中偏移映射到输出画布。 */
+  if (highlightRect && highlightLabel) {
+    const hx = (highlightRect.x - stageRect.x) * k - sx;
+    const hy = (highlightRect.y - stageRect.y) * k - sy;
+    const hw = highlightRect.width * k;
+    const hh = highlightRect.height * k;
+    const ox = Math.round((outWidth - dw) / 2) + (hx - cx) * scale;
+    const oy = Math.round((outHeight - dh) / 2) + (hy - cy) * scale;
+    const ow = hw * scale;
+    const oh = hh * scale;
+    if (ow > 2 && oh > 2 && ox + ow > 0 && oy + oh > 0 && ox < outWidth && oy < outHeight) {
+      const accent = '#ffd166';
+      const ringCx = ox + ow / 2;
+      const ringCy = oy + oh / 2;
+      const ringR = Math.max(ow, oh) / 2 * 1.28 + 6;
+      ctx.save();
+      // 圈:双描边(外侧暗色描边让它在浅色内容上也看得清)
+      ctx.lineWidth = 6;
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+      ctx.beginPath();
+      ctx.arc(ringCx, ringCy, ringR, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = accent;
+      ctx.beginPath();
+      ctx.arc(ringCx, ringCy, ringR, 0, Math.PI * 2);
+      ctx.stroke();
+      // 说明文字:半透明深色圆角底 + 强调色文字,放在圈的右下方(超出画面时自动换边)
+      const fs = Math.max(13, Math.round(outHeight / 360 * 19));
+      ctx.font = '600 ' + fs + 'px "Microsoft YaHei","Segoe UI",sans-serif';
+      ctx.textBaseline = 'middle';
+      const tw = ctx.measureText(highlightLabel).width;
+      const chipW = tw + fs * 1.3;
+      const chipH = fs * 1.75;
+      const gap = 7;
+      let chipX = ringCx + ringR * 0.72;
+      let chipY = ringCy + ringR * 0.72 + gap + chipH / 2;
+      if (chipX + chipW > outWidth - 4) chipX = Math.max(4, outWidth - 4 - chipW);
+      if (chipY + chipH / 2 > outHeight - 4) chipY = ringCy - ringR * 0.72 - gap - chipH / 2;
+      chipY = Math.min(outHeight - 4 - chipH / 2, Math.max(4 + chipH / 2, chipY));
+      const chipR = chipH / 2;
+      ctx.beginPath();
+      ctx.moveTo(chipX + chipR, chipY - chipH / 2);
+      ctx.lineTo(chipX + chipW - chipR, chipY - chipH / 2);
+      ctx.quadraticCurveTo(chipX + chipW, chipY - chipH / 2, chipX + chipW, chipY - chipH / 2 + chipR);
+      ctx.lineTo(chipX + chipW, chipY + chipH / 2 - chipR);
+      ctx.quadraticCurveTo(chipX + chipW, chipY + chipH / 2, chipX + chipW - chipR, chipY + chipH / 2);
+      ctx.lineTo(chipX + chipR, chipY + chipH / 2);
+      ctx.quadraticCurveTo(chipX, chipY + chipH / 2, chipX, chipY + chipH / 2 - chipR);
+      ctx.lineTo(chipX, chipY - chipH / 2 + chipR);
+      ctx.quadraticCurveTo(chipX, chipY - chipH / 2, chipX + chipR, chipY - chipH / 2);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(16,16,16,0.86)';
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = accent;
+      ctx.stroke();
+      ctx.fillStyle = accent;
+      ctx.fillText(highlightLabel, chipX + fs * 0.65, chipY + 1);
+      ctx.restore();
+    }
+  }
   return {
     dataUrl: cv.toDataURL('image/webp', 0.88),
     // 内容包围盒占画布的比例,用于判断「有没有真的裁紧」(0.25 表示内容只有画面 1/4 大)
@@ -279,22 +368,30 @@ async function main() {
         return { x: r.x, y: r.y, width: r.width, height: r.height };
       });
       const bgHex = await page.evaluate(() => document.getElementById('bgColor').value);
+      /* 需要标注「这块能换」的动画:截图前先在页面里量出目标元素的矩形
+       * (POSTER_HIGHLIGHT.find 是自包含函数,直接投进浏览器执行) */
+      const hl = POSTER_HIGHLIGHT[key];
+      const highlightRect = hl ? await page.evaluate(hl.find) : null;
       const shot = await page.screenshot({
         encoding: 'base64',
         clip: { x: stageRect.x, y: stageRect.y, width: stageRect.width, height: stageRect.height },
       });
       const poster = await page.evaluate(
-        POSTER_IN_PAGE, shot, stageRect, innerRect, bgHex, OUT_WIDTH, OUT_HEIGHT);
+        POSTER_IN_PAGE, shot, stageRect, innerRect, bgHex, OUT_WIDTH, OUT_HEIGHT,
+        highlightRect, hl ? hl.label : null);
       if (navCount !== navBase) continue; // 截图期间被重载,这一张作废重来
       result = {
         key, label, frame: frame.f + '/' + frame.total, crop: poster.crop,
+        highlighted: !!highlightRect,
         buf: Buffer.from(poster.dataUrl.split(',')[1], 'base64'),
       };
     }
     if (!result) throw new Error('生成「' + label + '」失败:页面反复被重载,请确认 dev server 上报的文件变化已停止');
     report.push(result);
     console.log('[posters] ' + key.padEnd(11) + label.padEnd(10) + ' 帧 ' + result.frame.padEnd(9) +
-      ' 内容占画面 ' + (result.crop * 100).toFixed(1) + '% → posters/' + key + '.webp (' + (result.buf.length / 1024).toFixed(1) + ' KB,待落盘)');
+      ' 内容占画面 ' + (result.crop * 100).toFixed(1) + '%' +
+      (result.highlighted ? ' + 高亮标注' : '') +
+      ' → posters/' + key + '.webp (' + (result.buf.length / 1024).toFixed(1) + ' KB,待落盘)');
   }
 
   await browser.close();

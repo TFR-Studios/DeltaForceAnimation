@@ -826,6 +826,103 @@ input[type="color"] { padding: 0; width: 34px; height: 26px; flex: none; }
 }
 .icon-item.is-active .icon-name { color: var(--accent); }
 
+/* 预设列表(大战场弹窗动画):一项 = 预设图标缩略图 + 预设名 + 会写入的两行文字预览。
+ * 整行可点(套用预设),选中项高亮 —— 判定是「当前图标与两行文字与哪条预设完全一致」,
+ * 所以手动改过之后高亮会自己消失,不需要脏标记(见 main.ts 的 activeBattlefieldPresetIndex)。
+ * 整块默认**收起**:条目带两行文案预览,5 条铺开要占近半屏,所以标题行做成折叠开关(见下面的 .preset-toggle)。 */
+#presetList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.preset-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.preset-item:hover { border-color: var(--accent); }
+.preset-item.is-active {
+  border-color: var(--accent);
+  background: rgba(59, 130, 246, 0.12);
+}
+.preset-thumb {
+  width: 34px;
+  height: 34px;
+  object-fit: contain;
+  flex: 0 0 auto;
+}
+.preset-texts { min-width: 0; }
+.preset-name { display: block; font-size: 12px; color: var(--text); }
+.preset-item.is-active .preset-name { color: var(--accent); }
+.preset-sample {
+  display: block;
+  font-size: 10px;
+  color: var(--dim);
+  line-height: 1.35;
+  word-break: break-all;
+}
+.preset-note {
+  margin: 8px 0 0;
+  font-size: 10px;
+  color: var(--dim);
+  line-height: 1.5;
+}
+
+/* 预设区块的标题行 = 折叠开关(整行可点)。它故意**不**继承 h3 的「灰、大写、小字距」区块标题样式:
+ * 那是静态标题的排版,可点控件长成那样会没人发现(实测反馈:太不显眼)。这里做成卡片按钮 ——
+ * 面板底色 + 圆角边框 + 强调色箭头,悬停或展开时边框变强调色;右侧常驻状态提示。
+ * 箭头用 SVG 画,展开时旋转 90°。 */
+.side-panel h3.preset-head { margin: 18px 0 8px; }
+.preset-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 9px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.preset-toggle:hover { border-color: var(--accent); }
+.preset-toggle.is-open { border-color: var(--accent); background: rgba(59, 130, 246, 0.12); }
+.preset-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.preset-caret {
+  width: 11px;
+  height: 11px;
+  flex: 0 0 auto;
+  color: var(--accent);
+  fill: currentColor;
+  transition: transform 0.15s ease;
+}
+.preset-toggle.is-open .preset-caret { transform: rotate(90deg); }
+.preset-count { font-weight: 400; font-size: 11px; color: var(--dim); }
+.preset-hint {
+  margin-left: auto;
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--dim);
+  white-space: nowrap;
+}
+.preset-hint.is-current { color: var(--accent); }
+
 /* 弹窗面板 */
 /* 弹窗设置卡片:显示开关 + 弹窗文字列表 + 弹窗颜色列表。
  * 名称含「蒙版」的图层在 main.ts 里被排除,不给颜色控件(改色会破坏蒙版形状与配对);

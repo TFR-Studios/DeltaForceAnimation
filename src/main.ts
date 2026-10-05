@@ -13,19 +13,23 @@
  *   图片序列驱动(逐帧换 src / <image> href,并强制 lottie 重绘,否则静态层画过一次就不再更新)、
  *   叠加序列调色(feColorMatrix 做 colorize,滤镜宿主挂在 body 的隐藏 svg 上,预览与导出共用)。
  *
- * 七套动画(ANIMATIONS,按需加载):撤离动画(1920×1080)、位置暴露动画(画布加宽为 3840×1080,
+ * 八套动画(ANIMATIONS,按需加载):撤离动画(1920×1080)、位置暴露动画(画布加宽为 3840×1080,
  *   可把「二次扫描」第二段合并进同一条时间轴)、核电站功率动画(两条 359 帧透明序列叠加)、
  *   任务弹窗动画(1920×1080,自带一枚货币图标,可在「图标选择」里替换/上传并调不透明度)、
  *   地图标题动画(宽画布 2560×1024,纯文字 + 形状的「地图名称 / 地图地点」标题卡,
  *   文字左对齐、底框与描边随文字宽度自适应)、
  *   黑潮爆破默认弹窗动画(1920×1080,两张位图 + 696 帧逐帧序列 + 毛边/模糊形状做轨道遮罩)、
- *   制导导弹弹窗动画(1920×1080,两张文字 + 一条 HUD 弹窗 + 一张小图标)。
+ *   大战场弹窗动画(1920×1080,两行占位文字「主标题 / 内容」+ 一条 HUD 弹窗 + 一张可换的图标)、
+ *   撤离点开启动画(1920×1080,一行状态文字 + 一张小图标 + 轨道遮罩形状 + 整幅黑底)。
  *
  * 编辑面板(所有编辑都是就地改渲染用的 JSON,再走 reRenderPreservingState() 单飞重建并恢复播放位置):
  *   • 文字 / 形状 / 图片图层列表 —— 顶层与被引用的预合成(assets[] 里的合成)内部都列出,预合成项名字带「合成名 ›」前缀;
  *     预合成内部的 ind 会和顶层撞号,载入时统一平移到独立号段(见 normalizePrecompInds);
  *   • 主题颜色 —— 两个色块把「默认填充色 / 描边默认色」两族颜色值整族替换(按颜色值匹配,填充与描边一起换);
- *   • 图标替换(位置暴露两段可分别设置;任务弹窗动画单图标位)、图标不透明度、弹窗叠加层、动画时长(1–10s)与二次扫描时长;
+ *   • 图标替换(位置暴露两段可分别设置;任务弹窗动画、大战场弹窗动画单图标位,候选来自各自的图标目录)、
+ *     图标不透明度、弹窗叠加层、动画时长(1–10s)与二次扫描时长;
+ *   • 预设(仅大战场弹窗动画):列表来自 animations/animation_7/preset.txt(图标 + 预设名 + 两行文案),
+ *     点一项就把图标与两行文字一起套用,之后还能在「文字图层 / 图标选择」里继续微调;
  *   • 占位色不作为编辑项展示:纯红填充 #ff0000、纯白描边 #ffffff、预合成里的紫色描边 #5400ff(判据见 hideShapeFill / hideShapeStroke)。
  *
  * 导出管线:逐帧 renderer.renderFrame(n, true) 渲染 → WebCodecs H.264 编码 → mp4-muxer 封装 MP4;
@@ -1161,6 +1165,13 @@ const iconOpacityVal = $<HTMLSpanElement>('iconOpacityVal');
 /* 「报酬信息」统一开关(仅任务弹窗动画):控制「预期报酬」「数字」与货币图标的显隐 */
 const missionRewardSection = $<HTMLDivElement>('missionRewardSection');
 const chkMissionReward = $<HTMLInputElement>('chkMissionReward');
+/* 预设(仅大战场弹窗动画):列表来自 animations/animation_7/preset.txt */
+const presetSection = $<HTMLDivElement>('presetSection');
+const presetToggle = $<HTMLButtonElement>('presetToggle');
+const presetBody = $<HTMLDivElement>('presetBody');
+const presetList = $<HTMLUListElement>('presetList');
+const presetCount = $<HTMLElement>('presetCount');
+const presetHint = $<HTMLElement>('presetHint');
 /* 图标选择的分段选项卡:位置暴露(主段)/ 二次扫描(第二段)分别自定义图标 */
 const iconScopeMain = $<HTMLButtonElement>('iconScopeMain');
 const iconScopeNext = $<HTMLButtonElement>('iconScopeNext');
@@ -2216,6 +2227,10 @@ function updateInfo(data: any) {
 
   renderShapeList(data);
 
+  /* 预设(只有大战场弹窗动画有):重建后刷新选中态 —— 判据是「图标与两行文字与哪条预设完全一致」,
+   * 所以手动改过文字 / 图标之后高亮会自己消失,不需要额外维护状态。 */
+  if (!presetSection.hidden) renderBattlefieldPresets();
+
   if (fonts.length) {
     if (fontStates.includes('failed')) {
       setStatus('字体加载失败(' + lastFontWarnings.slice(0, 2).join('; ') + '),预览文字已回退系统字体', true);
@@ -2429,6 +2444,7 @@ function onTextEdited(ind: number, newText: string) {
   setLayerText(layer, newText);
   adaptDikuangWidth(); // 文字宽度变化 → 底框宽度同步
   adaptMaptitlePlateWidth(); // 地图标题动画:底框/描边跟着文字宽度走(只增不减)
+  refreshBattlefieldPresetHighlight(); // 改字后预设可能就不再匹配了(只重画预设列表,不动输入框)
   // 防抖后重渲染(保留当前帧/播放状态/缩放)
   window.clearTimeout(textEditTimer);
   textEditTimer = window.setTimeout(() => {
@@ -2502,6 +2518,7 @@ function onResetText(ind: number) {
   resetLayerOpacity(ind);
   adaptDikuangWidth(); // 文字恢复原宽 → 底框恢复基准宽
   adaptMaptitlePlateWidth(); // 地图标题动画:文字回到基准宽度 → 衬板也回到基准宽
+  refreshBattlefieldPresetHighlight(); // 文字被还原 → 预设高亮可能要跟着变
   // 同步 UI
   const ta = textList.querySelector<HTMLTextAreaElement>('.t-input[data-ind="' + ind + '"]');
   if (ta) ta.value = String(orig.text).replace(/\r/g, '\n');
@@ -4882,7 +4899,8 @@ import animation3DataUrl from '../animations/animation_3/animation_data.json?url
 import missionDataUrl from '../animations/animation_4/animation_data.json?url';
 import mapTitleDataUrl from '../animations/animation_5/animation_data.json?url';
 import blastDataUrl from '../animations/animation_6/animation_data.json?url';
-import guidedMissileDataUrl from '../animations/animation_7/animation_data.json?url';
+import battlefieldDataUrl from '../animations/animation_7/animation_data.json?url';
+import evacPointDataUrl from '../animations/animation_8/animation_data.json?url';
 /* 黑潮爆破默认弹窗动画的位图素材(animations/animation_6/images/*.png):
  * JSON 里是相对路径(u:"images/"),站点产物里没有 images/ 目录,必须按静态资源打包后改写资源地址
  * (见 ensureBlastData)。目录里同时还有一份 AE 视频图层的素材(.gif / .mp4),它们随 ty:9 视频图层一起被丢掉。
@@ -4896,11 +4914,20 @@ const blastImageModules = import.meta.glob('../animations/animation_6/images/*.p
   query: '?url&no-inline',
   import: 'default',
 }) as Record<string, string>;
-/* 制导导弹弹窗动画的位图素材(animations/animation_7/images/*.png):
+import battlefieldPresetRaw from '../animations/animation_7/preset.txt?raw';
+/* 大战场弹窗动画的位图素材(animations/animation_7/images/*.png):
  * 与黑潮爆破同一套做法 —— 数据里是相对路径(u:"images/" + p:"167.png"),站点产物里没有那个目录,
- * 必须按静态资源打包再改写地址(见 ensureGuidedMissileData)。同目录的 .gif/.mp4 是 AE 视频图层素材,
+ * 必须按静态资源打包再改写地址(见 ensureBattlefieldData)。同目录的 .gif/.mp4 是 AE 视频图层素材,
  * 随 ty:9 图层一起被丢掉,不会走这里。用 glob 而不是写死 167.png:重导出换名/加图都不用改代码。 */
-const guidedMissileImageModules = import.meta.glob('../animations/animation_7/images/*.png', {
+const battlefieldImageModules = import.meta.glob('../animations/animation_7/images/*.png', {
+  eager: true,
+  query: '?url&no-inline',
+  import: 'default',
+}) as Record<string, string>;
+/* 撤离点开启动画(animations/animation_8)的位图素材:目前只有一张 48×48 的小图标(83.png),
+ * 数据里同样是相对路径(u:"images/"),站点产物里没有那个目录 —— 按静态资源打包再改写地址(见 ensureEvacPointData)。
+ * 同样用 glob:重导出换名/加图都不用改代码。 */
+const evacPointImageModules = import.meta.glob('../animations/animation_8/images/*.png', {
   eager: true,
   query: '?url&no-inline',
   import: 'default',
@@ -5468,6 +5495,58 @@ async function ensureMapTitleData(onProgress?: (p: number | null) => void): Prom
 }
 
 
+/* ---------- 弹窗类动画共用的两项资源预处理 ----------
+ * animations/animation_4(任务弹窗)/ animation_6(黑潮爆破)/ animation_7(大战场)/ animation_8(撤离点开启)
+ * 这几套导出的位图资源在 JSON 里都是**相对路径**(u:"images/" + p:"xxx.png"),而站点产物是扁平目录、
+ * 没有 images/ 子目录,原样渲染必然 404(SVG / Canvas 都画成空白图);另外 AE 工程里隐藏的视频图层(ty:9)
+ * 照样会被导出,连带的资源在浏览器侧是残缺的。这两条规则原来在前三套动画里各写了一份,
+ * 新增第四套时抽成公共函数 —— 同一条规则不必在四个地方各修一遍。 */
+
+/* ① 把「相对路径」的位图资源改写成打包后的静态资源地址。
+ * urlByBase 是「文件基名 → ?url 产物地址」表:重新导出时 AE 可能把素材归到子目录,只比对完整 p 会漏改,
+ * 所以一律按基名匹配。只认相对路径 —— 已是 data: URI / http(s) / 站点绝对路径的资源不去动它。
+ * 表里找不到的(视频 / GIF 素材)原样留着,引用它们的 ty:9 图层随后会被下面那个函数连人带资源删掉。 */
+function rewriteRelativeImageAssets(data: any, urlByBase: Map<string, string>) {
+  const isAbsoluteAssetUrl = (p: string) => /^(data:|https?:|\/\/|\/|\.\.?[\/\\])/i.test(p);
+  for (const a of data.assets ?? []) {
+    if (typeof a?.p !== 'string' || isAbsoluteAssetUrl(a.p)) continue;
+    const base = a.p.split(/[\/\\]/).pop() ?? '';
+    const url = urlByBase.get(base);
+    if (!url) continue;
+    a.p = url;
+    a.u = '';
+    a.e = 1; // 只有 e 为真时 lottie 才把 p 当作完整地址
+  }
+}
+
+/* ② 递归丢掉视频图层(ty:9),再删掉**没有任何图层再引用**的资源(预合成内部一并处理)。
+ * 为什么这两步必须一起做:数据里除了引用 GIF 的 ty:9 图层,还可能带 xt:1 的外链预合成(数值 id,内容全是
+ * 视频层)。lottie 的 searchExtraCompositions 会对每个 xt 资源直接 createComp,而这些资源在浏览器侧是残缺的,
+ * 构建时抛 TypeError;异常正好落在 AnimationItem.configAnimation 的 try/catch 里被吞掉 ——
+ * 表现为 DOMLoaded 永不触发、**预览整帧全黑**(SVG / Canvas 都一样,实测)。
+ * ⚠ 「按引用回收」只认图层的 refId:黑潮爆破的 696 个序列帧资源正是被 sequence_0 内部的图层逐个 refId 引用,
+ * 所以它们会**原样保留**(实测 696/696 全部留着);重新导出后若资源数骤降,先查这一条。
+ * 引用表必须在「删完视频图层之后」重新收集 —— 否则刚被删掉的视频层仍会把 video_* 算成「有人在用」。 */
+function stripVideoLayersAndReclaimAssets(data: any) {
+  const dropVideoLayers = (layers: any[]): any[] => (layers ?? []).filter((l) => {
+    if (l && l.ty === 9) return false;
+    if (Array.isArray(l?.layers)) l.layers = dropVideoLayers(l.layers);
+    return true;
+  });
+  data.layers = dropVideoLayers(data.layers);
+  for (const a of data.assets ?? []) if (Array.isArray(a.layers)) a.layers = dropVideoLayers(a.layers);
+  const usedRefs = new Set<string>();
+  const collectRefs = (layers: any[]) => {
+    for (const l of layers ?? []) {
+      if (typeof l?.refId === 'string') usedRefs.add(l.refId);
+      if (Array.isArray(l?.layers)) collectRefs(l.layers);
+    }
+  };
+  collectRefs(data.layers);
+  for (const a of data.assets ?? []) if (Array.isArray(a.layers)) collectRefs(a.layers);
+  data.assets = (data.assets ?? []).filter((a: any) => usedRefs.has(String(a.id)));
+}
+
 /* ---------- 黑潮爆破默认弹窗动画(animations/animation_6)----------
  * 数据 = animations/animation_6/animation_data.json(1920×1080 / 60fps / op=600 = 600 帧,保持 AE 导出原样;
  * 这套动画**不配 caps.defaultDuration**,侧栏也没有时长区块 —— 改时长会搬动末尾淡出关键帧,属于改数据)。
@@ -5492,6 +5571,8 @@ async function ensureMapTitleData(onProgress?: (p: number | null) => void): Prom
  *     所以它们会**原样保留**(实测 696/696 全部留着);重新导出后若资源数骤降,先查这一条。
  *  ③ 剩余资源里有 tt:3 亮度遮罩,canvas 渲染器根本构建不出来(上游 lottie-web 的 bug,见 hasLumaMatte),
  *     所以这套动画的预览与导出都必须走 SVG —— 由 hasLumaMatte 统一判定,切到该动画时自动切回 SVG 渲染器。
+ * ①② 两步的代码已抽成公共函数(rewriteRelativeImageAssets / stripVideoLayersAndReclaimAssets,见上方),
+ * 这里保留的是「为什么必须这么做」的来龙去脉;③ 由 hasLumaMatte 自动判定,载入侧无需代码。
  * 字体与其它动画一致(fName = ProjectDType-Medium / ProjectDTypeCurve-Bold,fPath 已被剥离),
  * 运行时由 loadEmbeddedFonts 从 animations/animation_1/fonts/ 注册,这里不需要额外处理。 */
 let blastData: any = null;
@@ -5514,37 +5595,10 @@ async function ensureBlastData(onProgress?: (p: number | null) => void): Promise
     try {
       const [raw] = await fetchJsonBundle([blastDataUrl], onProgress);
       const data = JSON.parse(raw);
-      /* ① 把相对路径的位图资源改写成打包地址 */
-      const isAbsoluteAssetUrl = (p: string) => /^(data:|https?:|\/\/|\/|\.\.?[\/\\])/i.test(p);
-      for (const a of data.assets ?? []) {
-        if (typeof a?.p !== 'string' || isAbsoluteAssetUrl(a.p)) continue;
-        const base = a.p.split(/[\/\\]/).pop() ?? '';
-        const url = blastImageUrlByBase.get(base);
-        if (!url) continue; // 视频 / GIF 素材:引用它们的图层随后会被删掉,这里不动
-        a.p = url;
-        a.u = '';
-        a.e = 1;
-      }
-      /* ② 递归丢掉视频图层(ty:9),预合成内部也一并处理 */
-      const dropVideoLayers = (layers: any[]): any[] => (layers ?? []).filter((l) => {
-        if (l && l.ty === 9) return false;
-        if (Array.isArray(l?.layers)) l.layers = dropVideoLayers(l.layers);
-        return true;
-      });
-      data.layers = dropVideoLayers(data.layers);
-      for (const a of data.assets ?? []) if (Array.isArray(a.layers)) a.layers = dropVideoLayers(a.layers);
-      /* ②续 删掉没有任何图层引用的资源:xt 外链预合成与视频资源都在此列。
-       * 引用表必须在「删完视频图层之后」重新收集 —— 否则刚被删掉的视频层仍会把 video_* 算作「有人在用」。 */
-      const usedRefs = new Set<string>();
-      const collectRefs = (layers: any[]) => {
-        for (const l of layers ?? []) {
-          if (typeof l?.refId === 'string') usedRefs.add(l.refId);
-          if (Array.isArray(l?.layers)) collectRefs(l.layers);
-        }
-      };
-      collectRefs(data.layers);
-      for (const a of data.assets ?? []) if (Array.isArray(a.layers)) collectRefs(a.layers);
-      data.assets = (data.assets ?? []).filter((a: any) => usedRefs.has(String(a.id)));
+      /* ① 把相对路径的位图资源改写成打包地址(包含 700 多条逐帧序列资源,一个都不能漏) */
+      rewriteRelativeImageAssets(data, blastImageUrlByBase);
+      /* ② 丢视频图层 + 回收没人引用的资源(xt 外链预合成与 GIF 素材都在此列) */
+      stripVideoLayersAndReclaimAssets(data);
       blastData = data;
     } catch (e) {
       console.error('[黑潮爆破动画数据解析失败]', e);
@@ -5556,83 +5610,124 @@ async function ensureBlastData(onProgress?: (p: number | null) => void): Promise
   return blastDataPromise;
 }
 
-/* ---------- 制导导弹弹窗动画(animations/animation_7)----------
- * 数据 = animations/animation_7/animation_data.json(1920×1080 / 60fps / op=161 = 161 帧 ≈ 2.68s;
+/* ---------- 大战场弹窗动画(animations/animation_7)----------
+ * 数据 = animations/animation_7/animation_data.json(1920×1080 / 60fps / op=180 = 180 帧 = 3.00s;
+ * 两行文字分别在第 34~48 / 60~72 帧淡入、整体在第 130~144 帧淡出,末尾约 0.6s 空尾(与 AE 一致);
  * 和黑潮爆破一样**不配 caps.defaultDuration**、侧栏没有「动画时长」区块 —— 改时长的实现是搬运末尾
  * 淡出关键帧,对弹窗类动画属于改数据,不如保持 AE 导出原样)。
- * 画面内容:「我军已发射制导导弹」(ProjectDTypeCurve-Bold)+「评估目标区域损害,快速清理残余敌人」
- *      (ProjectDType-Medium)两个文字层,配一条由底板 / 底框 / 虚线 / 蒙版叠出来的 HUD 弹窗,
- *      以及一张 91×92 的小图标(167.png,出场时淡入)。
- * 两个文字层的文字与颜色都由侧栏「文字图层」列表通用编辑(collectTextLayers 自动发现 ty:5 图层),
- * 因此本函数只负责把数据准备好,没有额外的专用编辑逻辑。
- * 载入时做两件事:
+ * 画面内容:两行文字 + 一条由底板 / 底框 / 虚线 / 蒙版叠出来的 HUD 弹窗 + 一张 91×92 的小图标
+ *      (默认 167.png,出场时淡入)。
+ * 这套动画现在当作「可换图标的通用弹窗模板」用,所以数据里的两行文字也已经改成占位文案:
+ *      ind 4「主标题」(ProjectDTypeCurve-Bold,先淡入)+ ind 3「内容」(ProjectDType-Medium,后淡入)。
+ *      ⚠ 这是**手改本地数据**的结果,从 AE 重新导出会把它覆盖回原文案。
+ *      图层名 nm 与文字内容是同一个字符串(这份导出的习惯),所以两处一起改,侧栏列表里显示的
+ *      就是「内容 / 主标题」而不是原文案。
+ *      另外这份数据自带 chars 字形表,里面只烘焙了原文案用到的字;改成「主标题 / 内容」后
+ *      chars 盖不住(缺 主/题/内/容),运行时由 dropCharsIfUncovered 自动丢掉字形表、
+ *      退回浏览器文本引擎(字体仍是 ProjectDType 系列,肉眼一致)。
+ * 两个文字层的文字与颜色都由侧栏「文字图层」列表通用编辑(collectTextLayers 自动发现 ty:5 图层);
+ * 图标由侧栏「图标选择」在 animations/animation_7/images/ 的几张图标间切换(见 BATTLEFIELD_ICON_OPTIONS)。
+ * 载入时做三件事:
  *  ① 位图资源是相对路径(u:"images/",p:"167.png"),站点产物里没有 images/ 目录,原样渲染必 404。
- *     按**文件基名**把 animations/animation_7/images/*.png 换成本地打包地址(p 指向 ?url 产物、u 置空、
- *     e 置 1 —— 只有 e 为真时 lottie 才把 p 当完整地址);只认相对路径,重新导出若已写成 data: URI
- *     或绝对地址就不去动它。与任务弹窗 / 黑潮爆破同规则。
+ *     按**文件基名**把 animations/animation_7/images/*.png 换成本地打包地址(与任务弹窗 / 黑潮爆破同规则)。
  *  ② 防御性丢掉视频图层(ty:9)与「删完之后没有任何图层再引用」的资源:本套导出里没有这两样,
- *     但 AE 工程里隐藏的视频素材照样会被导出,留着就是 DOMLoaded 永不触发的整帧黑屏(详见 ensureBlastData)。
+ *     但 AE 工程里隐藏的视频素材照样会被导出,留着就是 DOMLoaded 永不触发的整帧黑屏(成因见 ensureBlastData)。
+ *     ①② 两步由公共函数完成(rewriteRelativeImageAssets / stripVideoLayersAndReclaimAssets,见 ensureBlastData 上方)。
+ *  ③ 给图标资源写上 pr = BATTLEFIELD_ICON_FIT,让图标「等比完整显示」而不是被裁切(原因见 BATTLEFIELD_ICON_FIT)。
  * 字体与其它动画一致(fName = ProjectDType-Medium / ProjectDTypeCurve-Bold),运行时由 loadEmbeddedFonts
  * 从 animations/animation_1/fonts/ 注册;chars 只烘焙了导出时的那些字,改字后由 dropCharsIfUncovered
  * 自动退回浏览器文本引擎,不会出现「新字消失」。 */
-let guidedMissileData: any = null;
-let guidedMissileDataPromise: Promise<void> | null = null;
+let battlefieldData: any = null;
+let battlefieldDataPromise: Promise<void> | null = null;
 /* 位图素材的「文件基名 → 打包地址」表:重新导出时 AE 可能把素材归到子目录,只比对完整 p 会漏改 */
-const guidedMissileImageUrlByBase = new Map<string, string>();
-for (const [path, url] of Object.entries(guidedMissileImageModules)) {
+const battlefieldImageUrlByBase = new Map<string, string>();
+for (const [path, url] of Object.entries(battlefieldImageModules)) {
   const base = path.split('/').pop();
-  if (base) guidedMissileImageUrlByBase.set(base, url);
+  if (base) battlefieldImageUrlByBase.set(base, url);
 }
 
-async function ensureGuidedMissileData(onProgress?: (p: number | null) => void): Promise<void> {
-  if (guidedMissileData) return;
-  if (guidedMissileDataPromise) {
+async function ensureBattlefieldData(onProgress?: (p: number | null) => void): Promise<void> {
+  if (battlefieldData) return;
+  if (battlefieldDataPromise) {
     if (onProgress) onProgress(null); // 已在加载中:以不确定进度显示
-    return guidedMissileDataPromise;
+    return battlefieldDataPromise;
   }
-  guidedMissileDataPromise = (async () => {
+  battlefieldDataPromise = (async () => {
     try {
-      const [raw] = await fetchJsonBundle([guidedMissileDataUrl], onProgress);
+      const [raw] = await fetchJsonBundle([battlefieldDataUrl], onProgress);
       const data = JSON.parse(raw);
-      /* ① 把相对路径的位图资源改写成打包地址 */
-      const isAbsoluteAssetUrl = (p: string) => /^(data:|https?:|\/\/|\/|\.\.?[\/\\])/i.test(p);
-      for (const a of data.assets ?? []) {
-        if (typeof a?.p !== 'string' || isAbsoluteAssetUrl(a.p)) continue;
-        const base = a.p.split(/[\/\\]/).pop() ?? '';
-        const url = guidedMissileImageUrlByBase.get(base);
-        if (!url) continue; // 视频 / GIF 素材:引用它们的图层随后会被删掉,这里不动
-        a.p = url;
-        a.u = '';
-        a.e = 1;
-      }
-      /* ② 递归丢掉视频图层(ty:9),预合成内部也一并处理 */
-      const dropVideoLayers = (layers: any[]): any[] => (layers ?? []).filter((l) => {
-        if (l && l.ty === 9) return false;
-        if (Array.isArray(l?.layers)) l.layers = dropVideoLayers(l.layers);
-        return true;
-      });
-      data.layers = dropVideoLayers(data.layers);
-      for (const a of data.assets ?? []) if (Array.isArray(a.layers)) a.layers = dropVideoLayers(a.layers);
-      /* ②续 删掉没有任何图层引用的资源(必须在删完视频图层之后再收集引用表) */
-      const usedRefs = new Set<string>();
-      const collectRefs = (layers: any[]) => {
-        for (const l of layers ?? []) {
-          if (typeof l?.refId === 'string') usedRefs.add(l.refId);
-          if (Array.isArray(l?.layers)) collectRefs(l.layers);
-        }
-      };
-      collectRefs(data.layers);
-      for (const a of data.assets ?? []) if (Array.isArray(a.layers)) collectRefs(a.layers);
-      data.assets = (data.assets ?? []).filter((a: any) => usedRefs.has(String(a.id)));
-      guidedMissileData = data;
+      rewriteRelativeImageAssets(data, battlefieldImageUrlByBase); // ①
+      stripVideoLayersAndReclaimAssets(data); // ②
+      /* ③ 图标资源标记为「等比缩放、完整显示」(见 BATTLEFIELD_ICON_FIT)。
+       *    资源自己的 pr 优先于站点级配置(lottie 的 IImageElement 取 assetData.pr),
+       *    SVG 与 Canvas 两个渲染器都认它 —— 预览与导出因此一致。 */
+      for (const a of data.assets ?? []) if (a?.w && a?.h && a.t !== 'seq') a.pr = BATTLEFIELD_ICON_FIT;
+      battlefieldData = data;
     } catch (e) {
-      console.error('[制导导弹弹窗动画数据解析失败]', e);
-      setStatus('制导导弹弹窗动画数据解析失败: ' + (e as Error).message, true);
+      console.error('[大战场弹窗动画数据解析失败]', e);
+      setStatus('大战场弹窗动画数据解析失败: ' + (e as Error).message, true);
     }
     // 失败时允许下次重试
-    if (!guidedMissileData) guidedMissileDataPromise = null;
+    if (!battlefieldData) battlefieldDataPromise = null;
   })();
-  return guidedMissileDataPromise;
+  return battlefieldDataPromise;
+}
+
+/* ---------- 撤离点开启动画(animations/animation_8)----------
+ * 数据 = animations/animation_8/animation_data.json(1920×1080 / 60fps / op=197 = 197 帧 ≈ 3.28s;
+ * 与两套弹窗动画一样**不配 caps.defaultDuration**,侧栏没有「动画时长」区块,时间轴按 AE 导出原样呈现)。
+ * 画面内容:一条居中文字「紧急停堆撤离点已打开」(ProjectDTypeCurve-Bold,白色,第 32~37 帧淡入、
+ *      第 118~124 帧淡出)+ 一张 48×48 小图标(83.png,与文字同步淡入淡出)+ 几层浅灰形状
+ *      (#cecece / #a3a5a8 的边框与角标,第 20~25 帧淡入)+ 一层整幅黑底(纯色层,29 帧后稳定在 66% 不透明度),
+ *      整组由「空 1」空对象带动。形状层之间用轨道遮罩(tt=1/2,遮罩源由 tp 显式指定)做出「扫描/开合」的效果。
+ * 可编辑项由通用面板 + 一处专用逻辑提供:
+ *      • 文字与文字颜色 —— 侧栏「文字图层」列表(collectTextLayers 自动发现这个 ty:5 图层);
+ *      • 画面颜色 —— 「形状图层」列表里每一层的填充/描边取色器(本套可见形状是 #cecece / #a3a5a8 /
+ *        #fdfdfd 一族,都不是占位色,所以六个可见形状层都带取色器);
+ *        「主题颜色」区块**不会出现** —— 它只跟踪站点约定的两族 HUD 色(#77b0f0 / #78c5f3),
+ *        本套是灰白配色,不属于那两族(见 countThemeColors);
+ *      • 每层不透明度 —— 各列表项自带的滑块;
+ *      • 图标 —— 侧栏「图标选择」在 animations/animation_8/images/ 的几张图标间切换
+ *        (见 EVACPOINT_ICON_OPTIONS),也可以上传自定义图标(单图标位形态,没有分段选项卡)。
+ * 载入时做三件与其它弹窗类动画相同的事:
+ *      ① 位图资源是相对路径(u:"images/",p:"83.png"),按文件基名换成本地打包地址;
+ *      ② 防御性丢掉 ty:9 视频图层与「删完之后没人引用」的资源(本套导出里没有,理由见 ensureBlastData);
+ *      ③ 给图标资源写上 pr = EVACPOINT_ICON_FIT,让上传的非正方图标「等比完整显示」而不是被裁切。
+ * 字体与其它动画共用(fName = ProjectDTypeCurve-Bold,运行时从 animations/animation_1/fonts/ 注册);
+ * chars 只烘焙了导出时的那些字,改字后由 dropCharsIfUncovered 自动退回浏览器文本引擎。 */
+let evacPointData: any = null;
+let evacPointDataPromise: Promise<void> | null = null;
+const evacPointImageUrlByBase = new Map<string, string>();
+for (const [path, url] of Object.entries(evacPointImageModules)) {
+  const base = path.split('/').pop();
+  if (base) evacPointImageUrlByBase.set(base, url);
+}
+
+async function ensureEvacPointData(onProgress?: (p: number | null) => void): Promise<void> {
+  if (evacPointData) return;
+  if (evacPointDataPromise) {
+    if (onProgress) onProgress(null); // 已在加载中:以不确定进度显示
+    return evacPointDataPromise;
+  }
+  evacPointDataPromise = (async () => {
+    try {
+      const [raw] = await fetchJsonBundle([evacPointDataUrl], onProgress);
+      const data = JSON.parse(raw);
+      rewriteRelativeImageAssets(data, evacPointImageUrlByBase); // ①
+      stripVideoLayersAndReclaimAssets(data); // ②
+      /* ③ 图标资源标记为「等比缩放、完整显示」(见 EVACPOINT_ICON_FIT):
+       *    内置的八张 48×48 图标与画框同尺寸,slice 与 meet 结果一致(默认画面不变);
+       *    但上传的任意长宽比自定义图标在默认 slice 下会被裁掉一条边,这里统一兜住。 */
+      for (const a of data.assets ?? []) if (a?.w && a?.h && a.t !== 'seq') a.pr = EVACPOINT_ICON_FIT;
+      evacPointData = data;
+    } catch (e) {
+      console.error('[撤离点开启动画数据解析失败]', e);
+      setStatus('撤离点开启动画数据解析失败: ' + (e as Error).message, true);
+    }
+    // 失败时允许下次重试
+    if (!evacPointData) evacPointDataPromise = null;
+  })();
+  return evacPointDataPromise;
 }
 
 /* 递归偏移对象中所有动画属性({a:1, k:[{t,...}]})的关键帧时刻 t */
@@ -6039,24 +6134,48 @@ const ANIMATIONS: AnimDef[] = [
     caps: {},
   },
   {
-    key: 'missile',
-    label: '制导导弹弹窗动画',
+    key: 'battlefield',
+    label: '大战场弹窗动画',
     meta: {
-      tags: ['制导导弹', '导弹', '制导', '弹窗', '打击', '锁定', '目标区域', 'missile', 'guided'],
+      tags: ['大战场', '战场', '弹窗', '状态提示', '图标', '图标可换', '文字', '模板', 'battlefield', 'popup'],
       accent: '#ef4444',
-      /* 161 帧 @60fps ≈ 2.68s(数据 op=161);载入后会按实测值校准 */
-      w: 1920, h: 1080, fps: 60, frames: 161,
-      features: ['文字可编辑', '颜色可调'],
+      /* 180 帧 @60fps = 3.00s(数据 op=180,画面第 144 帧就淡完,后面约 0.6s 是空尾);载入后会按实测值校准 */
+      w: 1920, h: 1080, fps: 60, frames: 180,
+      /* 这套动画的定位是「可换图标的通用弹窗模板」,所以特性标签把「图标可换」放第一位
+       * (画廊卡片只显示前 2 个)。 */
+      features: ['图标可换', '文字可编辑'],
     },
-    poster: posterOf('missile'),
-    data: () => guidedMissileData,
+    poster: posterOf('battlefield'),
+    data: () => battlefieldData,
     popup: () => null,
     audioUrl: null,
-    loaded: () => !!guidedMissileData,
-    load: (p) => ensureGuidedMissileData(p),
+    loaded: () => !!battlefieldData,
+    load: (p) => ensureBattlefieldData(p),
     /* caps 全空:与黑潮爆破默认弹窗同理由 —— 侧栏不出现「动画时长」区块,时间轴完全按 AE 导出原样
-     * (161 帧 / 2.68s);改时长的实现会搬动末尾淡出关键帧,对这套弹窗动画等于改数据。
+     * (180 帧 / 3.00s);改时长的实现会搬动末尾淡出关键帧,对这套弹窗动画等于改数据。
      * 也**没有 nextScan**:单段弹窗动画,没有第二段可接。 */
+    caps: {},
+  },
+  {
+    key: 'evacpoint',
+    label: '撤离点开启动画',
+    meta: {
+      tags: ['撤离点', '撤离', '开启', '打开', '紧急停堆', '状态提示', '弹窗', '图标', '图标可换', 'evacpoint', 'evac'],
+      accent: '#f97316',
+      /* 197 帧 @60fps ≈ 3.28s(数据 op=197);载入后会按实测值校准 */
+      w: 1920, h: 1080, fps: 60, frames: 197,
+      features: ['图标可换', '文字可编辑'],
+    },
+    poster: posterOf('evacpoint'),
+    data: () => evacPointData,
+    popup: () => null,
+    audioUrl: null,
+    loaded: () => !!evacPointData,
+    load: (p) => ensureEvacPointData(p),
+    /* caps 全空:侧栏不出现「动画时长」区块,时间轴完全按 AE 导出原样呈现(197 帧 / 3.28s)——
+     * 改时长的实现是把各图层末尾的淡出关键帧搬到新出点(见 applyMainDuration),
+     * 对这套动画会把文字/图标/黑底的 118→124 淡出一起搬走,画面淡出时刻就与 AE 对不上了。
+     * 同样**没有 nextScan**:单段动画,没有第二段可接。 */
     caps: {},
   },
 ];
@@ -6071,7 +6190,7 @@ function animDef(key: string = currentAnimKey): AnimDef | undefined {
 let showNextScan = false; // 是否显示二次扫描(主动画后紧接着播第二段)
 let nextDuration = 3.2; // 第二段时长(秒,默认 3.2s)
 
-/* ---------- 图标选择(位置暴露 / 任务弹窗动画) ----------
+/* ---------- 图标选择(位置暴露 / 任务弹窗 / 大战场弹窗动画) ----------
  * 位置暴露动画两段的图标各自是一个独立图片资源,因此可以分别指定:
  *   • 位置暴露(主段):animation2Data 的 image_0(图层 ind 5,恒存在);
  *   • 二次扫描(第二段):animation2NextData 的 image_0 —— 该段被 mergeNextInto/
@@ -6081,7 +6200,11 @@ let nextDuration = 3.2; // 第二段时长(秒,默认 3.2s)
  * 切换、以及重新合并时都不会退回内置 PNG。
  *
  * 任务弹窗动画只有一个图标位(数据里唯一的那张位图图层,资源 id 为 image_0),
- * 因此它没有选项卡与「跟随」开关,选中项记在 iconMissionName 里;两套动画的图标选择互不影响。 */
+ * 因此它没有选项卡与「跟随」开关,选中项记在 iconMissionName 里;各套动画的图标选择互不影响。
+ *
+ * 大战场弹窗动画同样只有一个图标位(两条位图图层 ind 5 / ind 6 共用同一份资源 image_0),
+ * 但它的候选列表来自**动画自己的素材目录** animations/animation_7/images/(见 BATTLEFIELD_ICON_OPTIONS),
+ * 选中项记在 iconBattlefieldName 里;写成资源地址时按 refId 去重逐个写,重新导出也不会漏改。 */
 type IconScope = 'main' | 'next';
 let iconScope: IconScope = 'main'; // 当前选项卡:正在为哪一段挑图标
 let iconMainName = DEFAULT_ICON_NAME; // 位置暴露图标
@@ -6114,13 +6237,82 @@ const MISSION_ICON_DEFAULT_NAME =
   MISSION_ICON_OPTION.name;
 let iconMissionName = MISSION_ICON_DEFAULT_NAME; // 任务弹窗动画当前选用的图标
 
+/* 大战场弹窗动画的内置图标:animations/animation_7/images/ 下的**全部 PNG**(当前是 27 / 38 / 155 / 167 / flag.png),
+ * 也就是这套动画自己的素材目录 —— 换图标就是在这几张之间切换,不去动其它动画的图标列表。
+ * 复用的就是上面载入资源地址时那个 glob(battlefieldImageModules),所以往目录里丢新 PNG
+ * 重启后就会自动出现在列表里,不需要改代码。
+ * 默认项必须正好是数据里已经引用的那张 167.png:applyIconsToData() 一进这套动画就会把资源地址
+ * 写成「当前选中的图标」,默认项若不对,光是切进来就会凭空改掉画面。 */
+const BATTLEFIELD_ICON_OPTIONS: { name: string; url: string }[] = Object.entries(battlefieldImageModules)
+  .map(([path, url]) => ({ name: path.split('/').pop() ?? '', url }))
+  .filter((o) => o.name)
+  .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+const BATTLEFIELD_ICON_DEFAULT_NAME =
+  BATTLEFIELD_ICON_OPTIONS.find((o) => o.name === '167.png')?.name ??
+  BATTLEFIELD_ICON_OPTIONS[0]?.name ??
+  '';
+let iconBattlefieldName = BATTLEFIELD_ICON_DEFAULT_NAME; // 大战场弹窗动画当前选用的图标
+
+/* 撤离点开启动画的内置图标:animations/animation_8/images/ 下的**全部 PNG**
+ * (当前 106 / 125 / 182 / 188 / 191 / 23 / 83 / 96.png),也就是这套动画自己的素材目录 ——
+ * 换图标就是在这几张之间切换,不去动其它动画的图标列表。
+ * 复用的就是上面载入资源地址时那个 glob(evacPointImageModules),所以往目录里丢新 PNG
+ * 重启后就会自动出现在列表里,不需要改代码。
+ * 默认项必须正好是数据里已经引用的那张 83.png:applyIconsToData() 一进这套动画就会把资源地址
+ * 写成「当前选中的图标」,默认项若不对,光是切进来就会凭空改掉画面。
+ * 这八张都是 48×48,与资源声明的画框(assets[].w/h = 48×48)完全一致,所以换图标不会变形/裁切;
+ * 上传的非正方图标由 EVACPOINT_ICON_FIT 兜住(见下)。 */
+const EVACPOINT_ICON_OPTIONS: { name: string; url: string }[] = Object.entries(evacPointImageModules)
+  .map(([path, url]) => ({ name: path.split('/').pop() ?? '', url }))
+  .filter((o) => o.name)
+  .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+const EVACPOINT_ICON_DEFAULT_NAME =
+  EVACPOINT_ICON_OPTIONS.find((o) => o.name === '83.png')?.name ??
+  EVACPOINT_ICON_OPTIONS[0]?.name ??
+  '';
+let iconEvacPointName = EVACPOINT_ICON_DEFAULT_NAME; // 撤离点开启动画当前选用的图标
+
+/* 图标资源的 preserveAspectRatio(写在 assets[].pr 上)。
+ *
+ * 为什么必须显式指定:lottie 的默认值是 **`xMidYMid slice`** —— 把图片按资源声明的 w×h
+ * 当画框,**等比放大到铺满后居中裁切**。这套动画的图标资源声明为 91×92(≈1:1),
+ * 所以只有「接近正方形」的图标能完整显示:
+ *   167.png 91×92 → 完全不裁;155.png 104×104 → 只裁掉 1px;
+ *   而 27.png 123×108(1.14:1)裁掉左右各 ~7px、38.png 88×109(0.81:1)裁掉上下各 ~10px、
+ *   flag.png 71×58(1.22:1)裁掉左右各 ~11px —— 这就是选这几张时「显示不正常 / 像缺一块」的原因。
+ * 换成 **`xMidYMid meet`** 后:图片等比缩放到**完整塞进** 91×92 画框并居中,不裁切、不拉伸;
+ * 宽高比与画框不同的图标会在某个方向上留出透明边(居中的「信箱式」留白),画面上的位置与
+ * 尺寸档位不变(SVG 与 Canvas 两条渲染路径对这个值的行为一致,已按 lottie 源码逐行核对:
+ * SVG 侧是 <image preserveAspectRatio>,Canvas 侧是 CVImageElement.createContent 的裁剪分支)。
+ * 对原本就 1:1 的 167.png 来说 meet 与 slice 结果完全相同,所以默认画面不会变。 */
+const BATTLEFIELD_ICON_FIT = 'xMidYMid meet';
+
+/* 撤离点开启动画图标资源的 preserveAspectRatio,规则与大战场弹窗动画完全一致(BATTLEFIELD_ICON_FIT):
+ * 内置的八张素材都是 48×48,与资源声明画框(48×48)相同,`slice` 与 `meet` 结果没有差别,默认画面不变;
+ * 但「上传自定义图标」允许任意长宽比,默认的 `xMidYMid slice` 会按 48×48 画框**铺满后居中裁切**,
+ * 于是非正方形的自定义图标会被切掉一条边(用户看到的就是「缺一块」)。写成 `meet` 后一律等比缩放到
+ * **完整塞进**画框并居中,不裁切也不拉伸,宽高比不符时只留透明边;SVG 与 Canvas 两条渲染路径都认这个值。 */
+const EVACPOINT_ICON_FIT = 'xMidYMid meet';
+
+/* 只有「单个图标位」的动画:任务弹窗动画(数据里唯一那张位图)与大战场弹窗动画
+ * (两条位图图层共用一份资源),以及撤离点开启动画(唯一那张 48×48 小图标)。
+ * 这类动画没有选项卡、没有「跟随」概念,图标选择只作用于唯一那个图标位。 */
+function isSingleIconScope(key: string = currentAnimKey): boolean {
+  return key === 'mission' || key === 'battlefield' || key === 'evacpoint';
+}
+
 /* 定位当前动画的「图标图层」——用于判断该动画有没有图标位、以及不透明度滑块该挂在哪一层上。
  *   • 位置暴露:按图层名「图标_可替换」找(数据里就是这个名字,主段 ind 5 / 二次扫描 ind 105);
- *   • 任务弹窗:数据里唯一的那张位图图层(叠加序列图层不算,它们逐帧换图,没有单一资源)。
- * 其它动画(撤离 / 核电站功率)没有图标位,返回 null,「图标选择」区块整块隐藏。 */
+ *   • 任务弹窗:数据里唯一的那张位图图层(叠加序列图层不算,它们逐帧换图,没有单一资源);
+ *   • 大战场弹窗:同样是位图层(数据里有两条 ind 5 / ind 6,共用同一份资源 image_0,
+ *     这里只用来判断「有没有图标位」,改写资源时按 refId 去重逐个写,见 applyIconUrlToScope);
+ *   • 撤离点开启:同样是唯一那张位图图层(ind 11,资源 image_0,数据里就是 83.png)。
+ * 其它动画(撤离 / 核电站功率 / 地图标题 / 黑潮爆破)没有图标位,返回 null,「图标选择」区块整块隐藏。 */
 function iconLayerOf(data: any, key: string = currentAnimKey): any | null {
   const layers: any[] = data?.layers ?? [];
   if (key === 'mission') return layers.find((l: any) => l.ty === 2 && !isSeqLayer(l)) ?? null;
+  if (key === 'battlefield') return layers.find((l: any) => l.ty === 2 && !isSeqLayer(l)) ?? null;
+  if (key === 'evacpoint') return layers.find((l: any) => l.ty === 2 && !isSeqLayer(l)) ?? null;
   if (key === 'exposed') return layers.find((l: any) => l.ty === 2 && l.nm === '图标_可替换') ?? null;
   return null;
 }
@@ -6283,10 +6475,13 @@ document.getElementById('btnNudgeReset')?.addEventListener('click', () => change
 
 /* 内置图标素材按动画区分:
  *  • 位置暴露动画用 animations/animation_2/icon 下的干员技能图标(ICON_OPTIONS);
- *  • 任务弹窗动画用动画自带的哈夫币图标(排在最前),后接同一套技能图标,方便换用其它图标。
- * 用户上传的自定义图标对两套动画都可见,排在前面便于一眼看到自己加的那张。 */
+ *  • 任务弹窗动画用 animations/animation_4/icon 下的图标(MISSION_ICON_OPTIONS);
+ *  • 大战场弹窗动画用动画自己素材目录里的几张图标(BATTLEFIELD_ICON_OPTIONS);
+ *  • 撤离点开启动画同样用动画自己素材目录里的几张图标(EVACPOINT_ICON_OPTIONS)。
+ * 用户上传的自定义图标对这几套动画都可见,排在前面便于一眼看到自己加的那张。 */
 function builtinIconOptions(): { name: string; url: string }[] {
-  // 任务弹窗动画用 animations/animation_4/icon/ 的图标;位置暴露动画用 animations/animation_2/icon/ 的干员技能图标
+  if (currentAnimKey === 'battlefield') return BATTLEFIELD_ICON_OPTIONS;
+  if (currentAnimKey === 'evacpoint') return EVACPOINT_ICON_OPTIONS;
   return currentAnimKey === 'mission' ? MISSION_ICON_OPTIONS : ICON_OPTIONS;
 }
 function allIconOptions() {
@@ -6303,8 +6498,10 @@ function findIconOption(name: string) {
 }
 
 /* 某段实际生效的图标名:二次扫描在「跟随位置暴露」时取位置暴露的值;
- * 任务弹窗动画与分段无关,恒取它自己的选择。 */
+ * 任务弹窗 / 大战场弹窗 / 撤离点开启动画与分段无关,恒取它们自己的选择。 */
 function effectiveIconName(scope: IconScope): string {
+  if (currentAnimKey === 'battlefield') return iconBattlefieldName;
+  if (currentAnimKey === 'evacpoint') return iconEvacPointName;
   if (currentAnimKey === 'mission') return iconMissionName;
   if (scope === 'main') return iconMainName;
   return followMainIcon ? iconMainName : iconNextName;
@@ -6340,6 +6537,26 @@ function applyIconUrlToScope(scope: IconScope, url: string): boolean {
     if (layer?.refId && setAssetImageUrl(missionData, layer.refId, url)) updated = true;
     return updated;
   }
+  /* 大战场弹窗动画:数据里有两条位图图层(ind 5 / ind 6),引用的是同一份资源(image_0)。
+   * 按「所有 ty:2 非序列图层引用的资源」去重后逐个改写 —— 重新导出换了资源 id / 加减图层都不会漏改。 */
+  if (currentAnimKey === 'battlefield') {
+    const ids = new Set<string>();
+    for (const l of battlefieldData?.layers ?? []) {
+      if (l?.ty === 2 && !isSeqLayer(l) && typeof l.refId === 'string') ids.add(l.refId);
+    }
+    for (const id of ids) if (setAssetImageUrl(battlefieldData, id, url)) updated = true;
+    return updated;
+  }
+  /* 撤离点开启动画:与大战场同形 —— 唯一(或若干)ty:2 位图图层引用同一份资源,
+   * 按 refId 去重后逐个改写,重新导出换了资源 id / 加减图层都不会漏改。 */
+  if (currentAnimKey === 'evacpoint') {
+    const ids = new Set<string>();
+    for (const l of evacPointData?.layers ?? []) {
+      if (l?.ty === 2 && !isSeqLayer(l) && typeof l.refId === 'string') ids.add(l.refId);
+    }
+    for (const id of ids) if (setAssetImageUrl(evacPointData, id, url)) updated = true;
+    return updated;
+  }
   if (scope === 'main') {
     // 位置暴露(主段):资源恒为 image_0。注意不能顺带写 image_0_n ——那是第二段的资源
     if (setAssetImageUrl(animation2Data, 'image_0', url)) updated = true;
@@ -6355,8 +6572,8 @@ function applyIconUrlToScope(scope: IconScope, url: string): boolean {
 /* 按当前状态刷新两段图标资源。两段都写:即便处于「跟随」状态,二次扫描资源也要对齐,
  * 否则取消跟随、或关闭再开启二次扫描时第二段会退回内置 PNG。 */
 function applyIconsToData(): boolean {
-  // 任务弹窗动画只有一个图标位,写一次即可
-  if (currentAnimKey === 'mission') return applyIconUrlToScope('main', effectiveIconUrl('main'));
+  // 单图标位动画(任务弹窗 / 大战场弹窗)只有一个图标位,写一次即可
+  if (isSingleIconScope()) return applyIconUrlToScope('main', effectiveIconUrl('main'));
   let updated = false;
   if (applyIconUrlToScope('main', effectiveIconUrl('main'))) updated = true;
   if (applyIconUrlToScope('next', effectiveIconUrl('next'))) updated = true;
@@ -6366,7 +6583,11 @@ function applyIconsToData(): boolean {
 /* 选中某段的图标。在「二次扫描」页点选图标即视为单独指定,自动取消「跟随位置暴露」 */
 function setIconForScope(scope: IconScope, name: string) {
   if (!findIconOption(name)) return;
-  if (currentAnimKey === 'mission') {
+  if (currentAnimKey === 'battlefield') {
+    iconBattlefieldName = name; // 单图标位:没有分段与跟随
+  } else if (currentAnimKey === 'evacpoint') {
+    iconEvacPointName = name; // 单图标位:没有分段与跟随
+  } else if (currentAnimKey === 'mission') {
     iconMissionName = name;
   } else if (scope === 'main') {
     iconMainName = name;
@@ -6380,6 +6601,7 @@ function setIconForScope(scope: IconScope, name: string) {
   }
   applyIconsToData();
   syncIconScopeUI();
+  refreshBattlefieldPresetHighlight(); // 换了图标 → 预设高亮可能要跟着变
   reRenderPreservingState();
 }
 
@@ -6500,7 +6722,7 @@ function syncIconScopeUI(data: any = currentData) {
 function renderIconList() {
   const opts = allIconOptions();
   const activeName = effectiveIconName(iconScope);
-  const following = currentAnimKey !== 'mission' && iconScope === 'next' && followMainIcon;
+  const following = !isSingleIconScope() && iconScope === 'next' && followMainIcon;
   iconCount.textContent = '· ' + opts.length + ' 个' + (following ? ' · 跟随位置暴露' : '');
   iconList.innerHTML = opts
     .map(
@@ -6565,12 +6787,189 @@ iconFile.addEventListener('change', () => {
     while (taken.has(iconDisplayName(name))) name = base + ' (' + n++ + ')';
     customIcons.unshift({ name, url });
     setIconForScope(iconScope, name);
-    const where = currentAnimKey === 'mission' ? '任务弹窗动画' : iconScope === 'next' ? '二次扫描' : '位置暴露';
+    const where = isSingleIconScope()
+      ? (currentAnimKey === 'battlefield' ? '大战场弹窗动画'
+        : currentAnimKey === 'evacpoint' ? '撤离点开启动画' : '任务弹窗动画')
+      : iconScope === 'next' ? '二次扫描' : '位置暴露';
     setStatus('已应用自定义图标「' + iconDisplayName(name) + '」到' + where);
   };
   reader.onerror = () => setStatus('读取图片失败', true);
   reader.readAsDataURL(file);
 });
+
+/* ---------- 预设(大战场弹窗动画) ----------
+ * 预设表来自 animations/animation_7/preset.txt(?raw 打包进 JS,不到 1KB)。格式是给人手维护的小 DSL:
+ *   preset#1 {
+ *     icon:27.png;                        // animations/animation_7/images/ 下的文件名
+ *     name:"区域烟幕";                     // 预设名(侧栏列表上显示的就是它)
+ *     title:"我军已呼叫烟幕";               // 写到「主标题」图层
+ *     detail:"利用烟幕掩护,迅速隐蔽行动";   // 写到「内容」图层
+ *   }
+ * 解析写得比较宽松:块头 `preset#N { ... }` 里按 `键: 值;` 逐条取,值可以带双引号或单引号
+ * (带引号时值里允许出现 `;` 和 `:`),键名大小写不敏感,多余字段忽略、缺字段留空、空块跳过。
+ * 手工维护的文本文件不该因为一个笔误就让整块功能炸掉 —— 读不出来最多是那条预设少改一样东西。 */
+type BattlefieldPreset = { name: string; icon: string; title: string; detail: string };
+
+function parseBattlefieldPresets(raw: string): BattlefieldPreset[] {
+  const out: BattlefieldPreset[] = [];
+  for (const block of raw.matchAll(/preset\s*#?\s*\d*\s*\{([^}]*)\}/gi)) {
+    const fields = new Map<string, string>();
+    for (const f of block[1].matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?:"([^"]*)"|'([^']*)'|([^;\r\n]*?))\s*;/g)) {
+      fields.set(f[1].toLowerCase(), (f[2] ?? f[3] ?? f[4] ?? '').trim());
+    }
+    const preset = {
+      name: fields.get('name') ?? '',
+      icon: fields.get('icon') ?? '',
+      title: fields.get('title') ?? '',
+      detail: fields.get('detail') ?? '',
+    };
+    if (!preset.name && !preset.title && !preset.detail) continue; // 空块 / 全没读出来:跳过
+    out.push(preset);
+  }
+  return out;
+}
+
+const BATTLEFIELD_PRESETS: BattlefieldPreset[] = parseBattlefieldPresets(battlefieldPresetRaw);
+
+/* 定位「主标题 / 内容」这两个文字图层:优先按图层名(数据里就是这两个名字,而页面上的改字只改内容
+ * 不改图层名),名字对不上时(例如从 AE 重新导出回了原文案)退回「按首个不透明度关键帧的时刻排序」——
+ * 先淡入的当主标题、后淡入的当内容,与本套动画的出场顺序一致,所以重导出后预设照样能用。 */
+function battlefieldTextLayers(data: any): { title: any | null; detail: any | null } {
+  const texts = collectTextLayers(data);
+  const findByName = (n: string) => {
+    const hit = texts.find((t) => t.nm === n);
+    return hit ? findLayerInData(data, hit.ind) : null;
+  };
+  const title = findByName('主标题');
+  const detail = findByName('内容');
+  if (title && detail) return { title, detail };
+  const opacityStart = (l: any) => {
+    const k = l?.ks?.o?.k;
+    return Array.isArray(k) ? Math.min(...k.map((kf: any) => (typeof kf?.t === 'number' ? kf.t : Infinity))) : Infinity;
+  };
+  const ordered = texts
+    .map((t) => findLayerInData(data, t.ind))
+    .filter(Boolean)
+    .sort((a, b) => opacityStart(a) - opacityStart(b));
+  return { title: title ?? ordered[0] ?? null, detail: detail ?? ordered[1] ?? null };
+}
+
+/* 当前画面正等于哪一条预设(图标 + 两行文字全对上才算),用于高亮选中项。
+ * 不做「记住上次点了哪条」的状态:手动改过文字 / 图标之后自然就匹配不上,高亮会自己消失。 */
+function activeBattlefieldPresetIndex(): number {
+  const data = battlefieldData;
+  if (!data) return -1;
+  const { title, detail } = battlefieldTextLayers(data);
+  const t = title ? textOfLayer(title) : '';
+  const d = detail ? textOfLayer(detail) : '';
+  return BATTLEFIELD_PRESETS.findIndex(
+    (p) => p.title === t && p.detail === d && p.icon === iconBattlefieldName);
+}
+
+/* 预设高亮只跟「图标 + 两行文字」有关:手改文字 / 换图标 / 重置文字之后都要刷新一次。
+ * 只重画预设列表本身,不要顺手调 updateInfo() —— 那会重建整个侧栏,把用户正在输入的 textarea
+ * 一起换掉,输入焦点与光标就飞了(所以手工编辑走这条轻量路径,套用预设才用 updateInfo)。 */
+function refreshBattlefieldPresetHighlight() {
+  if (!presetSection.hidden) renderBattlefieldPresets();
+}
+
+/* 预设列表默认**收起**:每条预设都带两行文案预览,5 条全铺开会占掉近半屏侧栏。
+ * 折叠状态只记在内存里(会话内有效,与侧栏其它开关一致,不写 localStorage);
+ * 收起时标题行右侧仍会显示状态提示(「当前:预设名」/「点开选择」),所以合上也一眼看得到。
+ * 另外这一行的标题行是做成「卡片按钮」而不是灰标题的 —— 可点控件要一眼能找到(样式见 style.css)。 */
+let presetExpanded = false;
+
+/* 标题行右侧的状态提示:命中某条预设时显示「当前:预设名」(强调色),否则在收起状态下提示「点开选择」。
+ * 展开且没命中时留空 —— 此时列表就在下面,不必再提示。 */
+function updatePresetHint() {
+  if (presetSection.hidden || !BATTLEFIELD_PRESETS.length) {
+    presetHint.textContent = '';
+    presetHint.classList.remove('is-current');
+    return;
+  }
+  const active = activeBattlefieldPresetIndex();
+  const current = active >= 0 ? (BATTLEFIELD_PRESETS[active].name || '预设 ' + (active + 1)) : '';
+  presetHint.textContent = current ? '当前:' + current : (presetExpanded ? '' : '点开选择');
+  presetHint.classList.toggle('is-current', !!current);
+}
+
+function syncPresetExpanded() {
+  presetBody.hidden = !presetExpanded;
+  presetToggle.setAttribute('aria-expanded', String(presetExpanded));
+  presetToggle.classList.toggle('is-open', presetExpanded);
+  updatePresetHint();
+}
+presetToggle.addEventListener('click', () => {
+  presetExpanded = !presetExpanded;
+  syncPresetExpanded();
+});
+syncPresetExpanded(); // 与 HTML 里的初始 hidden / aria-expanded 对齐(单一来源)
+
+function renderBattlefieldPresets() {
+  if (!BATTLEFIELD_PRESETS.length) {
+    presetCount.textContent = '';
+    presetList.innerHTML = '';
+    updatePresetHint();
+    return;
+  }
+  const active = activeBattlefieldPresetIndex();
+  presetCount.textContent = '· ' + BATTLEFIELD_PRESETS.length + ' 个';
+  updatePresetHint(); // 标题行右侧的「当前:预设名」/「点开选择」
+  presetList.innerHTML = BATTLEFIELD_PRESETS.map((p, i) => {
+    const url = BATTLEFIELD_ICON_OPTIONS.find((o) => o.name === p.icon)?.url ?? '';
+    const name = p.name || '预设 ' + (i + 1);
+    return (
+      '<li class="preset-item' + (i === active ? ' is-active' : '') + '" data-index="' + i + '"' +
+      ' title="套用预设「' + esc(name) + '」:图标 ' + esc(p.icon) + '">' +
+      (url ? '<img class="preset-thumb" src="' + url + '" alt="" />' : '<span class="preset-thumb"></span>') +
+      '<span class="preset-texts">' +
+      '<span class="preset-name">' + esc(name) + '</span>' +
+      '<span class="preset-sample">' + esc(p.title) + (p.detail ? '<br />' + esc(p.detail) : '') + '</span>' +
+      '</span>' +
+      '</li>'
+    );
+  }).join('');
+  presetList.querySelectorAll<HTMLLIElement>('.preset-item').forEach((li) => {
+    li.addEventListener('click', () => {
+      const index = Number(li.dataset.index);
+      if (index === activeBattlefieldPresetIndex()) return; // 已经就是这一条:不必重建
+      applyBattlefieldPreset(index);
+    });
+  });
+}
+
+/* 套用一条预设:图标 + 两行文字一起改,最后只重建一次动画。
+ * 图标文件名在素材目录里找不到时只跳过图标并在状态栏点名,文案照常写入 —— 用户改 preset.txt 时
+ * 打错一个文件名,不该让整条预设失效。 */
+function applyBattlefieldPreset(index: number) {
+  const preset = BATTLEFIELD_PRESETS[index];
+  const data = battlefieldData;
+  if (!preset || !data) return;
+  const { title, detail } = battlefieldTextLayers(data);
+  const missed: string[] = [];
+  if (preset.title && title) setLayerText(title, preset.title);
+  else if (preset.title) missed.push('主标题图层');
+  if (preset.detail && detail) setLayerText(detail, preset.detail);
+  else if (preset.detail) missed.push('内容图层');
+  const iconOpt = BATTLEFIELD_ICON_OPTIONS.find((o) => o.name === preset.icon);
+  if (iconOpt) {
+    iconBattlefieldName = iconOpt.name;
+    applyIconsToData();
+  } else if (preset.icon) {
+    missed.push('图标 ' + preset.icon);
+  }
+  // 与「手改文字」走同一条收尾路径(这两个函数各自带动画判断,对这套动画是空操作)
+  adaptDikuangWidth();
+  adaptMaptitlePlateWidth();
+  /* 重画侧栏:预设改了文案,「文字图层」的输入框要跟着显示新文案(不然输入框还停在旧文案上,
+   * 与画面不一致);updateInfo 里也会顺带刷新预设高亮与图标列表之外的各列表。
+   * 这里不是输入过程中,所以整块重画是安全的(与手改文字那条轻量路径不同,见 refreshBattlefieldPresetHighlight)。 */
+  updateInfo(data);
+  syncIconScopeUI(data); // 图标列表的选中态与缩略图(updateInfo 不管图标列表)
+  const label = preset.name || '预设 ' + (index + 1);
+  setStatus('已套用预设「' + label + '」' + (missed.length ? '(未找到:' + missed.join('、') + ')' : ''), missed.length > 0);
+  reRenderPreservingState(); // 一次重建:文字与图标一起生效
+}
 
 /* 切换动画。
  * 数据包按需加载:仅首次进入该动画时才下载,期间显示加载浮层与实时进度,结束后关闭。
@@ -6656,6 +7055,12 @@ async function switchAnimation(key: string) {
     chkMissionReward.checked = missionRewardShown;
     setMissionRewardVisible(missionRewardShown, false);
   }
+  /* 预设区块:只有大战场弹窗动画有预设表(animations/animation_7/preset.txt)。
+   * 列表在 loadData 之前先画一次,配合 updateInfo 在重建后再刷新选中态。 */
+  const hasPresets = key === 'battlefield' && BATTLEFIELD_PRESETS.length > 0;
+  presetSection.hidden = !hasPresets;
+  if (hasPresets) renderBattlefieldPresets();
+  else presetList.innerHTML = '';
   // 动画时长区块(时长 + 二次扫描开关 + 二次扫描时长):由注册项的 caps.timing 决定
   timingSection.hidden = !def.caps.timing;
   /* 「二次扫描」勾选行单独按 caps.nextScan 显隐 —— 它只是碰巧和时长滑杆放在同一区块里,

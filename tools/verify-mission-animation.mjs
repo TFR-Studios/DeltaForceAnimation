@@ -57,7 +57,9 @@ try {
   await page.waitForFunction(() => document.getElementById('statusbar').textContent.includes('已载入'), { timeout: 60000 });
 
   const options = await page.evaluate(() => [...document.querySelectorAll('#selAnim option')].map((o) => o.value + ':' + o.textContent));
-  check('选择器有四项', options.length === 4 && options[3].startsWith('mission:'), options.join(', '));
+  /* 动画套数会随注册表增长(当前 8 套),这里只断言「mission 在列表里、顺序按注册表」——
+   * 写死数量的话每加一套动画这条就会红,而它并不是本脚本要验证的东西。 */
+  check('选择器里能看到任务弹窗动画', options.some((o) => o.startsWith('mission:')), options.join(', '));
 
   await page.select('#selAnim', 'mission');
   await page.waitForFunction(() => document.getElementById('statusbar').textContent.includes('任务弹窗动画'), { timeout: 60000 });

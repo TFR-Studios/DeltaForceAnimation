@@ -201,6 +201,29 @@
             <input type="checkbox" id="chkMissionReward" checked /> 显示预期报酬 / 数字 / 图标
           </label>
         </div>
+        <!-- 预设(仅大战场弹窗动画显示):按 animations/animation_7/preset.txt 一键套用「图标 + 主标题 + 内容」 -->
+        <!-- 预设表是纯文本配置,由 main.ts 用 ?raw 导入后在浏览器里解析 —— 改预设只需要改那个 txt,不用碰代码 -->
+        <!-- 选中态的判据是「图标与两行文字全都对得上」,所以手动改过文字 / 图标之后高亮会自动消失(见 main.ts) -->
+        <!-- 默认**收起**:预设条目带两行文案预览,5 条全铺开会占掉近半屏侧栏,所以只留一行可点的标题。
+              这一行刻意做成「卡片按钮」而不是和别的区块一样的灰标题 —— 它是可点控件,要一眼能找到:
+              圆角边框 + 面板底色 + 强调色箭头,悬停/展开时边框变强调色;右侧常驻一句状态提示
+              (收起且未命中预设时显示「点开选择」,命中后显示「当前:预设名」)。 -->
+        <div id="presetSection" hidden>
+        <h3 class="preset-head">
+          <button type="button" id="presetToggle" class="preset-toggle" aria-expanded="false" aria-controls="presetBody" title="展开 / 收起预设列表:一项 = 图标 + 两行文案,点一下整套换掉">
+            <svg class="preset-caret" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+              <path d="M6 2.6 12.9 8 6 13.4z" />
+            </svg>
+            <span class="preset-title">预设</span>
+            <span class="preset-count" id="presetCount"></span>
+            <span class="preset-hint" id="presetHint"></span>
+          </button>
+        </h3>
+        <div id="presetBody" hidden>
+          <ul id="presetList"></ul>
+          <p class="preset-note">点一项就把图标与两行文字一起换掉;之后还能在下面的「文字图层 / 图标选择」里继续微调。</p>
+        </div>
+        </div>
         <!-- 文字图层:每项可改文案与颜色,右上角「重置」恢复该图层在 JSON 里的原始文案与颜色 -->
         <h3>文字图层 <span id="textCount"></span></h3>
         <ul id="textList"></ul>

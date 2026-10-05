@@ -12,6 +12,13 @@ declare module '*.json?raw' {
   export default content;
 }
 
+/* ?raw 的文本配置:大战场弹窗动画的预设表 animations/animation_7/preset.txt 走这条路 ——
+ * 它是给人手改的配置,进站点后在 main.ts 里解析(见 parseBattlefieldPresets),不参与构建期解析。 */
+declare module '*.txt?raw' {
+  const content: string;
+  export default content;
+}
+
 /* ?url:导入静态资源地址(默认导出字符串),音效走这条路,交给 Audio / lottie 的音频工厂加载,
  * 且不会被打进首屏 JS。
  * 这里只写了 .mp3;main.ts 里还有一处 .wav 的 ?url 导入,由 vite/client 的通用 ?url 声明兜底。
